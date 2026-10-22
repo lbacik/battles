@@ -426,7 +426,11 @@ export function startBattle(scenario, options = {}) {
     activeSide: startingSide,
     phase: TURN_PHASE_ORDERS,
     status: BATTLE_STATUS_ONGOING,
-    units: scenario.units.map((unit) => ({ ...cloneValue(unit), cohesion: STEADY_COHESION })),
+    units: scenario.units.map((unit) => ({
+      ...cloneValue(unit),
+      cohesion: STEADY_COHESION,
+      engaged: null,
+    })),
     events,
   };
 }

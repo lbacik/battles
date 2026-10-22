@@ -375,7 +375,7 @@ function orderOfBattleView(document) {
           <div class="side-name"><span class="swatch" style="background:${esc(side.color)}"></span>${esc(side.name)}</div>
           <p class="side-count">${sideUnits.length} ${sideUnits.length === 1 ? 'unit' : 'units'} · ${soldiers.toLocaleString('en')} soldiers</p>
           ${sideUnits
-            .map((unit) => `<div class="unit-row"><span class="swatch" style="background:${esc(side.color)}"></span><div><div class="unit-name">${esc(unit?.name || 'Unit')}</div><div class="unit-detail">${esc(troopDisplayName(unit?.troopType))} · ${esc(unit?.soldiers)} soldiers · ${esc(unit?.cohesion || '')}</div></div></div>`)
+            .map((unit) => `<div class="unit-row"><span class="swatch" style="background:${esc(side.color)}"></span><div><div class="unit-name">${esc(unit?.name || 'Unit')}</div><div class="unit-detail">${esc(troopDisplayName(unit?.troopType))} · ${esc(unit?.soldiers)} soldiers · ${esc(unit?.cohesion || '')}${unit?.engaged?.unitId ? ` · Engaged (${esc(unit.engaged.aspect || unit.engaged.edge || '')})` : ''}</div></div></div>`)
             .join('')}
         </div>`;
       })
@@ -390,13 +390,22 @@ function turnPanelView() {
   const activeSide = battle.activeSide;
   const controller = controllerOf(battle, activeSide);
   const automated = isAutomatedController(controller);
-  // The orders summary comes from the engine, not from UI rules: the only
-  // permitted order in this slice is Hold, so an empty commit holds every unit.
+  // The orders summary comes from the engine, not from UI rules: drafting is
+  // still empty commits (all units hold), while the summary reports the
+  // engine's charge hints and engagements.
   let ordersSummary = '';
   try {
     const actions = availableActions(battle, activeSide);
     const ownCount = actions.units.length;
-    ordersSummary = `<div class="kv"><dt>Orders</dt><dd data-testid="orders-summary">All ${ownCount} ${ownCount === 1 ? 'unit holds' : 'units hold'} (empty turn)</dd></div>`;
+    const hints = actions.units.reduce((sum, entry) => sum + entry.chargeCandidates.length, 0);
+    const engagedCount = battle.units.filter(
+      (unit) => unit.side === activeSide && unit?.engaged?.unitId,
+    ).length;
+    const extra = [
+      hints === 1 ? '1 charge hint' : `${hints} charge hints`,
+      engagedCount === 1 ? '1 engaged' : `${engagedCount} engaged`,
+    ].join(' · ');
+    ordersSummary = `<div class="kv"><dt>Orders</dt><dd data-testid="orders-summary">All ${ownCount} ${ownCount === 1 ? 'unit holds' : 'units hold'} (empty turn) · ${extra}</dd></div>`;
   } catch {
     ordersSummary = '';
   }
@@ -466,7 +475,7 @@ function battleView() {
       <span class="active-side" data-testid="active-side"><span class="swatch" style="background:${esc(sideColorOf(document, activeSide))}"></span>${esc(sideName(document, activeSide))}</span>
       <span class="phase">Phase: ${esc(battle.phase)}</span>
       <span class="spacer"></span>
-      <span class="phase">All units hold · empty turns only</span>
+      <span class="phase">Drafting: empty turns only (Hold, Move, and Charge validate in the engine)</span>
     </div>
     <main class="workspace">
       <aside class="left-panel">${orderOfBattleView(document)}</aside>

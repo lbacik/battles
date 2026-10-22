@@ -3,13 +3,15 @@
 //
 // The manoeuvre slice of the framework-free engine package: two Passive
 // players can play a battle turn after turn through the shared player
-// contract and a runner (see `./players.js`), with Hold and Move orders. An
-// accepted Move carries a deterministic preview of the unit's footprint after
-// the Movement phase, and resolution executes moves in the given order (see
-// `./movement.js` for the geometry). This module imports only the domain
-// model, the ruleset package, and the movement geometry — no React, no
-// Next.js, no DOM, no Node APIs — so it runs unchanged in the browser, in
-// Node unit tests, and in any future shell.
+// contract and a runner (see `./players.js`), with Hold, Move, and Charge
+// orders. An accepted Move carries a deterministic preview of the unit's
+// footprint after the Movement phase, an accepted Charge carries the flush
+// contact preview plus the contact record, and resolution executes moves and
+// charges in the given order (see `./movement.js` and `./charge.js` for the
+// geometry). This module imports only the domain model, the ruleset package,
+// and the movement geometry — no React, no Next.js, no DOM, no Node APIs —
+// so it runs unchanged in the browser, in Node unit tests, and in any future
+// shell.
 //
 // The contract, per ADR 0005:
 //
@@ -34,6 +36,11 @@
 import { deriveFootprint } from './geometry.js';
 import { RULESET_PARAMETERS, TROOP_TYPE_CATALOGUE } from './polis-classical.js';
 import {
+  chargeCandidatesFor,
+  fightingFiles,
+  validateChargeOnField,
+} from './charge.js';
+import {
   footprintAt,
   footprintPreview,
   movementAllowanceM,
@@ -53,12 +60,26 @@ export const SUBMISSION_FORMAT_VERSION = TURN_CONTRACT_VERSION;
 export const PLAYER_VIEW_FORMAT_VERSION = TURN_CONTRACT_VERSION;
 export const AVAILABLE_ACTIONS_FORMAT_VERSION = TURN_CONTRACT_VERSION;
 
-// Order kinds. Hold and Move are permitted in this slice; Charge and Shoot
-// are known kinds the engine reports as unavailable until their slices land.
+// Order kinds. Hold, Move, and Charge are permitted in this slice; Reform,
+// Shoot, Rally, and Withdraw are known kinds the engine reports as
+// unavailable until their slices land (Withdraw and Rally still gate
+// permissions: an engaged unit may only Hold or Withdraw, a routed unit may
+// only Rally).
 export const ORDER_KIND_HOLD = 'Hold';
 export const ORDER_KIND_MOVE = 'Move';
-export const ORDER_KINDS = Object.freeze([ORDER_KIND_HOLD, ORDER_KIND_MOVE]);
-export const KNOWN_ORDER_KINDS = Object.freeze(['Hold', 'Move', 'Charge', 'Shoot']);
+export const ORDER_KIND_CHARGE = 'Charge';
+export const ORDER_KIND_WITHDRAW = 'Withdraw';
+export const ORDER_KIND_RALLY = 'Rally';
+export const ORDER_KINDS = Object.freeze([ORDER_KIND_HOLD, ORDER_KIND_MOVE, ORDER_KIND_CHARGE]);
+export const KNOWN_ORDER_KINDS = Object.freeze([
+  'Hold',
+  'Move',
+  'Charge',
+  'Reform',
+  'Shoot',
+  'Rally',
+  'Withdraw',
+]);
 
 // Resolution phases, in order. Each runs every turn, even while empty.
 export const TURN_PHASES = Object.freeze(['Movement', 'Shooting', 'Combat', 'Cohesion']);
@@ -77,6 +98,11 @@ export const REJECTION_BATTLEFIELD_EDGE = 'battlefield_edge';
 export const REJECTION_FORBIDDEN_GROUND = 'forbidden_ground';
 export const REJECTION_OUT_OF_REACH = 'out_of_reach';
 export const REJECTION_CONTACT_WITH_ENEMY = 'contact_with_enemy';
+// Charge rejection codes (see `./charge.js`). `order_not_permitted` also
+// gates Move and Charge for engaged, routed, and disordered units.
+export const REJECTION_ORDER_NOT_PERMITTED = 'order_not_permitted';
+export const REJECTION_OUTSIDE_FRONT_ARC = 'outside_front_arc';
+export const REJECTION_INVALID_CHARGE = 'invalid_charge';
 
 // Whole-submission refusal codes: a stale turn number or a side that is not
 // active refuses the submission before any order is examined.
@@ -154,6 +180,24 @@ function statusOf(unit) {
   return unit.cohesion === 'Routed' ? 'routed' : 'active';
 }
 
+// The engaged contact of a unit for the player view: what it is engaged with
+// and on which edge, with the aspect, the engaged frontage, and its own
+// fighting files. Unengaged units carry nulls (the Charge slice sets the
+// contact on resolution).
+function engagedOf(unit) {
+  const contact = unit?.engaged;
+  if (!contact || typeof contact !== 'object' || typeof contact.unitId !== 'string') {
+    return { unitId: null, edge: null };
+  }
+  return {
+    unitId: contact.unitId,
+    edge: contact.edge ?? null,
+    aspect: contact.aspect ?? null,
+    frontageM: contact.frontageM ?? null,
+    files: contact.files ?? null,
+  };
+}
+
 // Build the player view for the battle's current turn. Pure: the battle is
 // never changed, and the view shares no references with it.
 export function buildPlayerView(battle) {
@@ -176,7 +220,7 @@ export function buildPlayerView(battle) {
       files: unit.files,
       formation: formationOf(unit),
       cohesion: { value: cohesionValue(unit.cohesion), state: unit.cohesion },
-      engaged: { unitId: null, edge: null },
+      engaged: engagedOf(unit),
       status: statusOf(unit),
     })),
     round: battle.round,
@@ -196,31 +240,101 @@ export function buildPlayerView(battle) {
 // with reasons for the unavailable ones, the Charge and Shoot candidates,
 // and the movement allowance in metres at the unit's current terrain (the
 // open-ground allowance divided by the worst-cover factor there; the flat
-// river fee is per leg and never part of the allowance). Hold and Move are
-// permitted in this slice; both candidate lists stay empty until the Charge
-// and Shoot slices land.
+// river fee is per leg and never part of the allowance). Hold, Move, and
+// Charge are permitted in this slice; the Shoot candidates stay empty until
+// the Shoot slice lands. Permission follows the battle state: a routed unit
+// may only Rally, an engaged unit may only Hold or Withdraw, and a
+// disordered unit cannot charge.
 
 const UNAVAILABLE_REASONS = Object.freeze({
-  Charge: 'Charge is not available in this slice: only Hold and Move are permitted.',
-  Shoot: 'Shoot is not available in this slice: only Hold and Move are permitted.',
+  Reform: 'Reform is not available in this slice: only Hold, Move, and Charge are permitted.',
+  Shoot: 'Shoot is not available in this slice: only Hold, Move, and Charge are permitted.',
+  Rally: 'Rally is not available in this slice: only Hold, Move, and Charge are permitted.',
+  Withdraw: 'Withdraw is not available in this slice: only Hold, Move, and Charge are permitted.',
 });
 
 function movementParamsOf(battle) {
   return battle?.parameters?.movement ?? RULESET_PARAMETERS.movement;
 }
 
-function actionsForUnit(unit, params, terrainFeatures = []) {
+function isEngaged(unit) {
+  return !!unit?.engaged && typeof unit.engaged === 'object'
+    && typeof unit.engaged.unitId === 'string';
+}
+
+// Compute the permitted order kinds for a unit at the start of the turn: a
+// routed unit may only Rally, an engaged unit may only Hold or Withdraw, and
+// a disordered unit cannot charge. Returns `{ permitted, gated }` where
+// `gated` lists `{ kind, reason }` for the kinds refused by permission (as
+// opposed to kinds unavailable until their slice lands).
+function permissionFor(unit) {
+  if (unit?.cohesion === 'Routed') {
+    return {
+      permitted: [{ kind: ORDER_KIND_RALLY }],
+      gated: KNOWN_ORDER_KINDS.filter((kind) => kind !== ORDER_KIND_RALLY).map((kind) => ({
+        kind,
+        reason: 'Routed: only Rally is permitted.',
+      })),
+    };
+  }
+  if (isEngaged(unit)) {
+    return {
+      permitted: [{ kind: ORDER_KIND_HOLD }, { kind: ORDER_KIND_WITHDRAW }],
+      gated: KNOWN_ORDER_KINDS.filter(
+        (kind) => kind !== ORDER_KIND_HOLD && kind !== ORDER_KIND_WITHDRAW,
+      ).map((kind) => ({
+        kind,
+        reason: 'Engaged: only Hold or Withdraw is permitted.',
+      })),
+    };
+  }
+  if (unit?.cohesion === 'Disordered') {
+    return {
+      permitted: [{ kind: ORDER_KIND_HOLD }, { kind: ORDER_KIND_MOVE }],
+      gated: [{ kind: ORDER_KIND_CHARGE, reason: 'Disordered units cannot charge.' }],
+    };
+  }
+  return {
+    permitted: [{ kind: ORDER_KIND_HOLD }, { kind: ORDER_KIND_MOVE }, { kind: ORDER_KIND_CHARGE }],
+    gated: [],
+  };
+}
+
+function actionsForUnit(unit, battle, params, terrainFeatures = []) {
+  const { permitted, gated } = permissionFor(unit);
+  const gatedKinds = new Set(gated.map((entry) => entry.kind));
+  const unavailable = [
+    ...gated.map((entry) => ({
+      kind: entry.kind,
+      code: REJECTION_ORDER_NOT_PERMITTED,
+      reason: entry.reason,
+    })),
+    ...KNOWN_ORDER_KINDS.filter(
+      (kind) => !ORDER_KINDS.includes(kind) && !gatedKinds.has(kind)
+        && !permitted.some((item) => item.kind === kind),
+    ).map((kind) => ({
+      kind,
+      code: REJECTION_UNSUPPORTED_ORDER_KIND,
+      reason: UNAVAILABLE_REASONS[kind],
+    })),
+  ];
+  const canCharge = permitted.some((item) => item.kind === ORDER_KIND_CHARGE);
+  const enemies = canCharge
+    ? battle.units
+      .filter((other) => other.side !== unit.side)
+      .map((other) => ({ id: other.id, position: { ...other.position }, facing: other.facing }))
+    : [];
   return {
     unitId: unit.id,
-    permitted: [{ kind: ORDER_KIND_HOLD }, { kind: ORDER_KIND_MOVE }],
-    unavailable: KNOWN_ORDER_KINDS.filter((kind) => !ORDER_KINDS.includes(kind)).map(
-      (kind) => ({
-        kind,
-        code: REJECTION_UNSUPPORTED_ORDER_KIND,
-        reason: UNAVAILABLE_REASONS[kind],
-      }),
-    ),
-    chargeCandidates: [],
+    permitted,
+    unavailable,
+    chargeCandidates: canCharge
+      ? chargeCandidatesFor(
+        unit,
+        { position: { ...unit.position }, facing: unit.facing },
+        enemies,
+      )
+      : [],
     shootCandidates: [],
     movementAllowanceM: movementAllowanceM(unit, params, terrainFeatures),
   };
@@ -243,7 +357,7 @@ export function availableActions(battle, side) {
     side,
     units: battle.units
       .filter((unit) => unit.side === side)
-      .map((unit) => actionsForUnit(unit, params, terrainFeatures)),
+      .map((unit) => actionsForUnit(unit, battle, params, terrainFeatures)),
   };
 }
 
@@ -402,6 +516,14 @@ export function validateTurn(battle, submission) {
   const simulated = new Map(
     battle.units.map((unit) => [unit.id, { position: { ...unit.position }, facing: unit.facing }]),
   );
+  // Simulated engagements: contacts from the battle state plus every charge
+  // accepted earlier in this turn. A unit engaged here may only Hold or
+  // Withdraw; a target already engaged can still be charged again.
+  const engaged = new Map(
+    battle.units
+      .filter((unit) => isEngaged(unit))
+      .map((unit) => [unit.id, { ...unit.engaged }]),
+  );
   const params = movementParamsOf(battle);
   // Preview of a unit's footprint at its simulated pose: the deterministic
   // Movement-phase footprint every accepted verdict carries. Shared with the
@@ -440,6 +562,24 @@ export function validateTurn(battle, submission) {
     }
     seen.set(unit.id, orderIndex);
     const kind = isRecord(order) ? order.kind : undefined;
+    // Permission gates: a routed unit may only Rally, an engaged unit may
+    // only Hold or Withdraw, and a disordered unit cannot charge. Each
+    // refusal names the reason so the player can fix the order.
+    if (unit.cohesion === 'Routed' && kind !== ORDER_KIND_RALLY) {
+      return reject(orderIndex, unit.id, REJECTION_ORDER_NOT_PERMITTED,
+        { unitId: unit.id, reason: 'routed', permitted: [ORDER_KIND_RALLY] },
+        `Order ${orderIndex}: unit "${unit.id}" is Routed and may only Rally.`);
+    }
+    if (engaged.has(unit.id) && kind !== ORDER_KIND_HOLD && kind !== ORDER_KIND_WITHDRAW) {
+      return reject(orderIndex, unit.id, REJECTION_ORDER_NOT_PERMITTED,
+        { unitId: unit.id, reason: 'engaged', permitted: [ORDER_KIND_HOLD, ORDER_KIND_WITHDRAW] },
+        `Order ${orderIndex}: unit "${unit.id}" is Engaged and may only Hold or Withdraw.`);
+    }
+    if (unit.cohesion === 'Disordered' && kind === ORDER_KIND_CHARGE) {
+      return reject(orderIndex, unit.id, REJECTION_ORDER_NOT_PERMITTED,
+        { unitId: unit.id, reason: 'disordered' },
+        `Order ${orderIndex}: unit "${unit.id}" is Disordered and cannot charge.`);
+    }
     if (kind === ORDER_KIND_HOLD) {
       return {
         orderIndex,
@@ -472,6 +612,53 @@ export function validateTurn(battle, submission) {
         accepted: true,
         preview: planned.preview,
         movement: { availableM: planned.availableM, requiredM: planned.requiredM },
+      };
+    }
+    if (kind === ORDER_KIND_CHARGE) {
+      const targetId = isRecord(order) ? order.targetId : undefined;
+      const target = typeof targetId === 'string' ? byId.get(targetId) : undefined;
+      const planned = validateChargeOnField({
+        unit,
+        from: simulated.get(unit.id),
+        target,
+        targetPose: target ? simulated.get(target.id) : undefined,
+        edge: isRecord(order) ? order.edge : undefined,
+        approachLegs: isRecord(order) ? order.approach : undefined,
+        params,
+        battlefield: battle.scenario.battlefield,
+        others: othersAt(unit.id),
+        orderIndex,
+      });
+      if (!planned.ok) {
+        return reject(orderIndex, unit.id, planned.code, planned.details, planned.message);
+      }
+      simulated.set(unit.id, {
+        position: { ...planned.preview.position },
+        facing: planned.preview.facing,
+      });
+      engaged.set(unit.id, {
+        unitId: target.id,
+        edge: 'front',
+        aspect: planned.contact.aspect,
+        frontageM: planned.contact.frontageM,
+        files: planned.contact.fightingFiles,
+      });
+      if (!engaged.has(target.id)) {
+        engaged.set(target.id, {
+          unitId: unit.id,
+          edge: planned.contact.edge,
+          aspect: planned.contact.aspect,
+          frontageM: planned.contact.frontageM,
+          files: fightingFiles(target, planned.contact.frontageM),
+        });
+      }
+      return {
+        orderIndex,
+        unitId: unit.id,
+        accepted: true,
+        preview: planned.preview,
+        movement: { availableM: planned.availableM, requiredM: planned.requiredM },
+        charge: { ...planned.contact },
       };
     }
     return reject(orderIndex, unit.id, REJECTION_UNSUPPORTED_ORDER_KIND,
@@ -552,15 +739,55 @@ export function resolveTurn(battle, decision) {
   if (!result.ok) {
     throw new TurnRejectedError(result);
   }
-  // Execute the accepted moves in the given order at their validated
-  // previews: the previews are deterministic, so resolution replays exactly
-  // what validation promised.
+  // Execute the accepted moves and charges in the given order at their
+  // validated previews: the previews are deterministic, so resolution replays
+  // exactly what validation promised. Each charge also records the engagement
+  // on both units; a target charged twice keeps its first contact.
   for (const verdict of result.verdicts) {
     if (!verdict.accepted || !verdict.preview) {
       continue;
     }
     const order = decision.submission.orders[verdict.orderIndex];
     if (!isRecord(order) || order.kind !== ORDER_KIND_MOVE) {
+      if (!isRecord(order) || order.kind !== ORDER_KIND_CHARGE || !verdict.charge) {
+        continue;
+      }
+      const charger = next.units.find((unit) => unit.id === verdict.unitId);
+      const charged = next.units.find((unit) => unit.id === verdict.charge.targetId);
+      charger.position = { ...verdict.preview.position };
+      charger.facing = verdict.preview.facing;
+      charger.engaged = {
+        unitId: charged.id,
+        edge: 'front',
+        aspect: verdict.charge.aspect,
+        frontageM: verdict.charge.frontageM,
+        files: verdict.charge.fightingFiles,
+      };
+      if (!isEngaged(charged)) {
+        charged.engaged = {
+          unitId: charger.id,
+          edge: verdict.charge.edge,
+          aspect: verdict.charge.aspect,
+          frontageM: verdict.charge.frontageM,
+          files: fightingFiles(charged, verdict.charge.frontageM),
+        };
+      }
+      next.events.push(
+        nextEvent(next, {
+          type: 'unit-charged',
+          turnNumber: battle.turnNumber,
+          side: battle.activeSide,
+          unitId: verdict.unitId,
+          targetId: verdict.charge.targetId,
+          orderIndex: verdict.orderIndex,
+          edge: verdict.charge.edge,
+          aspect: verdict.charge.aspect,
+          frontageM: verdict.charge.frontageM,
+          fightingFiles: verdict.charge.fightingFiles,
+          position: { ...verdict.preview.position },
+          facing: verdict.preview.facing,
+        }),
+      );
       continue;
     }
     const target = next.units.find((unit) => unit.id === verdict.unitId);

@@ -138,7 +138,7 @@ describe('player view', () => {
 });
 
 describe('available actions', () => {
-  it('permits Hold and Move per unit, with reasons for the rest', () => {
+  it('permits Hold, Move, and Charge per unit, with reasons for the rest', () => {
     const battle = freshBattle();
     const actions = availableActions(battle, battle.activeSide);
     assert.equal(actions.formatVersion, AVAILABLE_ACTIONS_FORMAT_VERSION);
@@ -146,13 +146,13 @@ describe('available actions', () => {
     const own = battle.units.filter((unit) => unit.side === battle.activeSide);
     assert.equal(actions.units.length, own.length);
     for (const entry of actions.units) {
-      assert.deepEqual(entry.permitted, [{ kind: ORDER_KIND_HOLD }, { kind: 'Move' }]);
+      assert.deepEqual(entry.permitted, [{ kind: ORDER_KIND_HOLD }, { kind: 'Move' }, { kind: 'Charge' }]);
       const kinds = entry.unavailable.map((item) => item.kind).sort();
-      assert.deepEqual(kinds, ['Charge', 'Shoot']);
+      assert.deepEqual(kinds, ['Rally', 'Reform', 'Shoot', 'Withdraw']);
       for (const item of entry.unavailable) {
         assert.ok(item.code && item.reason, 'unavailable kinds name a reason');
       }
-      assert.deepEqual(entry.chargeCandidates, []);
+      assert.ok(Array.isArray(entry.chargeCandidates), 'charge hints are listed');
       assert.deepEqual(entry.shootCandidates, []);
       const source = battle.units.find((unit) => unit.id === entry.unitId);
       assert.ok(
@@ -285,7 +285,7 @@ describe('validation', () => {
     const own = battle.units.filter((unit) => unit.side === battle.activeSide);
     const result = validateTurn(
       battle,
-      submissionFor(battle, [{ unitId: own[0].id, kind: 'Charge' }]),
+      submissionFor(battle, [{ unitId: own[0].id, kind: 'Shoot', targetId: 'missing' }]),
     );
     assert.equal(result.ok, false);
     assert.equal(result.verdicts[0].rejection.code, REJECTION_UNSUPPORTED_ORDER_KIND);
