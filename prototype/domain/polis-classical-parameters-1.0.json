@@ -83,5 +83,17 @@
     "depthReduction": 0.1,
     "disorderedAt": 2.0,
     "routedAt": 4.0
+  },
+  "shooting": {
+    "lethality": 0.02,
+    "openSpacingFactor": 0.6,
+    "coverFactor": {
+      "forest": 0.5,
+      "settlement": 0.6
+    },
+    "disorderedFactor": 0.7,
+    "cohesionPerCasualty": 0.2,
+    "disorderedAt": 2.0,
+    "routedAt": 4.0
   }
 }

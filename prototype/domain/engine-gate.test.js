@@ -139,9 +139,9 @@ describe('Engine I rejection codes with the expected details', () => {
   it('unsupported_order_kind names the unit and the kind', () => {
     const battle = freshBattle();
     const own = battle.units.filter((unit) => unit.side === battle.activeSide);
-    const rejection = rejectedVerdict(validateOne(battle, { unitId: own[0].id, kind: 'Shoot', targetId: 'x' }));
+    const rejection = rejectedVerdict(validateOne(battle, { unitId: own[0].id, kind: 'Teleport' }));
     assert.equal(rejection.code, 'unsupported_order_kind');
-    assert.deepEqual(rejection.details, { unitId: own[0].id, kind: 'Shoot' });
+    assert.deepEqual(rejection.details, { unitId: own[0].id, kind: 'Teleport' });
   });
 
   it('invalid_move names the unit and the reason', () => {
