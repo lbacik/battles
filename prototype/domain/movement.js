@@ -154,7 +154,7 @@ const DEFAULT_TERRAIN = Object.freeze({
   riverCostM: 30,
 });
 
-function terrainOf(params) {
+export function terrainOf(params) {
   const raw = params?.terrain && typeof params.terrain === 'object' ? params.terrain : {};
   const pick = (key) => (Number.isFinite(raw[key]) ? raw[key] : DEFAULT_TERRAIN[key]);
   return {
@@ -168,7 +168,7 @@ function terrainOf(params) {
   };
 }
 
-function groundFeaturesOf(terrainFeatures) {
+export function groundFeaturesOf(terrainFeatures) {
   return (Array.isArray(terrainFeatures) ? terrainFeatures : []).filter(
     (feature) => feature && feature.kind === 'ground'
       && Array.isArray(feature.polygon) && feature.polygon.length >= 3,
