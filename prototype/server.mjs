@@ -12,6 +12,6 @@ const server = http.createServer(async (req, res) => {
   const file = path.resolve(root, relative);
   if (!file.startsWith(root)) { res.writeHead(403); res.end(); return; }
   try { const body = await readFile(file); res.writeHead(200, { 'Content-Type': types[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' }); res.end(body); }
-  catch { res.writeHead(404); res.end('Nie znaleziono strony'); }
+  catch { res.writeHead(404); res.end('Page not found'); }
 });
-server.listen(4173, '127.0.0.1', () => console.log('Prototyp: http://localhost:4173/prototype/?variant=A'));
+server.listen(4173, '127.0.0.1', () => console.log('Prototype: http://localhost:4173/prototype/?variant=A'));
