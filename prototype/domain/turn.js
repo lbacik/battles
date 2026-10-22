@@ -9,7 +9,7 @@
 // contact preview plus the contact record, and resolution executes moves and
 // charges in the given order (see `./movement.js` and `./charge.js` for the
 // geometry). This module imports only the domain model, the ruleset package,
-// and the movement geometry — no React, no Next.js, no DOM, no Node APIs —
+// and the movement and charge geometry — no React, no Next.js, no DOM, no Node APIs —
 // so it runs unchanged in the browser, in Node unit tests, and in any future
 // shell.
 //
@@ -41,6 +41,7 @@ import {
   validateChargeOnField,
 } from './charge.js';
 import {
+  FORWARD_ARC_DEG,
   footprintAt,
   footprintPreview,
   movementAllowanceM,
@@ -319,6 +320,7 @@ function actionsForUnit(unit, battle, params, terrainFeatures = []) {
     })),
   ];
   const canCharge = permitted.some((item) => item.kind === ORDER_KIND_CHARGE);
+  const arc = Number.isFinite(params?.forwardArcDeg) ? params.forwardArcDeg : FORWARD_ARC_DEG;
   const enemies = canCharge
     ? battle.units
       .filter((other) => other.side !== unit.side)
@@ -333,6 +335,7 @@ function actionsForUnit(unit, battle, params, terrainFeatures = []) {
         unit,
         { position: { ...unit.position }, facing: unit.facing },
         enemies,
+        arc,
       )
       : [],
     shootCandidates: [],
@@ -627,6 +630,7 @@ export function validateTurn(battle, submission) {
         params,
         battlefield: battle.scenario.battlefield,
         others: othersAt(unit.id),
+        terrainFeatures: battle.scenario?.terrainFeatures || [],
         orderIndex,
       });
       if (!planned.ok) {

@@ -353,3 +353,73 @@ describe('available actions with charge', () => {
     assert.equal(JSON.stringify(battle), before);
   });
 });
+
+describe('charge terrain and arc rules', () => {
+  function groundRect(id, category, minX, minY, maxX, maxY) {
+    return {
+      id,
+      kind: 'ground',
+      category,
+      polygon: [
+        { x: minX, y: minY },
+        { x: maxX, y: minY },
+        { x: maxX, y: maxY },
+        { x: minX, y: maxY },
+      ],
+    };
+  }
+
+  it('refuses a charge through water as forbidden_ground, as for Move', () => {
+    const { battle, charger, target } = arrangedFrontCharge();
+    battle.scenario.terrainFeatures = [groundRect('water-a', 'water', 480, 550, 520, 590)];
+    const result = validateTurn(
+      battle,
+      submissionFor(battle, [chargeOrder(charger.id, target.id, 'front')]),
+    );
+    const rejection = rejectedVerdict(result);
+    assert.equal(rejection.code, 'forbidden_ground');
+    assert.equal(rejection.details.featureId, 'water-a');
+  });
+
+  it('bills rough ground on the march, as for Move', () => {
+    const { battle, charger, target } = arrangedFrontCharge();
+    place(battle, target.id, { x: 500, y: 570 }, 0);
+    battle.scenario.terrainFeatures = [groundRect('forest-a', 'forest', 400, 540, 600, 620)];
+    const result = validateTurn(
+      battle,
+      submissionFor(battle, [chargeOrder(charger.id, target.id, 'front')]),
+    );
+    const verdict = acceptedVerdict(result);
+    assert.deepEqual(verdict.movement, { availableM: 90, requiredM: 75 });
+  });
+
+  it('pays the river fee for a crossing, as for Move', () => {
+    const { battle, charger, target } = arrangedFrontCharge();
+    battle.scenario.terrainFeatures = [{
+      id: 'river-test',
+      kind: 'linear',
+      category: 'river',
+      path: [{ x: 440, y: 580 }, { x: 560, y: 580 }],
+      width: 6,
+    }];
+    const result = validateTurn(
+      battle,
+      submissionFor(battle, [chargeOrder(charger.id, target.id, 'front')]),
+    );
+    const verdict = acceptedVerdict(result);
+    assert.deepEqual(verdict.movement, { availableM: 90, requiredM: 90 });
+  });
+
+  it('honours the ruleset front-arc override', () => {
+    const { battle, charger, target } = arrangedFrontCharge();
+    // About 40° off the charger's facing: inside the default ±45° arc.
+    place(battle, target.id, { x: 538.6, y: 554 }, 0);
+    const charge = chargeOrder(charger.id, target.id, 'front');
+    const accepted = validateTurn(battle, submissionFor(battle, [charge]));
+    assert.equal(accepted.ok, true, JSON.stringify(accepted));
+    battle.parameters.movement.forwardArcDeg = 10;
+    const narrowed = validateTurn(battle, submissionFor(battle, [charge]));
+    assert.equal(narrowed.ok, false);
+    assert.equal(narrowed.verdicts[0].rejection.code, 'outside_front_arc');
+  });
+});

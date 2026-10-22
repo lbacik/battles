@@ -22,13 +22,15 @@
 //   exists. There is no engine pathfinding; the named edge makes the intent
 //   unambiguous and lets a rejection name it.
 // - Reach and collisions are checked as for Move (`./movement.js`): the same
-//   wheel cost for the turns, the same full/reduced billing for the marches,
-//   the same swept-footprint transit checks, the same battlefield edge, and
-//   the same allowance. The one difference is the resting place: touching the
-//   target is required, not refused. A transit or resting overlap with the
-//   target still collides, and any resting touch with anyone else is reported
-//   exactly as Move would report it (`collision` with a friend at rest,
-//   `contact_with_enemy` with another enemy).
+//   wheel cost for the turns (with the terrain factor at the turning
+//   footprint), the same full/reduced billing for the marches (per 1 m
+//   subsegment at the terrain factor there, plus the river fee per crossing),
+//   the same swept-footprint transit checks, the same battlefield edge, the
+//   same forbidden ground, and the same allowance. The one difference is the
+//   resting place: touching the target is required, not refused. A transit or
+//   resting overlap with the target still collides, and any resting touch with
+//   anyone else is reported exactly as Move would report it (`collision` with
+//   a friend at rest, `contact_with_enemy` with another enemy).
 // - Contact records the aspect from the touched edge (front, flank, or rear),
 //   the engaged frontage (the common length of the two edges), and the
 //   fighting files of each side (engaged frontage ÷ own lateral interval,
@@ -45,9 +47,10 @@
 // 4. `collision`: as for Move, except a mere touch with the target on the
 //    path is the coming contact, not a collision. An overlap with the target
 //    still collides, as does any touch with anyone else.
-// 5. `out_of_reach`: as for Move, billed over the approach legs plus the
-//    derived final leg.
-// 6. `contact_with_enemy`: the resting footprint touches an enemy other than
+// 5. `forbidden_ground`: as for Move.
+// 6. `out_of_reach`: as for Move, billed over the approach legs plus the
+//    derived final leg (terrain factors and river fees included).
+// 7. `contact_with_enemy`: the resting footprint touches an enemy other than
 //    the target (a friend at rest collides, as for Move).
 //
 // An accepted plan returns a deterministic preview — the footprint at flush
@@ -68,9 +71,13 @@ import {
   displacementBearing,
   footprintAt,
   frontageOf,
+  groundFeaturesOf,
   movementAllowanceM,
   normalizeFacing,
   normalizeLegs,
+  riversTouching,
+  terrainFactorAt,
+  terrainOf,
   signedAngleDiff,
 } from './movement.js';
 
@@ -265,6 +272,7 @@ export function validateChargeOnField({
   params,
   battlefield,
   others,
+  terrainFeatures = [],
   orderIndex = 0,
 }) {
   const unitId = unit?.id ?? null;
@@ -321,10 +329,13 @@ export function validateChargeOnField({
     facing: normalizeFacing(round1(targetPose.facing)),
   };
 
+  const features = Array.isArray(terrainFeatures) ? terrainFeatures : [];
+  const arc = Number.isFinite(params?.forwardArcDeg) ? params.forwardArcDeg : FORWARD_ARC_DEG;
+
   // 2. The target must lie within the charger's front arc at the start of the
   // turn: the bearing from the charger's front midpoint to the target's front
   // midpoint, against the charger's facing.
-  if (!inFrontArc(startPose, targetSnapped.position)) {
+  if (!inFrontArc(startPose, targetSnapped.position, arc)) {
     return fail(
       'outside_front_arc',
       { unitId, targetId: target.id },
@@ -353,12 +364,16 @@ export function validateChargeOnField({
   const restricted = Number.isFinite(params?.restrictedRateFactor)
     ? params.restrictedRateFactor
     : 0.5;
-  const arc = Number.isFinite(params?.forwardArcDeg) ? params.forwardArcDeg : FORWARD_ARC_DEG;
 
   // Simulate the approach plus the derived final leg on snapped poses, as for
   // Move: rotation samples and translation hulls with intermediate march
-  // samples, each with the mover's front-midpoint position (`at`). The
-  // starting pose is validated history and takes part in no collision check.
+  // samples, each with the mover's front-midpoint position (`at`). March
+  // billing accumulates per 1 m subsegment at the terrain factor of the
+  // footprint centred on that subsegment's midpoint; wheel billing uses the
+  // factor at the footprint before the rotation. Each river crossed adds
+  // `riverCostM` once per charge. The starting pose is validated history and
+  // takes part in no collision check.
+  const terrain = terrainOf(params);
   let position = { ...startPose.position };
   let facing = startPose.facing;
   let turnCost = 0;
@@ -366,11 +381,22 @@ export function validateChargeOnField({
   const startCorners = footprintAt(unit, position, facing).corners;
   const samples = [];
   const hulls = [];
+  // River fees: the ids of the river features the sweep touches, across all
+  // legs. Each river crossed adds `riverCostM` once per charge, so splitting
+  // one crossing across several legs still pays a single crossing.
+  const riversCrossed = new Set();
   for (const leg of legs) {
     if (leg.face !== null) {
       const delta = signedAngleDiff(facing, leg.face);
       if (Math.abs(delta) > EPS) {
-        turnCost += frontage * Math.abs(delta) * DEG * wheelFactor;
+        const { factor } = terrainFactorAt(
+          footprintAt(unit, position, facing).corners,
+          unit?.files,
+          features,
+          params,
+        );
+        const wheelRate = Number.isFinite(factor) ? factor : Number.POSITIVE_INFINITY;
+        turnCost += frontage * Math.abs(delta) * DEG * wheelFactor * wheelRate;
         const steps = Math.max(1, Math.ceil(Math.abs(delta) / SWEEP_STEP_DEG));
         for (let step = 1; step <= steps; step += 1) {
           const intermediate = normalizeFacing(facing + (delta * step) / steps);
@@ -389,11 +415,29 @@ export function validateChargeOnField({
         const bearing = displacementBearing(position, leg.to);
         const offAxis = Math.abs(signedAngleDiff(facing, bearing));
         const rate = offAxis <= arc + EPS ? 1 : restricted;
-        moveCost += rate > 0 ? distance / rate : Number.POSITIVE_INFINITY;
+        const strides = Math.max(1, Math.ceil(distance / TRANSIT_SAMPLE_M));
+        const stepLength = distance / strides;
+        for (let stride = 1; stride <= strides; stride += 1) {
+          const midpoint = {
+            x: position.x + ((leg.to.x - position.x) * (stride - 0.5)) / strides,
+            y: position.y + ((leg.to.y - position.y) * (stride - 0.5)) / strides,
+          };
+          const midCorners = footprintAt(unit, midpoint, facing).corners;
+          const { factor } = terrainFactorAt(midCorners, unit?.files, features, params);
+          const billedRate = rate > 0 ? rate : 0;
+          moveCost += billedRate > 0 && Number.isFinite(factor)
+            ? stepLength / billedRate * factor
+            : Number.POSITIVE_INFINITY;
+        }
         const start = footprintAt(unit, position, facing).corners;
         const end = footprintAt(unit, leg.to, facing).corners;
-        hulls.push({ corners: convexHull([...start, ...end]), at: { ...position } });
-        const strides = Math.max(1, Math.ceil(distance / TRANSIT_SAMPLE_M));
+        const hullCorners = convexHull([...start, ...end]);
+        hulls.push({ corners: hullCorners, at: { ...position } });
+        for (const ring of [hullCorners, start, end]) {
+          for (const river of riversTouching(ring, features)) {
+            riversCrossed.add(river.id);
+          }
+        }
         for (let stride = 1; stride < strides; stride += 1) {
           const waypoint = roundPoint({
             x: position.x + ((leg.to.x - position.x) * stride) / strides,
@@ -414,6 +458,7 @@ export function validateChargeOnField({
       }
     }
   }
+  moveCost += riversCrossed.size * terrain.riverCostM;
   const finalCorners = footprintAt(unit, position, facing).corners;
   const samePose = (a, b) => a.position.x === b.position.x
     && a.position.y === b.position.y
@@ -500,6 +545,36 @@ export function validateChargeOnField({
         }
         return collide(other, entry.at, 'on its path');
       }
+    }
+  }
+
+  // The swept footprint touches no water. Transit poses, hulls, and the
+  // resting footprint are checked in sweep order against the water areas in
+  // document order; the starting pose is validated history and never forbids.
+  const waters = groundFeaturesOf(features).filter((feature) => feature.category === 'water');
+  const forbid = (featureId, at) => fail(
+    'forbidden_ground',
+    { unitId, featureId, groundCover: 'water', at: roundPoint(at) },
+    `Order ${orderIndex}: unit "${unitId}" would enter forbidden ground ` +
+      `(water feature "${featureId}") at (${round1(at.x)}, ${round1(at.y)}).`,
+  );
+  for (const entry of transit) {
+    for (const water of waters) {
+      if (ringsTouch(entry.corners, water.polygon)) {
+        return forbid(water.id, entry.at);
+      }
+    }
+  }
+  for (const entry of hulls) {
+    for (const water of waters) {
+      if (ringsTouch(entry.corners, water.polygon)) {
+        return forbid(water.id, entry.at);
+      }
+    }
+  }
+  for (const water of waters) {
+    if (ringsTouch(finalCorners, water.polygon)) {
+      return forbid(water.id, position);
     }
   }
 
@@ -591,7 +666,7 @@ function simulateLegsEnd(template, startPose, legs) {
 // whose outward normal most opposes the bearing from the target to the
 // charger), its aspect, and the distance in metres. Hints, not guarantees:
 // earlier orders in the same turn can still block the charge.
-export function chargeCandidatesFor(charger, chargerPose, enemies) {
+export function chargeCandidatesFor(charger, chargerPose, enemies, arcDeg = FORWARD_ARC_DEG) {
   const candidates = [];
   for (const enemy of enemies || []) {
     if (!enemy || typeof enemy.id !== 'string') {
@@ -600,7 +675,7 @@ export function chargeCandidatesFor(charger, chargerPose, enemies) {
     if (!isFinitePoint(enemy.position) || !Number.isFinite(enemy.facing)) {
       continue;
     }
-    if (!inFrontArc(chargerPose, enemy.position)) {
+    if (!inFrontArc(chargerPose, enemy.position, arcDeg)) {
       continue;
     }
     const bearing = displacementBearing(enemy.position, chargerPose.position);
