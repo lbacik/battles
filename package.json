@@ -7,7 +7,7 @@
     "lint": "node scripts/lint.mjs",
     "format:check": "node scripts/format-check.mjs",
     "typecheck": "node scripts/typecheck.mjs",
-    "test": "node --test prototype/domain/scenario.test.js prototype/domain/store.test.js",
+    "test": "node --test prototype/domain/geometry.test.js prototype/domain/polis-classical.test.js prototype/domain/scenario.test.js prototype/domain/store.test.js",
     "build": "node scripts/build.mjs",
     "test:e2e": "node scripts/e2e.mjs"
   }

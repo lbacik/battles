@@ -1,0 +1,310 @@
+{
+  "kind": "scenario",
+  "formatVersion": 1,
+  "id": "e41ea179-bc18-4478-8f75-468fa81bc171",
+  "title": "Acceptance Plain",
+  "description": "Reference scenario for the editor-first slice: open ground with a forest, rough ground, and a settlement, a hill with two nested elevation levels, a river crossed by a road, and three units per side drawn at true scale.",
+  "battlefield": {
+    "width": 1400,
+    "height": 900
+  },
+  "sides": [
+    {
+      "id": "athens",
+      "name": "Athens",
+      "color": "#1d4ed8"
+    },
+    {
+      "id": "sparta",
+      "name": "Sparta",
+      "color": "#b91c1c"
+    }
+  ],
+  "ruleset": {
+    "id": "polis-classical",
+    "version": "0.1"
+  },
+  "units": [
+    {
+      "id": "11111111-1111-4111-8111-111111111111",
+      "name": "I Athenian taxis",
+      "side": "athens",
+      "troopType": "hoplite",
+      "soldiers": 256,
+      "files": 16,
+      "lateralInterval": 1,
+      "rankDepth": 1,
+      "position": {
+        "x": 500,
+        "y": 600
+      },
+      "facing": 180
+    },
+    {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "name": "Athenian peltasts",
+      "side": "athens",
+      "troopType": "peltast",
+      "soldiers": 120,
+      "files": 12,
+      "lateralInterval": 1.5,
+      "rankDepth": 1.5,
+      "position": {
+        "x": 750,
+        "y": 620
+      },
+      "facing": 180
+    },
+    {
+      "id": "33333333-3333-4333-8333-333333333333",
+      "name": "Athenian cavalry",
+      "side": "athens",
+      "troopType": "cavalry",
+      "soldiers": 80,
+      "files": 10,
+      "lateralInterval": 1.5,
+      "rankDepth": 3,
+      "position": {
+        "x": 1000,
+        "y": 600
+      },
+      "facing": 150
+    },
+    {
+      "id": "44444444-4444-4444-8444-444444444444",
+      "name": "I Spartan mora",
+      "side": "sparta",
+      "troopType": "hoplite",
+      "soldiers": 320,
+      "files": 16,
+      "lateralInterval": 1,
+      "rankDepth": 1,
+      "position": {
+        "x": 550,
+        "y": 300
+      },
+      "facing": 0
+    },
+    {
+      "id": "55555555-5555-4555-8555-555555555555",
+      "name": "Spartan archers",
+      "side": "sparta",
+      "troopType": "archer",
+      "soldiers": 100,
+      "files": 14,
+      "lateralInterval": 1.5,
+      "rankDepth": 1.5,
+      "position": {
+        "x": 800,
+        "y": 280
+      },
+      "facing": 0
+    },
+    {
+      "id": "66666666-6666-4666-8666-666666666666",
+      "name": "Skiritae peltasts",
+      "side": "sparta",
+      "troopType": "peltast",
+      "soldiers": 120,
+      "files": 12,
+      "lateralInterval": 2,
+      "rankDepth": 2,
+      "position": {
+        "x": 1050,
+        "y": 300
+      },
+      "facing": 30
+    }
+  ],
+  "terrainFeatures": [
+    {
+      "id": "forest-north",
+      "kind": "ground",
+      "category": "forest",
+      "polygon": [
+        {
+          "x": 120,
+          "y": 580
+        },
+        {
+          "x": 280,
+          "y": 580
+        },
+        {
+          "x": 300,
+          "y": 700
+        },
+        {
+          "x": 180,
+          "y": 740
+        },
+        {
+          "x": 110,
+          "y": 680
+        }
+      ]
+    },
+    {
+      "id": "rough-east",
+      "kind": "ground",
+      "category": "rough",
+      "polygon": [
+        {
+          "x": 1150,
+          "y": 600
+        },
+        {
+          "x": 1300,
+          "y": 620
+        },
+        {
+          "x": 1280,
+          "y": 740
+        },
+        {
+          "x": 1140,
+          "y": 720
+        }
+      ]
+    },
+    {
+      "id": "settlement-south",
+      "kind": "ground",
+      "category": "settlement",
+      "polygon": [
+        {
+          "x": 150,
+          "y": 120
+        },
+        {
+          "x": 300,
+          "y": 120
+        },
+        {
+          "x": 310,
+          "y": 230
+        },
+        {
+          "x": 220,
+          "y": 260
+        },
+        {
+          "x": 140,
+          "y": 210
+        }
+      ]
+    },
+    {
+      "id": "hill-outer",
+      "kind": "elevation",
+      "level": 1,
+      "polygon": [
+        {
+          "x": 240,
+          "y": 380
+        },
+        {
+          "x": 460,
+          "y": 380
+        },
+        {
+          "x": 460,
+          "y": 560
+        },
+        {
+          "x": 240,
+          "y": 560
+        }
+      ]
+    },
+    {
+      "id": "hill-inner",
+      "kind": "elevation",
+      "level": 2,
+      "polygon": [
+        {
+          "x": 310,
+          "y": 440
+        },
+        {
+          "x": 400,
+          "y": 440
+        },
+        {
+          "x": 400,
+          "y": 510
+        },
+        {
+          "x": 310,
+          "y": 510
+        }
+      ]
+    },
+    {
+      "id": "river-ophis",
+      "kind": "linear",
+      "category": "river",
+      "path": [
+        {
+          "x": 0,
+          "y": 690
+        },
+        {
+          "x": 165,
+          "y": 630
+        },
+        {
+          "x": 245,
+          "y": 670
+        },
+        {
+          "x": 300,
+          "y": 765
+        },
+        {
+          "x": 410,
+          "y": 780
+        },
+        {
+          "x": 540,
+          "y": 840
+        },
+        {
+          "x": 610,
+          "y": 900
+        }
+      ],
+      "width": 18
+    },
+    {
+      "id": "road-south",
+      "kind": "linear",
+      "category": "road",
+      "path": [
+        {
+          "x": 150,
+          "y": 0
+        },
+        {
+          "x": 250,
+          "y": 250
+        },
+        {
+          "x": 330,
+          "y": 500
+        },
+        {
+          "x": 380,
+          "y": 700
+        },
+        {
+          "x": 450,
+          "y": 900
+        }
+      ],
+      "width": 6
+    }
+  ],
+  "createdAt": "2026-10-22T13:21:39.768Z",
+  "updatedAt": "2026-10-22T13:21:39.769Z"
+}
