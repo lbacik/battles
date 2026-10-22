@@ -67,6 +67,7 @@ import { collectUnknownTroopTypeWarnings } from './domain/polis-classical.js';
 import { BattleStartError, startBattle, validatePlayability } from './domain/battle.js';
 import {
   SUBMISSION_FORMAT_VERSION,
+  availableActions,
   buildPlayerView,
   resolveTurn,
   validateTurn,
@@ -1164,6 +1165,223 @@ async function phaseBattleTurns() {
     'battle: an unplayable scenario is refused with every problem',
     'pass',
     refused.problems[0].message,
+  );
+  await phaseBattleMoveDrafting();
+}
+
+// Move-order drafting through the engine: the same `validateTurn` calls the
+// battle screen makes on every draft change. On open ground two hoplites of
+// the active side draft Moves to one resting spot: the first validates with a
+// Movement-phase ghost preview, the second is rejected with a `collision`
+// naming the resting unit and the touch point (the map highlight), swapping
+// the order flips the culprit, removing the colliding draft validates, and
+// the surviving Move commits and advances the turn.
+async function phaseBattleMoveDrafting() {
+  logStep('battle drafting: inspector lists Move, reasons, and the 90 m allowance', 'running');
+  const document = createScenario({ title: 'Move drafting probe' });
+  const [first, second] = document.sides;
+  let counter = 1;
+  const probeId = () => `00000000-0000-4000-8000-${String(counter++).padStart(12, '0')}`;
+  document.units.push(
+    {
+      id: probeId(),
+      name: 'Draft taxis',
+      side: first.id,
+      troopType: 'hoplite',
+      soldiers: 100,
+      files: 10,
+      lateralInterval: 1,
+      rankDepth: 1,
+      position: { x: 400, y: 600 },
+      facing: 180,
+    },
+    {
+      id: probeId(),
+      name: 'Draft peltasts',
+      side: first.id,
+      troopType: 'hoplite',
+      soldiers: 100,
+      files: 10,
+      lateralInterval: 1,
+      rankDepth: 1,
+      position: { x: 440, y: 600 },
+      facing: 180,
+    },
+    {
+      id: probeId(),
+      name: 'Far mora',
+      side: second.id,
+      troopType: 'hoplite',
+      soldiers: 100,
+      files: 10,
+      lateralInterval: 1,
+      rankDepth: 1,
+      position: { x: 400, y: 200 },
+      facing: 0,
+    },
+    {
+      id: probeId(),
+      name: 'Far archers',
+      side: second.id,
+      troopType: 'hoplite',
+      soldiers: 100,
+      files: 10,
+      lateralInterval: 1,
+      rankDepth: 1,
+      position: { x: 440, y: 200 },
+      facing: 0,
+    },
+  );
+  if ((document.terrainFeatures || []).length !== 0) {
+    throw new Error('the drafting probe must stay on open ground');
+  }
+  if (validateScenario(document).length > 0) {
+    throw new Error(`drafting probe is invalid: ${validateScenario(document).join('; ')}`);
+  }
+  if (validatePlayability(document).length > 0) {
+    throw new Error(
+      `drafting probe is unplayable: ${validatePlayability(document).map((problem) => problem.message).join('; ')}`,
+    );
+  }
+  const controllers = { [first.id]: 'human', [second.id]: 'passive' };
+  const battle = startBattle(document, { seed: 20260715, controllers });
+  const own = battle.units.filter((unit) => unit.side === battle.activeSide);
+  if (own.length !== 2) {
+    throw new Error(`expected two units on the active side, got ${own.length}`);
+  }
+  const [mover, neighbour] = own;
+  const actions = availableActions(battle, battle.activeSide);
+  for (const unit of own) {
+    const entry = actions.units.find((item) => item.unitId === unit.id);
+    if (!entry) throw new Error(`availableActions is missing unit "${unit.id}"`);
+    if (!entry.permitted.some((item) => item.kind === 'Move')) {
+      throw new Error(`Move is not permitted for "${unit.id}"`);
+    }
+    if (!Array.isArray(entry.unavailable) || entry.unavailable.length === 0) {
+      throw new Error(`availableActions names no unavailable reasons for "${unit.id}"`);
+    }
+    if (entry.movementAllowanceM !== 90) {
+      throw new Error(`expected a 90 m hoplite allowance, got ${entry.movementAllowanceM}`);
+    }
+  }
+  logStep(
+    'battle drafting: inspector lists Move, reasons, and the 90 m allowance',
+    'pass',
+    'Move permitted · 90 m',
+  );
+
+  // The destination is 40 m straight ahead of the first mover: front-first,
+  // inside the allowance. The neighbour reaches the same spot diagonally
+  // (45° off, billed at the full rate) but collides once the mover rests there.
+  const forward = { x: Math.sin((mover.facing * Math.PI) / 180), y: Math.cos((mover.facing * Math.PI) / 180) };
+  const dest = {
+    x: Math.round((mover.position.x + forward.x * 40) * 10) / 10,
+    y: Math.round((mover.position.y + forward.y * 40) * 10) / 10,
+  };
+  const submissionFor = (orders) => ({
+    formatVersion: SUBMISSION_FORMAT_VERSION,
+    battleId: battle.id,
+    turnNumber: battle.turnNumber,
+    side: battle.activeSide,
+    orders,
+  });
+
+  logStep('battle drafting: a single Move validates with a Movement-phase preview', 'running');
+  const single = validateTurn(battle, submissionFor([{ unitId: mover.id, kind: 'Move', legs: [{ to: dest }] }]));
+  if (!single.ok || !single.verdicts[0]?.accepted) {
+    throw new Error(`the single Move was refused: ${single.message || single.verdicts[0]?.rejection?.message}`);
+  }
+  if (!Array.isArray(single.verdicts[0].preview?.corners) || single.verdicts[0].preview.corners.length < 3) {
+    throw new Error('the accepted Move carries no ghost-preview corners');
+  }
+  if (single.verdicts[0].movement?.availableM !== 90) {
+    throw new Error(`the accepted Move bills against the wrong allowance: ${JSON.stringify(single.verdicts[0].movement)}`);
+  }
+  logStep(
+    'battle drafting: a single Move validates with a Movement-phase preview',
+    'pass',
+    `needs ${single.verdicts[0].movement.requiredM} m of 90 m`,
+  );
+
+  logStep('battle drafting: a second Move to the same spot is rejected with a highlight', 'running');
+  const colliding = validateTurn(
+    battle,
+    submissionFor([
+      { unitId: mover.id, kind: 'Move', legs: [{ to: dest }] },
+      { unitId: neighbour.id, kind: 'Move', legs: [{ to: dest }] },
+    ]),
+  );
+  if (colliding.ok) {
+    throw new Error('two Moves to the same resting spot were accepted');
+  }
+  if (colliding.verdicts[0]?.accepted !== true) {
+    throw new Error('the first Move should stay accepted while the second collides');
+  }
+  const rejection = colliding.verdicts[1]?.rejection;
+  if (rejection?.code !== 'collision') {
+    throw new Error(`expected a collision rejection, got "${rejection?.code}"`);
+  }
+  if (rejection.details?.withUnitId !== mover.id) {
+    throw new Error(`the collision names the wrong unit: ${JSON.stringify(rejection.details)}`);
+  }
+  if (!Number.isFinite(rejection.details?.at?.x) || !Number.isFinite(rejection.details?.at?.y)) {
+    throw new Error(`the collision carries no highlight point: ${JSON.stringify(rejection.details)}`);
+  }
+  logStep(
+    'battle drafting: a second Move to the same spot is rejected with a highlight',
+    'pass',
+    rejection.message,
+  );
+
+  logStep('battle drafting: reordering flips the culprit and re-validates', 'running');
+  const swapped = validateTurn(
+    battle,
+    submissionFor([
+      { unitId: neighbour.id, kind: 'Move', legs: [{ to: dest }] },
+      { unitId: mover.id, kind: 'Move', legs: [{ to: dest }] },
+    ]),
+  );
+  if (swapped.ok) {
+    throw new Error('the swapped Moves to the same resting spot were accepted');
+  }
+  if (swapped.verdicts[0]?.accepted !== true || swapped.verdicts[1]?.accepted !== false) {
+    throw new Error('the swapped draft should accept the first order and reject the second');
+  }
+  if (swapped.verdicts[1].rejection.code !== 'collision') {
+    throw new Error(`the swapped rejection is not a collision: "${swapped.verdicts[1].rejection.code}"`);
+  }
+  if (swapped.verdicts[1].rejection.details?.withUnitId !== neighbour.id) {
+    throw new Error(
+      `reordering did not flip the culprit: ${JSON.stringify(swapped.verdicts[1].rejection.details)}`,
+    );
+  }
+  logStep('battle drafting: reordering flips the culprit and re-validates', 'pass', 'culprit flipped');
+
+  logStep('battle drafting: removing the colliding draft validates; commit advances the turn', 'running');
+  const removed = validateTurn(battle, submissionFor([{ unitId: mover.id, kind: 'Move', legs: [{ to: dest }] }]));
+  if (!removed.ok) {
+    throw new Error(`the draft without the colliding order was refused: ${removed.message}`);
+  }
+  const turnBefore = battle.turnNumber;
+  const activeBefore = battle.activeSide;
+  const committed = resolveTurn(battle, {
+    type: 'commit',
+    submission: submissionFor([{ unitId: mover.id, kind: 'Move', legs: [{ to: dest }] }]),
+  });
+  if (committed.turnNumber !== turnBefore + 1) {
+    throw new Error(`expected turn ${turnBefore + 1} after commit, got turn ${committed.turnNumber}`);
+  }
+  if (committed.activeSide === activeBefore) {
+    throw new Error('the commit did not pass the turn to the other side');
+  }
+  const placed = committed.units.find((unit) => unit.id === mover.id);
+  if (placed.position.x !== dest.x || placed.position.y !== dest.y) {
+    throw new Error(`the committed Move did not land on the draft destination: ${JSON.stringify(placed.position)}`);
+  }
+  logStep(
+    'battle drafting: removing the colliding draft validates; commit advances the turn',
+    'pass',
+    `now turn ${committed.turnNumber}`,
   );
 }
 
