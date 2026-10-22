@@ -310,9 +310,10 @@ export function groupLogEvents(battle) {
   return groups;
 }
 
-// The latest turn with any resolution event: the turn the result panel
+// The latest turn with a resolution marker: the turn the result panel
 // summarises. Resolution markers are `turn-resolved` (or any battle-ending
-// event); a battle with no resolved turn yet returns null. Pure.
+// event: `turn-conceded`, `battle-ended`); a battle with no resolved turn yet
+// returns null, so an in-progress turn is never presented as resolved. Pure.
 export function lastResolvedTurnNumber(battle) {
   const events = Array.isArray(battle?.events) ? battle.events : [];
   let last = null;
@@ -324,19 +325,7 @@ export function lastResolvedTurnNumber(battle) {
       last = last === null ? event.turnNumber : Math.max(last, event.turnNumber);
     }
   }
-  if (last !== null) {
-    return last;
-  }
-  // A conceded or finished battle without its own marker still resolved its
-  // turn: fall back to the highest turn number present in the events.
-  let highest = null;
-  for (const event of events) {
-    if (!isRecord(event) || !Number.isInteger(event.turnNumber) || event.turnNumber < 1) {
-      continue;
-    }
-    highest = highest === null ? event.turnNumber : Math.max(highest, event.turnNumber);
-  }
-  return highest;
+  return last;
 }
 
 // The structured summary of one resolved turn: contacts, losses, cohesion
@@ -454,9 +443,6 @@ export function changedUnitsForTurn(battle, turnNumber) {
   };
   for (const loss of summary.losses) {
     mark(loss.unitId, 'losses');
-    if (loss.kind === 'shot') {
-      mark(loss.byUnitId, 'shooting');
-    }
   }
   for (const entry of summary.cohesion) {
     mark(entry.unitId, 'cohesion');
