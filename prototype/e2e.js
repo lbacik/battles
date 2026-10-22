@@ -18,6 +18,7 @@ import { deriveFootprint } from './domain/geometry.js';
 import {
   addElevationFeature,
   addGroundCoverFeature,
+  addLinearFeature,
   cloneScenario,
   createScenario,
   exportScenario,
@@ -30,7 +31,9 @@ import {
   snapFacing,
   unitsBlockingResize,
   validateElevationCandidate,
+  updateLinearFeature,
   validateGroundCoverCandidate,
+  validateLinearCandidate,
   validateScenario,
 } from './domain/scenario.js';
 import { collectUnknownTroopTypeWarnings } from './domain/polis-classical.js';
@@ -351,6 +354,68 @@ async function phaseSave() {
   }
   logStep('refuse an area overlapping the forest with a highlight', 'pass', overlapping.reason);
 
+  // Acceptance step 3: a river and a road crossing the river and the forest.
+  // Linear features may cross ground cover, elevation, and each other, and
+  // are clipped to the battlefield like every other terrain feature.
+  logStep('draw a river crossing the forest', 'running');
+  created = addLinearFeature(created, {
+    category: 'river',
+    width: 18,
+    path: [
+      { x: 0, y: 690 },
+      { x: 165, y: 630 },
+      { x: 245, y: 670 },
+      { x: 300, y: 765 },
+      { x: 410, y: 780 },
+      { x: 540, y: 840 },
+      { x: 610, y: 900 },
+    ],
+  });
+  logStep('draw a river crossing the forest', 'pass', '7 vertices · 18 m');
+
+  logStep('draw a road crossing the river and the forest', 'running');
+  created = addLinearFeature(created, {
+    category: 'road',
+    width: 6,
+    path: [
+      { x: 150, y: 0 },
+      { x: 250, y: 250 },
+      { x: 330, y: 500 },
+      { x: 380, y: 700 },
+      { x: 450, y: 900 },
+    ],
+  });
+  if (validateScenario(created).length > 0) {
+    throw new Error(`crossing linears are invalid: ${validateScenario(created).join('; ')}`);
+  }
+  logStep('draw a road crossing the river and the forest', 'pass', '5 vertices · 6 m');
+
+  logStep('move a river vertex and change the road width', 'running');
+  const river = created.terrainFeatures.find(
+    (feature) => feature.kind === 'linear' && feature.category === 'river',
+  );
+  const movedRiver = river.path.map((point, index) =>
+    index === 2 ? { x: point.x + 10, y: point.y } : point,
+  );
+  const riverCheck = validateLinearCandidate(created, movedRiver);
+  if (!riverCheck.ok) throw new Error(`moved river vertex refused: ${riverCheck.reason}`);
+  created = updateLinearFeature(created, river.id, { path: riverCheck.path });
+  const road = created.terrainFeatures.find(
+    (feature) => feature.kind === 'linear' && feature.category === 'road',
+  );
+  const movedPath = road.path.map((point, index) =>
+    index === 2 ? { x: point.x + 10, y: point.y } : point,
+  );
+  const check = validateLinearCandidate(created, movedPath);
+  if (!check.ok) throw new Error(`moved road vertex refused: ${check.reason}`);
+  created = updateLinearFeature(created, road.id, { path: check.path, width: 8 });
+  const updatedRoad = created.terrainFeatures.find((feature) => feature.id === road.id);
+  if (updatedRoad.width !== 8) throw new Error('road width change did not stick');
+  if (validateScenario(created).length > 0) {
+    throw new Error(`edited linears are invalid: ${validateScenario(created).join('; ')}`);
+  }
+  logStep('move a river vertex and change the road width', 'pass', '8 m');
+
   logStep('clip an area reaching past the edge to the battlefield', 'running');
   created = addGroundCoverFeature(created, {
     category: 'water',
@@ -459,6 +524,15 @@ async function phaseReopen(phase) {
     throw new Error(`reopened terrain is invalid: ${validateScenario(reopened).join('; ')}`);
   }
   logStep('keep the drawn ground cover identical and valid', 'pass', '4 areas');
+
+  logStep('keep the river and the road crossing them', 'running');
+  const linears = (reopened.terrainFeatures || []).filter((feature) => feature.kind === 'linear');
+  if (linears.length !== 2) throw new Error(`expected 2 rivers/roads, got ${linears.length}`);
+  const river = linears.find((feature) => feature.category === 'river');
+  const road = linears.find((feature) => feature.category === 'road');
+  if (!river || river.width !== 18) throw new Error('the river did not survive the reload');
+  if (!road || road.width !== 8) throw new Error('the edited road width did not survive the reload');
+  logStep('keep the river and the road crossing them', 'pass', 'river 18 m · road 8 m');
 
   logStep('keep the nested hills identical with derived levels', 'running');
   const reopenedHills = (reopened.terrainFeatures || []).filter((feature) => feature.kind === 'elevation');

@@ -9,9 +9,11 @@ import {
   MAX_BATTLEFIELD_HEIGHT_M,
   MAX_BATTLEFIELD_WIDTH_M,
   GROUND_COVER_CATEGORIES,
+  LINEAR_FEATURE_CATEGORIES,
   UNIT_PICK_TOLERANCE_PX,
   addElevationFeature,
   addGroundCoverFeature,
+  addLinearFeature,
   clampMapZoom,
   classifyRulesetReference,
   cloneScenario,
@@ -37,6 +39,7 @@ import {
   rebindRulesetToCurrent,
   removeElevationFeature,
   removeGroundCoverFeature,
+  removeLinearFeature,
   resizeBattlefield,
   rulesetCompatibilityNotice,
   snapFacing,
@@ -49,7 +52,9 @@ import {
   updateElevationFeature,
   updateGroundCoverFeature,
   validateElevationCandidate,
+  updateLinearFeature,
   validateGroundCoverCandidate,
+  validateLinearCandidate,
   validateScenario,
   zoomViewAroundCursor,
 } from './domain/scenario.js';
@@ -118,12 +123,15 @@ const state = {
   leftMode: 'forces',
   selectedTerrainId: null,
   selectedVertexIndex: null,
-  // The polygon being drawn: { kind, category?, points, error }. Display-only
-  // until the author finishes it; finishing validates and commits one undo
-  // step. Ground drafts carry a category; elevation drafts derive their level
-  // from nesting.
+  // The shape being drawn: { kind, category?, width?, points, error } where
+  // kind is 'ground' or 'elevation' (polygons) or 'linear' (a polyline).
+  // Display-only until the author finishes it; finishing validates and
+  // commits one undo step. Ground drafts carry a category; elevation drafts
+  // derive their level from nesting; linear drafts carry a category and width.
   terrainDraft: null,
   draftCategory: 'forest',
+  draftLinearCategory: 'river',
+  draftLinearWidth: 10,
   // The last refused terrain edit: { ring, reason, conflictId? }. Transient
   // display state (like the map view): rendered as a red highlight, cleared
   // by the next committed change.
@@ -1045,12 +1053,18 @@ function unitSvg(document, unit, mapView, mpp, flags = {}) {
 function terrainOverlaySvg(document, overlay, project, toScreen, mpp) {
   const { selectedId, selectedIndex, draft, refusal } = overlay || {};
   let out = '';
-  if (refusal && Array.isArray(refusal.ring) && refusal.ring.length >= 3) {
-    out += `<polygon points="${project(refusal.ring)}" fill="#b76e5a" fill-opacity="0.35" stroke="#b76e5a" stroke-width="${2.5 * mpp}" stroke-dasharray="${8 * mpp} ${5 * mpp}" class="terrain-refused"><title>${esc(refusal.reason || 'Refused shape')}</title></polygon>`;
+  if (refusal && Array.isArray(refusal.ring) && refusal.ring.length >= 2) {
+    const label = esc(refusal.reason || 'Refused shape');
+    if (refusal.kind === 'linear' || refusal.ring.length === 2) {
+      out += `<polyline points="${project(refusal.ring)}" fill="none" stroke="#b76e5a" stroke-width="${2.5 * mpp}" stroke-dasharray="${8 * mpp} ${5 * mpp}" class="terrain-refused"><title>${label}</title></polyline>`;
+    } else {
+      out += `<polygon points="${project(refusal.ring)}" fill="#b76e5a" fill-opacity="0.35" stroke="#b76e5a" stroke-width="${2.5 * mpp}" stroke-dasharray="${8 * mpp} ${5 * mpp}" class="terrain-refused"><title>${label}</title></polygon>`;
+    }
   }
   if (draft && Array.isArray(draft.points) && draft.points.length > 0) {
     const line = project(draft.points);
-    if (draft.points.length >= 3) {
+    const isLinear = draft.kind === 'linear';
+    if (!isLinear && draft.points.length >= 3) {
       out += `<polygon points="${line}" fill="#4e6047" fill-opacity="0.12" stroke="#4e6047" stroke-width="${2 * mpp}" stroke-dasharray="${7 * mpp} ${4 * mpp}" class="terrain-draft-fill"/>`;
     } else {
       out += `<polyline points="${line}" fill="none" stroke="#4e6047" stroke-width="${2 * mpp}" stroke-dasharray="${7 * mpp} ${4 * mpp}" class="terrain-draft-fill"/>`;
@@ -1079,6 +1093,23 @@ function terrainOverlaySvg(document, overlay, project, toScreen, mpp) {
         const screen = toScreen(point.x, point.y);
         const active = index === selectedIndex;
         return `<circle cx="${screen.x}" cy="${screen.y}" r="${(active ? 7 : 6) * mpp}" fill="${active ? '#4e6047' : '#faf9f4'}" stroke="#4e6047" stroke-width="${2 * mpp}" class="terrain-vertex${active ? ' selected' : ''}" data-vertex-index="${index}" data-feature-id="${esc(selected.id)}"><title>Vertex ${index + 1}: drag to move, Delete removes it</title></circle>`;
+      })
+      .join('');
+  }
+  if (selected && selected.kind === 'linear' && Array.isArray(selected.path)) {
+    const line = selected.path;
+    for (let index = 0; index + 1 < line.length; index += 1) {
+      const a = line[index];
+      const b = line[index + 1];
+      const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      const screen = toScreen(mid.x, mid.y);
+      out += `<circle cx="${screen.x}" cy="${screen.y}" r="${4 * mpp}" fill="#faf9f4" stroke="#7fa8c9" stroke-width="${1.5 * mpp}" stroke-dasharray="${3 * mpp} ${2 * mpp}" class="terrain-edge-handle" data-edge-index="${index}" data-feature-id="${esc(selected.id)}"><title>Insert a vertex here</title></circle>`;
+    }
+    out += line
+      .map((point, index) => {
+        const screen = toScreen(point.x, point.y);
+        const active = index === selectedIndex;
+        return `<circle cx="${screen.x}" cy="${screen.y}" r="${(active ? 7 : 6) * mpp}" fill="${active ? '#7fa8c9' : '#faf9f4'}" stroke="#7fa8c9" stroke-width="${2 * mpp}" class="terrain-vertex${active ? ' selected' : ''}" data-vertex-index="${index}" data-feature-id="${esc(selected.id)}"><title>Vertex ${index + 1}: drag to move, Delete removes it</title></circle>`;
       })
       .join('');
   }
@@ -1148,7 +1179,13 @@ function battlefieldSvg(document, mapView, overlay = {}) {
       }
       if (feature.kind === 'linear') {
         const color = LINEAR_STYLES[feature.category] || '#888888';
-        return `<polyline points="${project(feature.path)}" fill="none" stroke="${color}" stroke-width="${feature.width}" stroke-linecap="round" stroke-linejoin="round"><title>${esc(feature.category)} · ${esc(feature.width)} m</title></polyline>`;
+        const classes = ['terrain-linear'];
+        if (feature.id === overlay?.selectedId) classes.push('selected');
+        const selected = feature.id === overlay?.selectedId;
+        const halo = selected
+          ? `<polyline points="${project(feature.path)}" fill="none" stroke="#4e6047" stroke-width="${Number(feature.width) + 6 * mpp}" opacity="0.35" stroke-linecap="round" stroke-linejoin="round" class="terrain-linear-halo"/>`
+          : '';
+        return `${halo}<polyline points="${project(feature.path)}" fill="none" stroke="${color}" stroke-width="${feature.width}" stroke-linecap="round" stroke-linejoin="round" class="${classes.join(' ')}" data-feature-id="${esc(feature.id || '')}"><title>${esc(feature.category)} · ${esc(feature.width)} m</title></polyline>`;
       }
       return '';
     })
@@ -1602,6 +1639,7 @@ function selectedTerrainFeature(document) {
 function draftTitle(draft) {
   if (!draft) return '';
   if (draft.kind === 'elevation') return 'Hill';
+  if (draft.kind === 'linear') return linearLabel(draft.category);
   return groundCoverLabel(draft.category);
 }
 
@@ -1620,6 +1658,28 @@ function categoryOptions(selected) {
   ).join('');
 }
 
+const LINEAR_LABELS = {
+  river: 'River',
+  road: 'Road',
+};
+
+function linearLabel(category) {
+  return LINEAR_LABELS[category] || String(category || 'River or road');
+}
+
+function linearCategoryOptions(selected) {
+  return LINEAR_FEATURE_CATEGORIES.map(
+    (category) =>
+      `<option value="${category}"${category === selected ? ' selected' : ''}>${esc(linearLabel(category))}</option>`,
+  ).join('');
+}
+
+function linearFeatures(document) {
+  return (document.terrainFeatures || []).filter(
+    (feature) => feature && feature.kind === 'linear',
+  );
+}
+
 function leftPanelView(document) {
   const isTerrain = state.leftMode === 'terrain';
   return `<div class="mode-tabs" role="tablist" aria-label="Left panel mode">
@@ -1632,10 +1692,20 @@ function leftPanelView(document) {
 function terrainPanelView(document) {
   const grounds = groundFeatures(document);
   const hills = elevationFeatures(document);
+  const linears = linearFeatures(document);
   const draft = state.terrainDraft;
-  const category = draft?.kind === 'ground' ? draft.category : state.draftCategory;
   const drawing = draft
-    ? `<div class="terrain-drafting">
+    ? draft.kind === 'linear'
+      ? `<div class="terrain-drafting">
+          <p>Drawing ${esc(linearLabel(draft.category))} (${esc(String(draft.width))} m wide) — click the map to add vertices (${draft.points.length}).</p>
+          ${draft.error ? `<p class="field-error" role="alert">${esc(draft.error)}</p>` : ''}
+          <div class="terrain-actions">
+            <button class="btn-primary" data-action="terrain-draw-finish"${draft.points.length < 2 ? ' disabled' : ''}>Finish (Enter)</button>
+            <button class="btn-secondary" data-action="terrain-draw-cancel">Cancel (Esc)</button>
+          </div>
+          <p class="terrain-hint">Enter finishes · Escape cancels · Backspace removes the last vertex. Lines reaching past the edge are clipped to the battlefield; rivers and roads may cross areas and each other.</p>
+        </div>`
+      : `<div class="terrain-drafting">
         <p>Drawing ${esc(draftTitle(draft))} — click the map to add vertices (${draft.points.length}).</p>
         ${draft.error ? `<p class="field-error" role="alert">${esc(draft.error)}</p>` : ''}
         <div class="terrain-actions">
@@ -1644,12 +1714,17 @@ function terrainPanelView(document) {
         </div>
         <p class="terrain-hint">Enter finishes · Escape cancels · Backspace removes the last vertex. Shapes reaching past the edge are clipped to the battlefield; overlapping areas and hills that break nesting are refused, never auto-adjusted.</p>
       </div>`
-    : `<label class="field">New area category<select data-field="terrain-new-category">${categoryOptions(category)}</select></label>
+    : `<label class="field">New area category<select data-field="terrain-new-category">${categoryOptions(state.draftCategory)}</select></label>
       <div class="terrain-actions">
         <button class="btn-primary" data-action="terrain-draw-start" data-kind="ground">Draw area</button>
         <button class="btn-secondary" data-action="terrain-draw-start" data-kind="elevation">Draw hill</button>
       </div>
-      <p class="terrain-hint">Click vertices on the map, then finish from the keyboard. A refused shape is highlighted in red.</p>`;
+      <label class="field">New river or road<select data-field="terrain-new-linear-category">${linearCategoryOptions(state.draftLinearCategory)}</select></label>
+      <label class="field">Width (m)<input type="number" data-field="terrain-new-linear-width" min="0.1" step="0.1" value="${esc(state.draftLinearWidth)}"></label>
+      <div class="terrain-actions">
+        <button class="btn-primary" data-action="terrain-line-draw-start">Draw river or road</button>
+      </div>
+      <p class="terrain-hint">Click vertices on the map, then finish from the keyboard. A refused shape is highlighted in red. Rivers and roads may cross ground cover, elevation, and each other.</p>`;
   const items = grounds
     .map((feature) => {
       const area = groundAreaSquareMetres(feature);
@@ -1678,13 +1753,29 @@ function terrainPanelView(document) {
       </li>`;
     })
     .join('');
-  return `<div class="panel"><span class="eyebrow">GROUND COVER · HILLS</span><h2>Terrain</h2>
+  const linearItems = linears
+    .map((feature) => {
+      const selected = feature.id === state.selectedTerrainId;
+      return `<li class="terrain-row${selected ? ' selected' : ''}">
+        <button class="terrain-select" data-action="terrain-select" data-id="${esc(feature.id)}" aria-pressed="${String(selected)}">
+          <span class="swatch" style="background:${esc((LINEAR_STYLES[feature.category] || '#cccccc'))}"></span>
+          <span><span class="unit-name">${esc(linearLabel(feature.category))} · ${esc(String(feature.width))} m</span>
+          <span class="unit-detail">${feature.path.length} vertices · ${esc(String(feature.path.length - 1))} segments</span></span>
+        </button>
+        <button class="btn-quiet btn-danger" data-action="terrain-delete" data-id="${esc(feature.id)}" title="Delete this river or road (undoable)">Delete</button>
+      </li>`;
+    })
+    .join('');
+  return `<div class="panel"><span class="eyebrow">GROUND COVER · HILLS · RIVERS AND ROADS</span><h2>Terrain</h2>
     ${drawing}
     ${grounds.length ? `<ul class="terrain-list">${items}</ul>` : '<p class="empty-terrain">No ground cover areas yet. Open ground is the default; draw forest, rough ground, water, or a settlement.</p>'}
     <p class="readonly-note">Areas must not overlap; touching edge to edge is legal. Partly-outside shapes are clipped to the battlefield edge.</p>
     <h3 class="terrain-subhead">Hills (elevation)</h3>
     ${hills.length ? `<ul class="terrain-list">${hillItems}</ul>` : '<p class="empty-terrain">No hills yet. Draw a hill for level 1, then draw inside it for level 2, and so on — levels follow from nesting and are never typed.</p>'}
     <p class="readonly-note">Hills nest: a hill wholly inside level n becomes level n + 1. Crossing, straddling, and self-intersecting shapes are refused. Deleting a hill promotes its nested hills. Elevation is independent of ground cover.</p>
+    <h3 class="terrain-subhead">Rivers and roads</h3>
+    ${linears.length ? `<ul class="terrain-list">${linearItems}</ul>` : '<p class="empty-terrain">No rivers or roads yet. Draw a river or road, give it a width in metres, and edit its vertices on the map.</p>'}
+    <p class="readonly-note">Rivers and roads may cross ground cover, hills, and each other. Lines reaching past the edge are clipped to the battlefield.</p>
   </div>`;
 }
 
@@ -1703,6 +1794,20 @@ function terrainInspectorView(document) {
       </div>
     </section>`;
     }
+    if (draft.kind === 'linear') {
+      return `<section class="terrain-inspector" aria-label="River or road being drawn">
+      <h3>New ${esc(linearLabel(draft.category))}</h3>
+      <label class="field">Category<select data-field="terrain-draft-linear-category">${linearCategoryOptions(draft.category)}</select></label>
+      <label class="field">Width (m)<input type="number" data-field="terrain-draft-linear-width" min="0.1" step="0.1" value="${esc(draft.width)}"></label>
+      <div class="kv"><dt>Vertices</dt><dd>${draft.points.length} (at least 2 to finish)</dd></div>
+      ${draft.error ? `<p class="field-error" role="alert">${esc(draft.error)}</p>` : ''}
+      <div class="terrain-actions">
+        <button class="btn-primary" data-action="terrain-draw-finish"${draft.points.length < 2 ? ' disabled' : ''}>Finish (Enter)</button>
+        <button class="btn-secondary" data-action="terrain-draw-cancel">Cancel (Esc)</button>
+      </div>
+      <p class="terrain-hint">Set the category and width here; both travel with the finished line.</p>
+    </section>`;
+    }
     return `<section class="terrain-inspector" aria-label="Area being drawn">
       <h3>New ${esc(groundCoverLabel(draft.category))} area</h3>
       <label class="field">Category<select data-field="terrain-draft-category">${categoryOptions(draft.category)}</select></label>
@@ -1713,6 +1818,29 @@ function terrainInspectorView(document) {
         <button class="btn-secondary" data-action="terrain-draw-cancel">Cancel (Esc)</button>
       </div>
     </section>`;
+  }
+  const linear = linearFeatures(document).find((feature) => feature.id === state.selectedTerrainId) || null;
+  if (linear) {
+    const vertices = linear.path
+      .map((point, index) => {
+        const selected = index === state.selectedVertexIndex;
+        return `<li class="terrain-vertex-row${selected ? ' selected' : ''}">
+        <span class="mono">${index + 1}. (${point.x.toFixed(1)}, ${point.y.toFixed(1)})</span>
+        <button class="btn-quiet btn-danger" data-action="terrain-vertex-delete" data-index="${index}"${linear.path.length <= 2 ? ' disabled' : ''} title="${linear.path.length <= 2 ? 'A river or road needs at least 2 vertices' : 'Delete this vertex (undoable)'}">Delete</button>
+      </li>`;
+      })
+      .join('');
+    return `<section class="terrain-inspector" aria-label="Selected river or road">
+    <h3>${esc(linearLabel(linear.category))}</h3>
+    <label class="field">Category<select data-field="terrain-linear-category" data-id="${esc(linear.id)}">${linearCategoryOptions(linear.category)}</select></label>
+    <label class="field">Width (m)<input type="number" data-field="terrain-linear-width" data-id="${esc(linear.id)}" min="0.1" step="0.1" value="${esc(linear.width)}"></label>
+    <div class="kv"><dt>Vertices</dt><dd>${linear.path.length}</dd></div>
+    <ol class="terrain-vertex-list">${vertices}</ol>
+    <div class="terrain-actions">
+      <button class="btn-secondary btn-danger" data-action="terrain-delete" data-id="${esc(linear.id)}">Delete river or road</button>
+    </div>
+    <p class="terrain-hint">Drag a vertex on the map · click a small edge dot to insert a vertex · select a vertex and press Delete to remove it (at least two stay). Rivers and roads may cross everything.</p>
+  </section>`;
   }
   const feature = selectedTerrainFeature(document);
   if (!feature) return '';
@@ -1755,8 +1883,8 @@ function terrainInspectorView(document) {
 // Refuse a terrain edit without touching the document: highlight the candidate
 // ring in red and explain why. Nothing is auto-clipped and nothing is
 // committed, so the author can adjust the shape and try again.
-function refuseTerrainEdit(reason, ring, conflictId) {
-  state.terrainRefusal = { ring: Array.isArray(ring) ? ring : [], reason, conflictId };
+function refuseTerrainEdit(reason, ring, conflictId, kind = 'ground') {
+  state.terrainRefusal = { ring: Array.isArray(ring) ? ring : [], reason, conflictId, kind };
   state.status = reason;
   state.statusError = true;
   render();
@@ -1768,21 +1896,20 @@ function pruneTerrainSelection() {
   if (!state.document) {
     return;
   }
-  if (state.selectedTerrainId && !selectedTerrainFeature(state.document)) {
+  if (!state.selectedTerrainId) {
+    return;
+  }
+  const holds = (state.document.terrainFeatures || []).some(
+    (feature) => feature?.id === state.selectedTerrainId,
+  );
+  if (!holds) {
     state.selectedTerrainId = null;
     state.selectedVertexIndex = null;
   }
 }
 
-function startTerrainDraft(kind = 'ground') {
-  if (!state.document || state.terrainDraft) {
-    return;
-  }
-  const draftKind = kind === 'elevation' ? 'elevation' : 'ground';
-  state.terrainDraft =
-    draftKind === 'elevation'
-      ? { kind: 'elevation', points: [], error: '' }
-      : { kind: 'ground', category: state.draftCategory, points: [], error: '' };
+function beginDraft(draft) {
+  state.terrainDraft = draft;
   state.selectedTerrainId = null;
   state.selectedVertexIndex = null;
   state.terrainRefusal = null;
@@ -1791,7 +1918,30 @@ function startTerrainDraft(kind = 'ground') {
   if (state.mapView.tool === 'hand') {
     state.mapView = { ...state.mapView, tool: 'select' };
   }
+}
+
+function startTerrainDraft(kind = 'ground') {
+  if (!state.document || state.terrainDraft) {
+    return;
+  }
+  const draftKind = kind === 'elevation' ? 'elevation' : 'ground';
+  beginDraft(
+    draftKind === 'elevation'
+      ? { kind: 'elevation', points: [], error: '' }
+      : { kind: 'ground', category: state.draftCategory, points: [], error: '' },
+  );
   state.status = `Drawing ${draftTitle(state.terrainDraft)}: click the map to add vertices, Enter finishes, Esc cancels.`;
+  state.statusError = false;
+  render();
+}
+
+function startLinearDraft() {
+  if (!state.document || state.terrainDraft) {
+    return;
+  }
+  const width = Number(state.draftLinearWidth) > 0 ? Number(state.draftLinearWidth) : 10;
+  beginDraft({ kind: 'linear', category: state.draftLinearCategory, width, points: [], error: '' });
+  state.status = `Drawing ${linearLabel(state.terrainDraft.category)}: click the map to add vertices, Enter finishes, Esc cancels.`;
   state.statusError = false;
   render();
 }
@@ -1841,11 +1991,7 @@ function popDraftVertex() {
   render();
 }
 
-function finishTerrainDraft() {
-  const draft = state.terrainDraft;
-  if (!draft || !state.document) {
-    return;
-  }
+function finishPolygonDraft(draft) {
   const isHill = draft.kind === 'elevation';
   const needsVertices = isHill ? 'A hill needs at least 3 vertices.' : 'An area needs at least 3 vertices.';
   if (draft.points.length < 3) {
@@ -1892,6 +2038,7 @@ function finishTerrainDraft() {
       `Cannot add a ground cover area: ${check.reason}.`,
       check.ring,
       check.conflictId,
+      'ground',
     );
     return;
   }
@@ -1900,7 +2047,7 @@ function finishTerrainDraft() {
     next = addGroundCoverFeature(state.document, { category: draft.category, polygon: draft.points });
   } catch (error) {
     draft.error = error.message;
-    refuseTerrainEdit(error.message, draft.points, undefined);
+    refuseTerrainEdit(error.message, draft.points, undefined, 'ground');
     return;
   }
   const before = new Set((state.document.terrainFeatures || []).map((feature) => feature?.id));
@@ -1917,6 +2064,74 @@ function finishTerrainDraft() {
       ? `${groundCoverLabel(draft.category)} area added, clipped to the battlefield.`
       : `${groundCoverLabel(draft.category)} area added.`,
   );
+}
+
+function finishLinearDraft(draft) {
+  if (draft.points.length < 2) {
+    draft.error = 'A river or road needs at least 2 vertices.';
+    state.status = draft.error;
+    state.statusError = true;
+    render();
+    return;
+  }
+  const width = Number(draft.width);
+  if (!Number.isFinite(width) || width <= 0) {
+    draft.error = 'Width must be a positive number of metres.';
+    state.status = draft.error;
+    state.statusError = true;
+    render();
+    return;
+  }
+  const check = validateLinearCandidate(state.document, draft.points);
+  if (!check.ok) {
+    draft.error = `${check.reason[0].toUpperCase()}${check.reason.slice(1)}.`;
+    refuseTerrainEdit(
+      `Cannot add a river or road: ${check.reason}.`,
+      check.path,
+      undefined,
+      'linear',
+    );
+    return;
+  }
+  let next;
+  try {
+    next = addLinearFeature(state.document, {
+      category: draft.category,
+      path: draft.points,
+      width,
+    });
+  } catch (error) {
+    draft.error = error.message;
+    refuseTerrainEdit(error.message, draft.points, undefined, 'linear');
+    return;
+  }
+  const before = new Set((state.document.terrainFeatures || []).map((feature) => feature?.id));
+  const added = (next.terrainFeatures || []).find((feature) => feature && !before.has(feature.id));
+  const drawn = JSON.stringify(draft.points.map((point) => ({ x: round1(point.x), y: round1(point.y) })));
+  const clipped = added && JSON.stringify(added.path) !== drawn;
+  state.terrainDraft = null;
+  state.draftLinearCategory = draft.category;
+  state.draftLinearWidth = draft.width;
+  state.selectedTerrainId = added ? added.id : null;
+  state.selectedVertexIndex = null;
+  commitEdit(next);
+  toast(
+    clipped
+      ? `${linearLabel(draft.category)} added, clipped to the battlefield.`
+      : `${linearLabel(draft.category)} added.`,
+  );
+}
+
+function finishTerrainDraft() {
+  const draft = state.terrainDraft;
+  if (!draft || !state.document) {
+    return;
+  }
+  if (draft.kind === 'linear') {
+    finishLinearDraft(draft);
+    return;
+  }
+  finishPolygonDraft(draft);
 }
 
 function selectTerrainFeature(id, vertexIndex = null) {
@@ -1946,15 +2161,60 @@ function commitTerrainCategory(id, category) {
   toast(`Area is now ${groundCoverLabel(category)}.`);
 }
 
+function commitLinearCategory(id, category) {
+  if (!state.document) {
+    return;
+  }
+  let next;
+  try {
+    next = updateLinearFeature(state.document, id, { category });
+  } catch (error) {
+    state.status = error.message;
+    state.statusError = true;
+    render();
+    return;
+  }
+  commitEdit(next);
+  toast(`Now a ${linearLabel(category)}.`);
+}
+
+function commitLinearWidth(id, raw) {
+  if (!state.document) {
+    return;
+  }
+  if (String(raw ?? '').trim() === '' || !Number.isFinite(Number(raw)) || Number(raw) <= 0) {
+    state.status = 'Width must be a positive number of metres.';
+    state.statusError = true;
+    render();
+    return;
+  }
+  let next;
+  try {
+    next = updateLinearFeature(state.document, id, { width: Number(raw) });
+  } catch (error) {
+    state.status = error.message;
+    state.statusError = true;
+    render();
+    return;
+  }
+  commitEdit(next, `[data-field="terrain-linear-width"][data-id="${id}"]`);
+  toast('Width updated.');
+}
+
 function deleteTerrainFeature(id) {
   if (!state.document) {
     return;
   }
   const feature = (state.document.terrainFeatures || []).find((entry) => entry?.id === id);
-  const isHill = feature?.kind === 'elevation';
+  if (!feature) {
+    return;
+  }
+  const isHill = feature.kind === 'elevation';
   let next;
   try {
-    next = isHill
+    next = feature.kind === 'linear'
+      ? removeLinearFeature(state.document, id)
+      : isHill
       ? removeElevationFeature(state.document, id)
       : removeGroundCoverFeature(state.document, id);
   } catch (error) {
@@ -1969,9 +2229,11 @@ function deleteTerrainFeature(id) {
   }
   commitEdit(next);
   toast(
-    isHill
-      ? `Hill deleted; nested hills promoted. Undo restores it.`
-      : `${groundCoverLabel(feature?.category)} area deleted. Undo restores it.`,
+    feature.kind === 'linear'
+      ? `${linearLabel(feature.category)} deleted. Undo restores it.`
+      : isHill
+        ? `Hill deleted; nested hills promoted. Undo restores it.`
+        : `${groundCoverLabel(feature.category)} area deleted. Undo restores it.`,
   );
 }
 
@@ -1993,10 +2255,34 @@ function insertTerrainVertex(featureId, edgeIndex) {
     return;
   }
   const feature = (state.document.terrainFeatures || []).find((entry) => entry?.id === featureId);
-  if (!feature || !Array.isArray(feature.polygon)) {
+  if (!feature) {
+    return;
+  }
+  if (feature.kind === 'linear') {
+    const line = feature.path;
+    const a = line[edgeIndex];
+    const b = line[edgeIndex + 1];
+    if (!a || !b) {
+      return;
+    }
+    const midpoint = { x: round1((a.x + b.x) / 2), y: round1((a.y + b.y) / 2) };
+    const path = [...line.slice(0, edgeIndex + 1), midpoint, ...line.slice(edgeIndex + 1)];
+    const check = validateLinearCandidate(state.document, path);
+    if (!check.ok) {
+      refuseTerrainEdit(`Cannot insert a vertex: ${check.reason}.`, check.path, undefined, 'linear');
+      return;
+    }
+    commitEdit(updateLinearFeature(state.document, featureId, { path: check.path }));
+    state.selectedTerrainId = featureId;
+    state.selectedVertexIndex = edgeIndex + 1;
+    render();
+    toast('Vertex inserted.');
     return;
   }
   const ring = feature.polygon;
+  if (!Array.isArray(ring)) {
+    return;
+  }
   const a = ring[edgeIndex];
   const b = ring[(edgeIndex + 1) % ring.length];
   if (!a || !b) {
@@ -2006,7 +2292,7 @@ function insertTerrainVertex(featureId, edgeIndex) {
   const polygon = [...ring.slice(0, edgeIndex + 1), midpoint, ...ring.slice(edgeIndex + 1)];
   const check = terrainValidateFor(feature, polygon, featureId);
   if (!check.ok) {
-    refuseTerrainEdit(`Cannot insert a vertex: ${check.reason}.`, check.ring, check.conflictId);
+    refuseTerrainEdit(`Cannot insert a vertex: ${check.reason}.`, check.ring, check.conflictId, 'ground');
     return;
   }
   commitEdit(terrainUpdateFor(featureId, feature.kind === 'elevation', check.ring));
@@ -2021,7 +2307,33 @@ function deleteTerrainVertex(featureId, index) {
     return;
   }
   const feature = (state.document.terrainFeatures || []).find((entry) => entry?.id === featureId);
-  if (!feature || !feature.polygon || !feature.polygon[index]) {
+  if (!feature) {
+    return;
+  }
+  if (feature.kind === 'linear') {
+    if (!feature.path[index]) {
+      return;
+    }
+    if (feature.path.length <= 2) {
+      state.status = 'A river or road needs at least 2 vertices: the vertex stays.';
+      state.statusError = true;
+      render();
+      return;
+    }
+    const path = feature.path.filter((_, other) => other !== index);
+    const check = validateLinearCandidate(state.document, path);
+    if (!check.ok) {
+      refuseTerrainEdit(`Cannot delete the vertex: ${check.reason}.`, check.path, undefined, 'linear');
+      return;
+    }
+    commitEdit(updateLinearFeature(state.document, featureId, { path: check.path }));
+    state.selectedTerrainId = featureId;
+    state.selectedVertexIndex = null;
+    render();
+    toast('Vertex deleted.');
+    return;
+  }
+  if (!feature.polygon || !feature.polygon[index]) {
     return;
   }
   if (feature.polygon.length <= 3) {
@@ -2035,7 +2347,7 @@ function deleteTerrainVertex(featureId, index) {
   const polygon = feature.polygon.filter((_, other) => other !== index);
   const check = terrainValidateFor(feature, polygon, featureId);
   if (!check.ok) {
-    refuseTerrainEdit(`Cannot delete the vertex: ${check.reason}.`, check.ring, check.conflictId);
+    refuseTerrainEdit(`Cannot delete the vertex: ${check.reason}.`, check.ring, check.conflictId, 'ground');
     return;
   }
   commitEdit(terrainUpdateFor(featureId, feature.kind === 'elevation', check.ring));
@@ -2050,7 +2362,28 @@ function commitDraggedVertex(featureId, index, point) {
     return;
   }
   const feature = (state.document.terrainFeatures || []).find((entry) => entry?.id === featureId);
-  if (!feature || !feature.polygon || !feature.polygon[index]) {
+  if (!feature) {
+    return;
+  }
+  if (feature.kind === 'linear') {
+    if (!feature.path[index]) {
+      return;
+    }
+    const path = feature.path.map((vertex, other) =>
+      other === index ? { x: round1(point.x), y: round1(point.y) } : vertex,
+    );
+    const check = validateLinearCandidate(state.document, path);
+    if (!check.ok) {
+      refuseTerrainEdit(`Cannot move the vertex: ${check.reason}.`, check.path, undefined, 'linear');
+      return;
+    }
+    commitEdit(updateLinearFeature(state.document, featureId, { path: check.path }));
+    state.selectedTerrainId = featureId;
+    state.selectedVertexIndex = index;
+    render();
+    return;
+  }
+  if (!feature.polygon || !feature.polygon[index]) {
     return;
   }
   const polygon = feature.polygon.map((vertex, other) =>
@@ -2058,7 +2391,7 @@ function commitDraggedVertex(featureId, index, point) {
   );
   const check = terrainValidateFor(feature, polygon, featureId);
   if (!check.ok) {
-    refuseTerrainEdit(`Cannot move the vertex: ${check.reason}.`, check.ring, check.conflictId);
+    refuseTerrainEdit(`Cannot move the vertex: ${check.reason}.`, check.ring, check.conflictId, 'ground');
     return;
   }
   commitEdit(terrainUpdateFor(featureId, feature.kind === 'elevation', check.ring));
@@ -2934,6 +3267,10 @@ document.addEventListener('click', async (event) => {
     startTerrainDraft(element.dataset.kind === 'elevation' ? 'elevation' : 'ground');
     return;
   }
+  if (action === 'terrain-line-draw-start') {
+    startLinearDraft();
+    return;
+  }
   if (action === 'terrain-draw-finish') {
     finishTerrainDraft();
     return;
@@ -3096,6 +3433,16 @@ document.addEventListener('change', (event) => {
       : 'forest';
     return;
   }
+  if (field === 'terrain-new-linear-category') {
+    state.draftLinearCategory = LINEAR_FEATURE_CATEGORIES.includes(event.target.value)
+      ? event.target.value
+      : 'river';
+    return;
+  }
+  if (field === 'terrain-new-linear-width') {
+    state.draftLinearWidth = event.target.value;
+    return;
+  }
   if (field === 'terrain-draft-category') {
     if (state.terrainDraft && state.terrainDraft.kind !== 'elevation' && GROUND_COVER_CATEGORIES.includes(event.target.value)) {
       state.terrainDraft.category = event.target.value;
@@ -3104,8 +3451,32 @@ document.addEventListener('change', (event) => {
     }
     return;
   }
+  if (field === 'terrain-draft-linear-category') {
+    if (state.terrainDraft && state.terrainDraft.kind === 'linear' && LINEAR_FEATURE_CATEGORIES.includes(event.target.value)) {
+      state.terrainDraft.category = event.target.value;
+      state.terrainDraft.error = '';
+      render();
+    }
+    return;
+  }
+  if (field === 'terrain-draft-linear-width') {
+    if (state.terrainDraft && state.terrainDraft.kind === 'linear') {
+      state.terrainDraft.width = event.target.value;
+      state.terrainDraft.error = '';
+      render();
+    }
+    return;
+  }
   if (field === 'terrain-category') {
     commitTerrainCategory(event.target.dataset.id, event.target.value);
+    return;
+  }
+  if (field === 'terrain-linear-category') {
+    commitLinearCategory(event.target.dataset.id, event.target.value);
+    return;
+  }
+  if (field === 'terrain-linear-width') {
+    commitLinearWidth(event.target.dataset.id, event.target.value);
   }
 });
 
