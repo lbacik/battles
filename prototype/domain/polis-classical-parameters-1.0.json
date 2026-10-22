@@ -39,5 +39,28 @@
     "distanceM": 20,
     "rateFactor": 0.5,
     "cohesionPassChance": 0.5
+  },
+  "combat": {
+    "lethality": 0.06,
+    "chargeBonus": 1.5,
+    "flankFactor": 1.5,
+    "rearFactor": 2.0,
+    "elevationFactor": 1.2,
+    "disorderedFactor": 0.7,
+    "riverFactor": 0.7,
+    "terrainFactor": {
+      "open": 1,
+      "rough": 0.9,
+      "forest": 0.75,
+      "settlement": 0.9
+    },
+    "cohesionPerCasualty": 0.08,
+    "loserFactor": 1.5,
+    "flankStrain": 1.0,
+    "rearStrain": 2.0,
+    "depthCap": 4,
+    "depthReduction": 0.1,
+    "disorderedAt": 2.0,
+    "routedAt": 4.0
   }
 }

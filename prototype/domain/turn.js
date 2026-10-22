@@ -33,8 +33,9 @@
 // orders and has them resolved, then the other side does the same, and a
 // pair of turns forms a round. Resolution runs the Movement, Shooting,
 // Combat, and Cohesion phases — the Movement phase executes the accepted
-// moves in order, the rest stay empty until their slices land — then passes
-// the turn and counts rounds as pairs of turns.
+// moves in order, the Combat phase fights every engaged pair (see
+// `./combat.js`), while Shooting and Cohesion stay empty until their slices
+// land — then passes the turn and counts rounds as pairs of turns.
 
 import { deriveFootprint } from './geometry.js';
 import { RULESET_PARAMETERS, TROOP_TYPE_CATALOGUE } from './polis-classical.js';
@@ -43,6 +44,7 @@ import {
   fightingFiles,
   validateChargeOnField,
 } from './charge.js';
+import { resolveCombatPhase } from './combat.js';
 import {
   FORWARD_ARC_DEG,
   footprintAt,
@@ -837,9 +839,10 @@ export function validateTurn(battle, submission) {
 // accepted moves, charges, reforms, and withdraws in the given order at their
 // validated previews; a withdraw also breaks every contact it held and then
 // tests cohesion by chance on the engine generator (failure costs a cohesion
-// step, recorded with the draw). Shooting, Combat, and Cohesion stay empty
-// until their slices land. Resolution then passes the turn and counts rounds
-// as pairs of turns. A turn decision is either a commit or a concede.
+// step, recorded with the draw). The Combat phase then fights every engaged
+// pair (see `./combat.js`). Shooting and Cohesion stay empty until their
+// slices land. Resolution then passes the turn and counts rounds as pairs of
+// turns. A turn decision is either a commit or a concede.
 
 export class TurnRejectedError extends Error {
   constructor(result) {
@@ -893,10 +896,12 @@ export function resolveTurn(battle, decision) {
   // Execute the accepted orders in the given order at their validated
   // previews: the previews are deterministic, so resolution replays exactly
   // what validation promised. Each charge also records the engagement on both
-  // units; a target charged twice keeps its first contact. Each reform
+  // units (a target charged twice keeps its first contact). Each reform
   // changes the formation in place; each withdraw steps back, breaks every
   // contact it held, and then tests cohesion by chance on the engine
-  // generator (the enemy neither pursues nor gets a free attack).
+  // generator (the enemy neither pursues nor gets a free attack). A charge
+  // marks the charger for the first-fight bonus, consumed by the Combat phase
+  // of this same turn (see `./combat.js`).
   const rng = createRng(next.rngState);
   for (const verdict of result.verdicts) {
     if (!verdict.accepted || !verdict.preview) {
@@ -990,6 +995,7 @@ export function resolveTurn(battle, decision) {
         frontageM: verdict.charge.frontageM,
         files: verdict.charge.fightingFiles,
       };
+      charger.freshCharge = true;
       if (!isEngaged(charged)) {
         charged.engaged = {
           unitId: charger.id,
@@ -1032,7 +1038,21 @@ export function resolveTurn(battle, decision) {
       }),
     );
   }
-  for (const phase of TURN_PHASES) {
+  for (const phase of TURN_PHASES.slice(0, 2)) {
+    next.events.push(
+      nextEvent(next, {
+        type: 'turn-phase',
+        turnNumber: battle.turnNumber,
+        side: battle.activeSide,
+        phase,
+        ordersApplied: result.acceptedOrders.length,
+      }),
+    );
+  }
+  // The Combat phase fights every engaged pair on the engine generator,
+  // recording one draw per side per fight (see `./combat.js`).
+  resolveCombatPhase(next);
+  for (const phase of TURN_PHASES.slice(2)) {
     next.events.push(
       nextEvent(next, {
         type: 'turn-phase',
