@@ -26,6 +26,13 @@
       "slinger": 110,
       "light_cavalry": 240,
       "cavalry": 200
+    },
+    "terrain": {
+      "roughFactor": 1.5,
+      "forestFactor": 2.5,
+      "roadFactor": 0.7,
+      "columnMaxFiles": 4,
+      "riverCostM": 30
     }
   }
 }

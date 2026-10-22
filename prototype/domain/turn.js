@@ -74,6 +74,7 @@ export const REJECTION_UNSUPPORTED_ORDER_KIND = 'unsupported_order_kind';
 export const REJECTION_INVALID_MOVE = 'invalid_move';
 export const REJECTION_COLLISION = 'collision';
 export const REJECTION_BATTLEFIELD_EDGE = 'battlefield_edge';
+export const REJECTION_FORBIDDEN_GROUND = 'forbidden_ground';
 export const REJECTION_OUT_OF_REACH = 'out_of_reach';
 export const REJECTION_CONTACT_WITH_ENEMY = 'contact_with_enemy';
 
@@ -193,7 +194,9 @@ export function buildPlayerView(battle) {
 // --- Available actions ------------------------------------------------------
 // Computed per unit at the start of the turn: the permitted order kinds,
 // with reasons for the unavailable ones, the Charge and Shoot candidates,
-// and the movement allowance in metres on open ground. Hold and Move are
+// and the movement allowance in metres at the unit's current terrain (the
+// open-ground allowance divided by the worst-cover factor there; the flat
+// river fee is per leg and never part of the allowance). Hold and Move are
 // permitted in this slice; both candidate lists stay empty until the Charge
 // and Shoot slices land.
 
@@ -206,7 +209,7 @@ function movementParamsOf(battle) {
   return battle?.parameters?.movement ?? RULESET_PARAMETERS.movement;
 }
 
-function actionsForUnit(unit, params) {
+function actionsForUnit(unit, params, terrainFeatures = []) {
   return {
     unitId: unit.id,
     permitted: [{ kind: ORDER_KIND_HOLD }, { kind: ORDER_KIND_MOVE }],
@@ -219,7 +222,7 @@ function actionsForUnit(unit, params) {
     ),
     chargeCandidates: [],
     shootCandidates: [],
-    movementAllowanceM: movementAllowanceM(unit, params),
+    movementAllowanceM: movementAllowanceM(unit, params, terrainFeatures),
   };
 }
 
@@ -232,6 +235,7 @@ export function availableActions(battle, side) {
     throw new Error(`Unknown side "${side}" (one of: ${ids.join(', ')}).`);
   }
   const params = movementParamsOf(battle);
+  const terrainFeatures = battle.scenario?.terrainFeatures || [];
   return {
     formatVersion: AVAILABLE_ACTIONS_FORMAT_VERSION,
     battleId: battle.id,
@@ -239,7 +243,7 @@ export function availableActions(battle, side) {
     side,
     units: battle.units
       .filter((unit) => unit.side === side)
-      .map((unit) => actionsForUnit(unit, params)),
+      .map((unit) => actionsForUnit(unit, params, terrainFeatures)),
   };
 }
 
@@ -452,6 +456,7 @@ export function validateTurn(battle, submission) {
         params,
         battlefield: battle.scenario.battlefield,
         others: othersAt(unit.id),
+        terrainFeatures: battle.scenario?.terrainFeatures || [],
         orderIndex,
       });
       if (!planned.ok) {

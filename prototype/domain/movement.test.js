@@ -18,12 +18,16 @@ import {
   MAX_MOVE_LEGS,
   convexHull,
   displacementBearing,
+  footprintTouchesPath,
+  groundCoverAt,
   movementAllowanceM,
   normalizeFacing,
   signedAngleDiff,
+  terrainFactorAt,
   validateMoveOnField,
 } from './movement.js';
 import { RULESET_PARAMETERS } from './polis-classical.js';
+import { round1 } from './geometry.js';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const scenarioDir = path.join(here, '..', 'scenarios');
@@ -604,4 +608,254 @@ describe('pure move planning', () => {
     assert.equal(planned.code, 'collision');
     assert.equal(planned.details.withUnitId, blocker.id);
   });
+});
+
+describe('terrain effects on movement (decision #6 items 14-15)', () => {
+  const TERRAIN = MOVEMENT.terrain;
+  assert.ok(TERRAIN.roughFactor > 1, 'rough slows movement');
+  assert.ok(TERRAIN.forestFactor > TERRAIN.roughFactor, 'forest slows much more than rough');
+  assert.ok(TERRAIN.roadFactor < 1, 'road speeds movement');
+  assert.ok(Number.isInteger(TERRAIN.columnMaxFiles), 'column is files at or below a parameter');
+
+  function terrainBattle(features) {
+    const battle = freshBattle();
+    battle.scenario.terrainFeatures = features;
+    return battle;
+  }
+
+  function groundRect(id, category, minX, minY, maxX, maxY) {
+    return {
+      id,
+      kind: 'ground',
+      category,
+      polygon: [
+        { x: minX, y: minY },
+        { x: maxX, y: minY },
+        { x: maxX, y: maxY },
+        { x: minX, y: maxY },
+      ],
+    };
+  }
+
+  function roadAlongX500(id = 'road-test') {
+    return {
+      id,
+      kind: 'linear',
+      category: 'road',
+      path: [{ x: 500, y: 640 }, { x: 500, y: 520 }],
+      width: 6,
+    };
+  }
+
+  function riverAcross(id = 'river-test') {
+    return {
+      id,
+      kind: 'linear',
+      category: 'river',
+      path: [{ x: 440, y: 580 }, { x: 560, y: 580 }],
+      width: 6,
+    };
+  }
+
+  function moveSouth(battle) {
+    const unit = hopliteOf(battle);
+    return validateTurn(battle, submissionFor(battle, [moveOrder(unit.id, [{ to: { x: 500, y: 560 } }])]));
+  }
+
+  it('bills rough ground slower than open ground', () => {
+    const battle = terrainBattle([groundRect('rough-a', 'rough', 400, 540, 600, 620)]);
+    const verdict = acceptedVerdict(moveSouth(battle));
+    assert.deepEqual(verdict.movement, { availableM: 90, requiredM: 60 });
+  });
+
+  it('bills forest much slower than rough ground', () => {
+    const battle = terrainBattle([groundRect('forest-a', 'forest', 400, 540, 600, 620)]);
+    const rejection = rejectedVerdict(moveSouth(battle));
+    assert.equal(rejection.code, 'out_of_reach');
+    assert.deepEqual(rejection.details, { unitId: hopliteOf(battle).id, availableM: 90, requiredM: 100, shortfallM: 10 });
+  });
+
+  it('treats settlement as forest', () => {
+    const battle = terrainBattle([groundRect('town-a', 'settlement', 400, 540, 600, 620)]);
+    const rejection = rejectedVerdict(moveSouth(battle));
+    assert.equal(rejection.code, 'out_of_reach');
+    assert.deepEqual(rejection.details.requiredM, 100);
+  });
+
+  it('applies the worst ground cover the footprint touches', () => {
+    const battle = freshBattle();
+    const unit = hopliteOf(battle);
+    battle.scenario.terrainFeatures = [
+      groundRect('rough-a', 'rough', 400, 540, 600, 650),
+      groundRect('forest-a', 'forest', 480, 590, 520, 630),
+    ];
+    const actions = availableActions(battle, battle.activeSide);
+    const entry = actions.units.find((item) => item.unitId === unit.id);
+    // The footprint (y 600-616) touches both rough and forest: forest wins.
+    assert.equal(entry.movementAllowanceM, 36);
+    assert.equal(
+      groundCoverAt(
+        [{ x: 492, y: 600 }, { x: 508, y: 600 }, { x: 508, y: 616 }, { x: 492, y: 616 }],
+        battle.scenario.terrainFeatures,
+      ),
+      'forest',
+    );
+  });
+
+  it('accumulates cost along a leg that crosses terrain boundaries', () => {
+    const allRough = terrainBattle([groundRect('rough-a', 'rough', 400, 540, 600, 620)]);
+    const allForest = terrainBattle([groundRect('forest-a', 'forest', 400, 540, 600, 620)]);
+    const mixed = terrainBattle([
+      groundRect('rough-a', 'rough', 400, 580, 600, 620),
+      groundRect('forest-a', 'forest', 400, 540, 600, 580),
+    ]);
+    const roughRequired = acceptedVerdict(moveSouth(allRough)).movement.requiredM;
+    const mixedRequired = acceptedVerdict(moveSouth(mixed)).movement.requiredM;
+    assert.equal(roughRequired, 60);
+    // Half the march bills rough, half bills forest: strictly between the two.
+    assert.ok(mixedRequired > roughRequired, `mixed ${mixedRequired} exceeds rough ${roughRequired}`);
+    assert.ok(mixedRequired < 100, `mixed ${mixedRequired} stays below all-forest 100`);
+  });
+
+  it('speeds a unit in column on a road and ignores the road out of column', () => {
+    const lineBattle = terrainBattle([roadAlongX500()]);
+    const lineVerdict = acceptedVerdict(moveSouth(lineBattle));
+    // The hoplite marches 16 files wide: out of column, the road is ignored.
+    assert.deepEqual(lineVerdict.movement, { availableM: 90, requiredM: 40 });
+
+    const columnBattle = terrainBattle([roadAlongX500()]);
+    const columnUnit = hopliteOf(columnBattle);
+    columnUnit.files = TERRAIN.columnMaxFiles;
+    const columnVerdict = acceptedVerdict(moveSouth(columnBattle));
+    assert.deepEqual(columnVerdict.movement, {
+      availableM: 90,
+      requiredM: round1(40 * TERRAIN.roadFactor),
+    });
+    assert.ok(columnVerdict.movement.requiredM < 40, 'road speeds a column');
+  });
+
+  it('lets a road win over bad ground only in column', () => {
+    const features = [
+      groundRect('forest-a', 'forest', 400, 540, 600, 620),
+      roadAlongX500(),
+    ];
+    const lineBattle = terrainBattle(structuredClone(features));
+    const lineRejection = rejectedVerdict(moveSouth(lineBattle));
+    assert.equal(lineRejection.code, 'out_of_reach');
+    assert.equal(lineRejection.details.requiredM, 100);
+
+    const columnBattle = terrainBattle(structuredClone(features));
+    hopliteOf(columnBattle).files = TERRAIN.columnMaxFiles;
+    const columnVerdict = acceptedVerdict(moveSouth(columnBattle));
+    assert.deepEqual(columnVerdict.movement.requiredM, round1(40 * TERRAIN.roadFactor));
+  });
+
+  it('crosses a river everywhere at a movement cost', () => {
+    const battle = terrainBattle([riverAcross()]);
+    const verdict = acceptedVerdict(moveSouth(battle));
+    assert.deepEqual(verdict.movement, { availableM: 90, requiredM: 40 + TERRAIN.riverCostM });
+  });
+
+  it('rejects a swept footprint touching water as forbidden_ground', () => {
+    const battle = terrainBattle([groundRect('lake-a', 'water', 490, 570, 510, 590)]);
+    const unit = hopliteOf(battle);
+    const result = moveSouth(battle);
+    assert.equal(result.ok, false);
+    const rejection = rejectedVerdict(result);
+    assert.equal(rejection.code, 'forbidden_ground');
+    assert.deepEqual(rejection.details, {
+      unitId: unit.id,
+      featureId: 'lake-a',
+      groundCover: 'water',
+      at: { x: 500, y: 590 },
+    });
+    assert.match(rejection.message, /forbidden ground/);
+  });
+
+  it('ignores water far from the swept footprint', () => {
+    const battle = terrainBattle([groundRect('lake-a', 'water', 100, 100, 200, 200)]);
+    const verdict = acceptedVerdict(moveSouth(battle));
+    assert.deepEqual(verdict.movement, { availableM: 90, requiredM: 40 });
+  });
+
+  it('imposes no movement penalty for elevation', () => {
+    const battle = terrainBattle([
+      { id: 'hill-a', kind: 'elevation', level: 1, polygon: [
+        { x: 400, y: 540 }, { x: 600, y: 540 }, { x: 600, y: 620 }, { x: 400, y: 620 },
+      ] },
+    ]);
+    const verdict = acceptedVerdict(moveSouth(battle));
+    assert.deepEqual(verdict.movement, { availableM: 90, requiredM: 40 });
+  });
+
+  it('reflects the unit’s current terrain in the available actions', () => {
+    const openBattle = terrainBattle([]);
+    const openEntry = availableActions(openBattle, openBattle.activeSide)
+      .units.find((item) => item.unitId === hopliteOf(openBattle).id);
+    assert.equal(openEntry.movementAllowanceM, 90);
+
+    const roughBattle = terrainBattle([groundRect('rough-a', 'rough', 400, 540, 600, 650)]);
+    const roughEntry = availableActions(roughBattle, roughBattle.activeSide)
+      .units.find((item) => item.unitId === hopliteOf(roughBattle).id);
+    assert.equal(roughEntry.movementAllowanceM, round1(90 / TERRAIN.roughFactor));
+
+    const forestBattle = terrainBattle([groundRect('forest-a', 'forest', 400, 540, 600, 650)]);
+    const forestEntry = availableActions(forestBattle, forestBattle.activeSide)
+      .units.find((item) => item.unitId === hopliteOf(forestBattle).id);
+    assert.equal(forestEntry.movementAllowanceM, round1(90 / TERRAIN.forestFactor));
+
+    const roadBattle = terrainBattle([groundRect('rough-a', 'rough', 400, 540, 600, 650), roadAlongX500()]);
+    const roadUnit = hopliteOf(roadBattle);
+    roadUnit.files = TERRAIN.columnMaxFiles;
+    const roadEntry = availableActions(roadBattle, roadBattle.activeSide)
+      .units.find((item) => item.unitId === roadUnit.id);
+    assert.equal(roadEntry.movementAllowanceM, round1(90 / TERRAIN.roadFactor));
+
+    const waterBattle = terrainBattle([groundRect('lake-a', 'water', 400, 540, 600, 650)]);
+    const waterEntry = availableActions(waterBattle, waterBattle.activeSide)
+      .units.find((item) => item.unitId === hopliteOf(waterBattle).id);
+    assert.equal(waterEntry.movementAllowanceM, 0);
+  });
+
+  it('reads the worst cover and the road factor through the terrain helpers', () => {
+    const features = [
+      groundRect('rough-a', 'rough', 0, 0, 100, 100),
+      groundRect('forest-a', 'forest', 200, 200, 300, 300),
+    ];
+    const overlapping = [
+      groundRect('rough-a', 'rough', 0, 0, 100, 100),
+      groundRect('town-a', 'settlement', 50, 50, 150, 150),
+    ];
+    const ring = [{ x: 60, y: 60 }, { x: 70, y: 60 }, { x: 70, y: 70 }, { x: 60, y: 70 }];
+    assert.equal(groundCoverAt(ring, features), 'rough');
+    assert.equal(
+      groundCoverAt([{ x: 210, y: 210 }, { x: 220, y: 210 }, { x: 220, y: 220 }, { x: 210, y: 220 }], features),
+      'forest',
+    );
+    assert.equal(
+      groundCoverAt(ring, overlapping),
+      'settlement',
+      'settlement outranks rough',
+    );
+    assert.equal(groundCoverAt(ring, []), 'open');
+    const { cover, factor } = terrainFactorAt(ring, 16, overlapping, MOVEMENT);
+    assert.equal(cover, 'settlement');
+    assert.equal(factor, TERRAIN.forestFactor);
+    const roadFeatures = [roadAlongX500()];
+    const onRoad = [{ x: 495, y: 590 }, { x: 505, y: 590 }, { x: 505, y: 600 }, { x: 495, y: 600 }];
+    assert.equal(footprintTouchesPath(onRoad, roadFeatures[0].path, 6), true);
+    assert.equal(
+      terrainFactorAt(onRoad, TERRAIN.columnMaxFiles, roadFeatures, MOVEMENT).factor,
+      TERRAIN.roadFactor,
+    );
+    assert.equal(
+      terrainFactorAt(onRoad, TERRAIN.columnMaxFiles + 1, roadFeatures, MOVEMENT).factor,
+      1,
+      'out of column the road is ignored',
+    );
+  });
+
+  function round1(value) {
+    return Math.round(value * 10) / 10;
+  }
 });
