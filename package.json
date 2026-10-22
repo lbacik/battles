@@ -1,0 +1,5 @@
+{
+  "name": "poleis-ui-prototype",
+  "private": true,
+  "scripts": { "prototype": "node prototype/server.mjs" }
+}
