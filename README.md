@@ -1,5 +1,7 @@
 # PÓLIS — ancient battle UI prototype
 
+[![CI](https://github.com/lbacik/battles/actions/workflows/ci.yml/badge.svg)](https://github.com/lbacik/battles/actions/workflows/ci.yml)
+
 A throwaway interface experiment, not production code. Three layouts of the same application explore **how formation design, formation management on the map, and terrain preparation can work together in a turn-based game**.
 
 ## Running the prototype
@@ -106,3 +108,33 @@ npm run prototype
 Open <http://localhost:4173/prototype/e2e.html?autostart=1>. The page creates a
 scenario, saves it to IndexedDB, reloads itself, reopens the scenario, and
 reports PASS/FAIL with the compared values (also logged to the console).
+
+### Run all checks
+
+Requires the Node.js version in `.nvmrc` (also declared in the `engines`
+field). Install from the lockfile only, then run the same scripts CI runs:
+
+```sh
+npm ci
+npm run lint
+npm run format:check
+npm run typecheck
+npm test
+npm run build
+npm run test:e2e
+```
+
+| Script | Check |
+| --- | --- |
+| `npm run lint` | Syntax check of every JavaScript file outside `prototype/` |
+| `npm run format:check` | No trailing whitespace, exactly one trailing newline |
+| `npm run typecheck` | `tsc --noEmit` once TypeScript sources exist (none yet) |
+| `npm test` | Unit tests (`node --test` over `prototype/domain/`) |
+| `npm run build` | Version coherence check, emits the `dist/` artifact |
+| `npm run test:e2e` | Headless smoke test against the `dist/` build |
+
+`prototype/` is a throwaway and is excluded from every check except `npm
+test`, which covers the tracer-bullet domain model. The end-to-end script
+serves the current placeholder build over loopback HTTP; the browser harness
+arrives with the Next.js editor slice, and CI already uploads
+`e2e-report/` (report plus trace log) as an artifact when it fails.
