@@ -1583,8 +1583,9 @@ export function unitFootprint(unit) {
 // cover them without a browser.
 
 // A provisional ruleset version is any `0.x` version: the catalogue-only
-// `polis-classical 0.1` the editor is built against. The editor badges it so
-// authors know battles cannot start under it yet.
+// `polis-classical 0.1` the editor is built against. The editor badges it as
+// provisional; the installed `1.x` ruleset can still start `0.1` scenarios
+// (see `isCompatibleScenarioRuleset` in `polis-classical.js`).
 export function isProvisionalRulesetVersion(version) {
   return typeof version === 'string' && /^0(\.|$)/.test(version.trim());
 }

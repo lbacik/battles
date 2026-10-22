@@ -1,0 +1,62 @@
+{
+  "kind": "scenario",
+  "formatVersion": 1,
+  "id": "10000000-0000-4000-8000-000000000003",
+  "title": "Unplayable Spacing",
+  "description": "Reference refusal: a lateral interval outside the troop type permitted range.",
+  "battlefield": {
+    "width": 1200,
+    "height": 800
+  },
+  "sides": [
+    {
+      "id": "side-a",
+      "name": "Athenians",
+      "color": "#1d4ed8"
+    },
+    {
+      "id": "side-b",
+      "name": "Spartans",
+      "color": "#b91c1c"
+    }
+  ],
+  "ruleset": {
+    "id": "polis-classical",
+    "version": "0.1"
+  },
+  "units": [
+    {
+      "soldiers": 100,
+      "files": 10,
+      "lateralInterval": 1,
+      "rankDepth": 1,
+      "facing": 180,
+      "id": "a-hoplite",
+      "name": "Athenian taxis",
+      "side": "side-a",
+      "troopType": "hoplite",
+      "position": {
+        "x": 300,
+        "y": 600
+      }
+    },
+    {
+      "soldiers": 100,
+      "files": 10,
+      "lateralInterval": 5,
+      "rankDepth": 1,
+      "facing": 0,
+      "id": "b-hoplite",
+      "name": "Spartan mora",
+      "side": "side-b",
+      "troopType": "hoplite",
+      "position": {
+        "x": 300,
+        "y": 200
+      }
+    }
+  ],
+  "terrainFeatures": [],
+  "createdAt": "2026-10-22T12:00:00.000Z",
+  "updatedAt": "2026-10-22T12:00:00.000Z"
+}

@@ -1,0 +1,17 @@
+{
+  "ruleset": {
+    "id": "polis-classical",
+    "version": "1.0"
+  },
+  "status": "placeholder",
+  "note": "Placeholder values. Battle start only snapshots them; the Engine II gate sets them.",
+  "battle": {
+    "roundLimit": 12,
+    "breakLossShare": 0.5,
+    "drawMarginShare": 0.05
+  },
+  "cohesion": {
+    "start": "Steady",
+    "states": ["Steady", "Disordered", "Routed"]
+  }
+}
