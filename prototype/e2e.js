@@ -456,6 +456,58 @@ async function phaseReopen(phase) {
   console.info('[e2e] PASS');
 }
 
+// Persistence acceptance step 6 (#5): a file carrying a unit whose
+// troop-type key is unknown to the catalogue. It opens (validates), the unit
+// is marked (the warning helper names it, which is what the editor's issues
+// panel shows), it saves, and the key is preserved verbatim after reopening.
+async function phasePersistenceStep6(store) {
+  logStep('persistence step 6: import a file with an unknown troop-type key', 'running');
+  const authored = createScenario({ title: 'Persistence step 6 probe' });
+  authored.units.push({
+    id: '00000000-0000-4000-8000-000000000006',
+    name: 'Strangers',
+    side: authored.sides[0].id,
+    troopType: 'cataphract',
+    soldiers: 100,
+    files: 10,
+    lateralInterval: 1,
+    rankDepth: 1,
+    position: { x: 600, y: 400 },
+    facing: 0,
+  });
+  if (validateScenario(authored).length > 0) {
+    throw new Error(`a probe with an unknown key is invalid: ${validateScenario(authored).join('; ')}`);
+  }
+  const { json } = exportScenario(authored);
+  if (!json.includes('cataphract')) {
+    throw new Error('the exported file lost the unknown key');
+  }
+  const imported = importScenarioDocument(json);
+  if (imported.units[0]?.troopType !== 'cataphract') {
+    throw new Error('the import did not preserve the unknown key verbatim');
+  }
+  logStep('persistence step 6: import a file with an unknown troop-type key', 'pass', 'key preserved on import');
+  logStep('persistence step 6: the unit is marked and the issues panel warns', 'running');
+  const warnings = collectUnknownTroopTypeWarnings(imported);
+  if (warnings.length !== 1 || !warnings[0].includes('cataphract')) {
+    throw new Error(`expected one warning naming cataphract, got: ${JSON.stringify(warnings)}`);
+  }
+  logStep('persistence step 6: the unit is marked and the issues panel warns', 'pass', warnings[0]);
+  logStep('persistence step 6: save it and reopen with the key intact', 'running');
+  const metadata = await store.save(imported);
+  const reopened = await store.load(imported.id);
+  if (!reopened) {
+    throw new Error('the saved scenario cannot be loaded back');
+  }
+  if (reopened.units[0]?.troopType !== 'cataphract') {
+    throw new Error(`the key changed across save/reopen: ${reopened.units[0]?.troopType}`);
+  }
+  if (validateScenario(reopened).length > 0) {
+    throw new Error(`the reopened scenario is invalid: ${validateScenario(reopened).join('; ')}`);
+  }
+  logStep('persistence step 6: save it and reopen with the key intact', 'pass', `rev. ${metadata.revision}`);
+}
+
 async function run() {
   steps.innerHTML = '';
   verdict.textContent = '';
