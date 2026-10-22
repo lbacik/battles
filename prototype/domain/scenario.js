@@ -1334,6 +1334,216 @@ export function defaultFacingForSide(document, sideId) {
   return 0;
 }
 
+// --- Unit placement and rotation on the map (framework-free) -----------------
+// The editor moves and rotates units by proposing a geometry patch and
+// committing it only when structural validation stays silent, so a refused
+// drop or rotation never touches the document. These helpers are pure and
+// framework-free so the browser editor and the Node unit tests share them.
+
+// Screen-pixel tolerance for map selection, applied by the editor: the caller
+// converts it to metres (pixels x metres-per-pixel) for the hit test below.
+export const UNIT_PICK_TOLERANCE_PX = 8;
+
+// Snap step for rotation-handle drags, in degrees.
+export const FACING_SNAP_DEG = 15;
+
+// Wrap a facing into the stored compass range [0, 360).
+export function normalizeFacing(facing) {
+  const value = Number(facing);
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  const wrapped = ((value % 360) + 360) % 360;
+  // Rounding noise can produce 360 for bearings like 359.9999999; it is 0.
+  return wrapped >= 360 - 1e-9 ? 0 : wrapped;
+}
+
+// Snap a facing to the nearest multiple of `snap` degrees (15 by default).
+export function snapFacing(facing, snap = FACING_SNAP_DEG) {
+  const step = Number(snap);
+  if (!Number.isFinite(step) || step <= 0 || !Number.isFinite(Number(facing))) {
+    return normalizeFacing(facing);
+  }
+  return normalizeFacing(Math.round(Number(facing) / step) * step);
+}
+
+function distToSegmentSquared(point, a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const lengthSquared = dx * dx + dy * dy;
+  if (!(lengthSquared > 0)) {
+    const ex = point.x - a.x;
+    const ey = point.y - a.y;
+    return ex * ex + ey * ey;
+  }
+  const t = Math.min(
+    1,
+    Math.max(0, ((point.x - a.x) * dx + (point.y - a.y) * dy) / lengthSquared),
+  );
+  const ex = point.x - (a.x + t * dx);
+  const ey = point.y - (a.y + t * dy);
+  return ex * ex + ey * ey;
+}
+
+// The derived footprint corners of a unit, or null when the unit cannot
+// derive one. Never throws.
+export function footprintCorners(unit) {
+  try {
+    const derived = deriveFootprint(unit);
+    if (derived && Array.isArray(derived.corners) && derived.corners.length === 4) {
+      return derived.corners;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+// True when a map point hits a unit's real footprint: inside it, on its
+// boundary, or within `toleranceM` of its edges (the editor passes the
+// screen-pixel tolerance converted to metres). Never throws.
+export function footprintHitTest(unit, point, toleranceM = 0) {
+  const corners = footprintCorners(unit);
+  if (!corners) {
+    return false;
+  }
+  if (!point || !Number.isFinite(point?.x) || !Number.isFinite(point?.y)) {
+    return false;
+  }
+  if (locatePoint(corners, point) !== 'outside') {
+    return true;
+  }
+  const tolerance = Number(toleranceM);
+  if (!(tolerance > 0)) {
+    return false;
+  }
+  const squared = tolerance * tolerance;
+  for (let i = 0; i < corners.length; i += 1) {
+    const a = corners[i];
+    const b = corners[(i + 1) % corners.length];
+    if (distToSegmentSquared(point, a, b) <= squared) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// The id of the topmost unit whose real footprint is hit by a map point, or
+// null. Units render in document order, so the last matching unit wins.
+// Never throws.
+export function pickUnitIdAtPoint(document, point, toleranceM = 0) {
+  const units = Array.isArray(document?.units) ? document.units : [];
+  for (let i = units.length - 1; i >= 0; i -= 1) {
+    const unit = units[i];
+    if (!unit || typeof unit !== 'object') {
+      continue;
+    }
+    if (footprintHitTest(unit, point, toleranceM)) {
+      return unit.id || null;
+    }
+  }
+  return null;
+}
+
+// Every unit whose footprint would fall outside the given bounds, in document
+// order: [{ index, id, name }]. Pure; invalid dimensions block everything.
+export function unitsBlockingResize(document, width, height) {
+  const nextWidth = round1(Number(width));
+  const nextHeight = round1(Number(height));
+  if (!Number.isFinite(nextWidth) || nextWidth <= 0 || !Number.isFinite(nextHeight) || nextHeight <= 0) {
+    return [];
+  }
+  const blockers = [];
+  const units = Array.isArray(document?.units) ? document.units : [];
+  units.forEach((unit, index) => {
+    if (!unit || typeof unit !== 'object') {
+      return;
+    }
+    if (
+      !Number.isFinite(unit.lateralInterval) ||
+      !Number.isFinite(unit.rankDepth) ||
+      !Number.isFinite(unit.position?.x) ||
+      !Number.isFinite(unit.position?.y) ||
+      !Number.isFinite(unit.facing)
+    ) {
+      return;
+    }
+    const corners = footprintCorners(unit);
+    if (!corners) {
+      return;
+    }
+    if (!pointsWithinBounds(corners, nextWidth, nextHeight)) {
+      blockers.push({ index, id: unit.id, name: unit.name });
+    }
+  });
+  return blockers;
+}
+
+// Propose moving and/or rotating a unit (`patch` holds an optional
+// `position` { x, y } and/or a `facing` in degrees). Positions round to the
+// stored 0.1 m precision and facings wrap into [0, 360), exactly as stored.
+// Returns { ok: true, document, errors: [], conflictIds: [] } when the
+// patched document stays structurally valid, otherwise
+// { ok: false, document: null, errors, conflictIds }: the errors naming the
+// edited unit, and the edited unit plus every overlap partner to highlight.
+// Pure: the input is never mutated.
+export function proposeUnitPatch(document, unitId, patch = {}) {
+  const units = Array.isArray(document?.units) ? document.units : [];
+  const index = units.findIndex((unit) => unit?.id === unitId);
+  if (index < 0) {
+    return { ok: false, document: null, errors: ['Unit not found.'], conflictIds: [] };
+  }
+  const editedId = units[index]?.id;
+  const copy = cloneScenario(document);
+  const target = copy.units[index];
+  if (patch.position !== undefined) {
+    const x = Number(patch.position?.x);
+    const y = Number(patch.position?.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      return {
+        ok: false,
+        document: null,
+        errors: [`units[${index}]: position must hold finite x and y metre coordinates`],
+        conflictIds: [editedId].filter(Boolean),
+      };
+    }
+    target.position = { x, y };
+  }
+  if (patch.facing !== undefined) {
+    const facing = Number(patch.facing);
+    if (!Number.isFinite(facing)) {
+      return {
+        ok: false,
+        document: null,
+        errors: [`units[${index}]: facing must be a finite compass bearing in degrees`],
+        conflictIds: [editedId].filter(Boolean),
+      };
+    }
+    target.facing = facing;
+  }
+  const next = roundScenarioToTenth(copy);
+  const errors = validateScenario(next);
+  const relevant = errors.filter((error) => error.includes(`units[${index}]`));
+  if (relevant.length === 0) {
+    return { ok: true, document: next, errors: [], conflictIds: [] };
+  }
+  const conflictIds = [editedId];
+  for (const error of relevant) {
+    for (const match of error.matchAll(/units\[(\d+)\]/g)) {
+      const other = next.units[Number(match[1])];
+      if (other?.id) {
+        conflictIds.push(other.id);
+      }
+    }
+  }
+  return {
+    ok: false,
+    document: null,
+    errors: relevant,
+    conflictIds: [...new Set(conflictIds.filter(Boolean))],
+  };
+}
+
 // Find the first free front-midpoint for a footprint of the given size and
 // facing inside `searchRect` ({ minX, maxX, minY, maxY } in map metres,
 // clamped to the battlefield; defaults to the whole battlefield). Candidates

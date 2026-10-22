@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import {
   DEFAULT_BATTLEFIELD,
+  FACING_SNAP_DEG,
   MAP_VIEW_MAX_ZOOM,
   MAP_VIEW_MIN_ZOOM,
   MAX_BATTLEFIELD_HEIGHT_M,
@@ -15,6 +16,7 @@ import {
   SCENARIO_FORMAT_VERSION,
   SCENARIO_KIND,
   ScenarioImportError,
+  UNIT_PICK_TOLERANCE_PX,
   addGroundCoverFeature,
   clampMapZoom,
   cloneScenario,
@@ -25,6 +27,7 @@ import {
   findFreeUnitPosition,
   fitMapView,
   fitScale,
+  footprintHitTest,
   fromScreenPoint,
   generateId,
   importScenarioDocument,
@@ -35,17 +38,22 @@ import {
   mapViewBox,
   metresPerPixel,
   niceScaleBarMetres,
+  normalizeFacing,
   panMapViewByPixels,
   parseScenarioImport,
+  pickUnitIdAtPoint,
+  proposeUnitPatch,
   removeGroundCoverFeature,
   resizeBattlefield,
   roundScenarioToTenth,
   scenarioFileName,
+  snapFacing,
   suggestUnitName,
   toScreenPoint,
   unitFacingDeg,
   unitFootprint,
   unitPosition,
+  unitsBlockingResize,
   updateGroundCoverFeature,
   validateGroundCoverCandidate,
   validateScenario,
@@ -1022,5 +1030,116 @@ describe('ground cover editing', () => {
     assert.deepEqual(document.terrainFeatures, []);
     assert.deepEqual(validateScenario(document), []);
     assert.throws(() => removeGroundCoverFeature(document, id), /no ground cover area/);
+  });
+});
+
+describe('unit placement and rotation on the map', () => {
+  // Probe footprint: 100 soldiers in 10 files at 1 m spacings is 10 ranks,
+  // a 10 m frontage, and a 10 m depth. Facing north (0), the front midpoint
+  // (600, 400) spans x 595-605 and extends south to y 390.
+  const placed = (overrides = {}) =>
+    probeUnit({ position: { x: 600, y: 400 }, facing: 0, ...overrides });
+
+  it('normalizes facings into [0, 360) and snaps the handle to 15 degrees', () => {
+    assert.equal(normalizeFacing(720), 0);
+    assert.equal(normalizeFacing(-45), 315);
+    assert.equal(normalizeFacing(360), 0);
+    assert.equal(normalizeFacing(30), 30);
+    assert.equal(FACING_SNAP_DEG, 15);
+    assert.equal(snapFacing(33), 30);
+    assert.equal(snapFacing(38), 45);
+    assert.equal(snapFacing(7.5), 15);
+    assert.equal(UNIT_PICK_TOLERANCE_PX, 8);
+  });
+
+  it('hit-tests the real footprint with a metre tolerance', () => {
+    const unit = placed();
+    assert.equal(footprintHitTest(unit, { x: 600, y: 395 }), true);
+    assert.equal(footprintHitTest(unit, { x: 600, y: 400 }), true);
+    assert.equal(footprintHitTest(unit, { x: 600, y: 401 }), false);
+    assert.equal(footprintHitTest(unit, { x: 600, y: 401 }, 2), true);
+    assert.equal(footprintHitTest(unit, { x: 100, y: 100 }), false);
+    assert.equal(footprintHitTest(unit, { x: 100, y: 100 }, 5), false);
+    assert.equal(footprintHitTest(unit, null), false);
+  });
+
+  it('picks the topmost unit at a point and nothing on empty ground', () => {
+    const document = freshDocument();
+    document.units.push(placed({ name: 'Lower' }));
+    document.units.push(placed({ name: 'Upper' }));
+    const [, upper] = document.units;
+    assert.equal(pickUnitIdAtPoint(document, { x: 600, y: 395 }, 0), upper.id);
+    assert.equal(pickUnitIdAtPoint(document, { x: 100, y: 100 }, 0), null);
+    assert.equal(pickUnitIdAtPoint(document, { x: 600, y: 402 }, 5), upper.id);
+  });
+
+  it('moves a unit through the proposal and keeps the input untouched', () => {
+    const document = freshDocument();
+    document.units.push(placed({ name: 'First' }));
+    const before = cloneScenario(document);
+    const proposal = proposeUnitPatch(document, document.units[0].id, {
+      position: { x: 610.04, y: 400 },
+    });
+    assert.equal(proposal.ok, true);
+    assert.deepEqual(proposal.document.units[0].position, { x: 610, y: 400 });
+    assert.deepEqual(document, before);
+  });
+
+  it('refuses an overlapping drop and names both units as the conflict', () => {
+    const document = freshDocument();
+    document.units.push(placed({ name: 'First', position: { x: 600, y: 400 } }));
+    document.units.push(placed({ name: 'Second', position: { x: 630, y: 400 } }));
+    assert.deepEqual(validateScenario(document), []);
+    const [first, second] = document.units;
+    const refused = proposeUnitPatch(document, second.id, { position: { x: 600, y: 400 } });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.document, null);
+    assert.ok(refused.conflictIds.includes(first.id));
+    assert.ok(refused.conflictIds.includes(second.id));
+    assert.match(refused.errors.join(' '), /overlap/);
+  });
+
+  it('accepts touching edge to edge and refuses leaving the battlefield', () => {
+    const document = freshDocument();
+    document.units.push(placed({ name: 'First', position: { x: 600, y: 400 } }));
+    document.units.push(placed({ name: 'Second', position: { x: 630, y: 400 } }));
+    const [, second] = document.units;
+    // 10 m frontages: 595-605 beside 605-615 touch at x 605.
+    const touching = proposeUnitPatch(document, second.id, { position: { x: 610, y: 400 } });
+    assert.equal(touching.ok, true);
+    assert.deepEqual(validateScenario(touching.document), []);
+    const outside = proposeUnitPatch(document, second.id, { position: { x: 2, y: 400 } });
+    assert.equal(outside.ok, false);
+    assert.deepEqual(outside.conflictIds, [second.id]);
+    assert.match(outside.errors.join(' '), /outside the battlefield/);
+    const invalid = proposeUnitPatch(document, second.id, { position: { x: Number.NaN, y: 400 } });
+    assert.equal(invalid.ok, false);
+    const missing = proposeUnitPatch(document, 'no-such-unit', { position: { x: 600, y: 400 } });
+    assert.equal(missing.ok, false);
+  });
+
+  it('rotates a unit about its facing and wraps the bearing', () => {
+    const document = freshDocument();
+    document.units.push(placed({ name: 'First' }));
+    const [unit] = document.units;
+    const rotated = proposeUnitPatch(document, unit.id, { facing: 30 });
+    assert.equal(rotated.ok, true);
+    assert.equal(rotated.document.units[0].facing, 30);
+    const wrapped = proposeUnitPatch(document, unit.id, { facing: 370 });
+    assert.equal(wrapped.ok, true);
+    assert.equal(wrapped.document.units[0].facing, 10);
+    const invalid = proposeUnitPatch(document, unit.id, { facing: Number.NaN });
+    assert.equal(invalid.ok, false);
+  });
+
+  it('names the units blocking a battlefield shrink', () => {
+    const document = freshDocument();
+    document.units.push(placed({ name: 'Probe taxis', position: { x: 1150, y: 400 } }));
+    const blockers = unitsBlockingResize(document, 1000, 800);
+    assert.equal(blockers.length, 1);
+    assert.equal(blockers[0].name, 'Probe taxis');
+    assert.equal(blockers[0].index, 0);
+    assert.deepEqual(unitsBlockingResize(document, 1400, 900), []);
+    assert.deepEqual(unitsBlockingResize(document, 0, 800), []);
   });
 });

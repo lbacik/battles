@@ -24,12 +24,15 @@
 </head>
 <body>
   <main>
-    <h1>End-to-end test: create → draw ground cover → save → reload → reopen</h1>
+    <h1>End-to-end test: unit placement → draw ground cover → save → reload → reopen</h1>
     <p class="lede">Drives the real domain model and the real IndexedDB scenario store
-      in this browser: it draws the acceptance step 2 ground cover (forest, rough
-      ground, a settlement), refuses an overlapping area with a highlight ring,
-      clips an area to the battlefield, reloads the page mid-run, then reopens the
-      scenario and checks every value. Add <code>?autostart=1</code> to run on load.</p>
+      in this browser: first the editor acceptance steps 5–7 (six units, a
+      spacing preset, a rotation to 30°, a refused overlapping drop, accepted
+      edge-to-edge touching, and a refused battlefield shrink), then the
+      acceptance step 2 ground cover (forest, rough ground, a settlement, a
+      refused overlapping area with a highlight ring, a clipped area), then a
+      save, a mid-run reload, and a reopen with identical values. Add
+      <code>?autostart=1</code> to run on load.</p>
     <button id="run">Run end-to-end test</button>
     <ol id="steps"></ol>
     <div id="verdict" role="status"></div>

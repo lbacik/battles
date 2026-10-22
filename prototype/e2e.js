@@ -1,7 +1,11 @@
 // PÓLIS tracer bullet — browser end-to-end test.
 //
-// Covers create → save → reload → reopen against the real IndexedDB scenario
-// store (its own test database, so the author's library is untouched):
+// Covers unit placement plus create → save → reload → reopen against the real
+// IndexedDB scenario store (its own test database, so the author's library is
+// untouched):
+//   phase "units":  editor acceptance steps 5–7 (six units, a spacing preset,
+//                   a rotation to 30°, a refused overlapping drop, accepted
+//                   edge-to-edge touching, and a refused battlefield shrink);
 //   phase "save":   create a scenario, draw ground cover areas (acceptance
 //                   step 2: forest, rough ground, settlement; an overlapping
 //                   area is refused with a highlight ring), save it, verify it
@@ -10,10 +14,18 @@
 //                   the scenario by id, and assert every value is identical.
 // Progress survives the reload in sessionStorage. Results are rendered into
 // the page and logged to the console for headless collection.
+import { deriveFootprint } from './domain/geometry.js';
 import {
   addGroundCoverFeature,
+  cloneScenario,
   createScenario,
+  normalizeFacing,
+  pickUnitIdAtPoint,
+  proposeUnitPatch,
   resizeBattlefield,
+  roundScenarioToTenth,
+  snapFacing,
+  unitsBlockingResize,
   validateGroundCoverCandidate,
   validateScenario,
 } from './domain/scenario.js';
@@ -115,6 +127,137 @@ const ACCEPTANCE_GROUNDS = [
     ],
   },
 ];
+
+// Acceptance scenario steps 5-7 (issue #4) at the domain level: the same
+// invariants the map editor enforces on drops, rotations, and resizes.
+// Step 5: three units per side with two troop types, a spacing preset change,
+// a rotation to 30 degrees, and inspector ranks/frontage/depth. Step 6: an
+// overlapping drop is refused with a highlight, edge-to-edge touching is
+// accepted. Step 7: shrinking the battlefield past a unit is refused, naming
+// the blocking units.
+async function phaseUnitPlacement() {
+  logStep('acceptance step 5: build "Acceptance plain" at 1400 x 900 m', 'running');
+  const document = createScenario({
+    title: 'Acceptance plain',
+    battlefield: { width: 1400, height: 900 },
+    description: 'Editor acceptance probe: steps 5-7.',
+  });
+  if (document.battlefield.width !== 1400 || document.battlefield.height !== 900) {
+    throw new Error('battlefield size was not kept');
+  }
+  const sides = document.sides.map((side) => side.id);
+  const specs = [
+    { name: 'I Athenian taxis', side: sides[0], troopType: 'hoplite', soldiers: 256, files: 16, lateralInterval: 1, rankDepth: 1, position: { x: 500, y: 600 }, facing: 180 },
+    { name: 'Athenian peltasts', side: sides[0], troopType: 'peltast', soldiers: 120, files: 12, lateralInterval: 1.5, rankDepth: 1.5, position: { x: 750, y: 620 }, facing: 180 },
+    { name: 'Athenian cavalry', side: sides[0], troopType: 'cavalry', soldiers: 80, files: 10, lateralInterval: 1.5, rankDepth: 3, position: { x: 1000, y: 600 }, facing: 150 },
+    { name: 'I Spartan mora', side: sides[1], troopType: 'hoplite', soldiers: 320, files: 16, lateralInterval: 1, rankDepth: 1, position: { x: 550, y: 300 }, facing: 0 },
+    { name: 'Spartan archers', side: sides[1], troopType: 'archer', soldiers: 100, files: 14, lateralInterval: 1.5, rankDepth: 1.5, position: { x: 800, y: 280 }, facing: 0 },
+    { name: 'Skiritae peltasts', side: sides[1], troopType: 'peltast', soldiers: 120, files: 12, lateralInterval: 2, rankDepth: 2, position: { x: 1050, y: 300 }, facing: 30 },
+  ];
+  let counter = 1;
+  document.units = specs.map((spec) => ({ ...spec, id: `00000000-0000-4000-8000-${String(counter++).padStart(12, '0')}` }));
+  const structural = validateScenario(document);
+  if (structural.length > 0) {
+    throw new Error(`acceptance units are invalid: ${structural.join('; ')}`);
+  }
+  const troopTypes = new Set(document.units.map((unit) => unit.troopType));
+  if (troopTypes.size < 2) {
+    throw new Error('acceptance units must use at least two troop types');
+  }
+  logStep('acceptance step 5: build "Acceptance plain" at 1400 x 900 m', 'pass', '6 units, 2+ troop types');
+
+  logStep('acceptance step 5: spacing preset, rotation, and inspector values', 'running');
+  // Spacing preset change: open peltasts (3.0 m spacings) reshape the footprint.
+  const peltasts = document.units.find((unit) => unit.name === 'Athenian peltasts');
+  const opened = roundScenarioToTenth(
+    (() => {
+      const copy = cloneScenario(document);
+      const target = copy.units.find((unit) => unit.id === peltasts.id);
+      target.lateralInterval = 3;
+      target.rankDepth = 3;
+      return copy;
+    })(),
+  );
+  if (validateScenario(opened).length > 0) {
+    throw new Error('spacing preset change was refused on open ground');
+  }
+  const before = deriveFootprint(peltasts);
+  const after = deriveFootprint(opened.units.find((unit) => unit.id === peltasts.id));
+  if (!(after.frontage > before.frontage && after.depth > before.depth)) {
+    throw new Error('spacing preset change did not reshape the footprint');
+  }
+  // Rotation to 30 degrees through the same proposal the handle drag uses.
+  const rotated = proposeUnitPatch(document, peltasts.id, { facing: 30 });
+  if (!rotated.ok || rotated.document.units.find((unit) => unit.id === peltasts.id).facing !== 30) {
+    throw new Error('rotation to 30 degrees was refused on open ground');
+  }
+  if (snapFacing(33) !== 30 || snapFacing(38) !== 45 || normalizeFacing(-45) !== 315) {
+    throw new Error('facing snap/normalize behaves unexpectedly');
+  }
+  // Inspector values: ranks, frontage, and depth from the footprint.
+  const taxis = document.units.find((unit) => unit.name === 'I Athenian taxis');
+  const footprint = deriveFootprint(taxis);
+  if (footprint.ranks !== 16 || footprint.frontage !== 16 || footprint.depth !== 16) {
+    throw new Error(`inspector values are wrong: ${JSON.stringify(footprint)}`);
+  }
+  logStep(
+    'acceptance step 5: spacing preset, rotation, and inspector values',
+    'pass',
+    '16 ranks · 16.0 m frontage · 16.0 m depth',
+  );
+
+  logStep('acceptance step 6: overlapping drops are refused, touching is accepted', 'running');
+  const overlapped = proposeUnitPatch(document, peltasts.id, { position: { ...taxis.position } });
+  if (overlapped.ok) {
+    throw new Error('dropping a unit onto another was accepted');
+  }
+  if (!overlapped.conflictIds.includes(taxis.id) || !overlapped.conflictIds.includes(peltasts.id)) {
+    throw new Error('refused drop does not highlight both units');
+  }
+  // Edge to edge: the peltasts (18 m frontage) east of the taxis (16 m).
+  const touching = proposeUnitPatch(document, peltasts.id, {
+    position: { x: taxis.position.x + (16 + 18) / 2, y: taxis.position.y },
+  });
+  if (!touching.ok) {
+    throw new Error(`touching edge to edge was refused: ${touching.errors.join('; ')}`);
+  }
+  // Selection uses the real footprint: inside hits, empty ground misses.
+  if (pickUnitIdAtPoint(document, { x: 500, y: 608 }, 0) !== taxis.id) {
+    throw new Error('footprint hit test misses the inside of a unit');
+  }
+  if (pickUnitIdAtPoint(document, { x: 100, y: 100 }, 0) !== null) {
+    throw new Error('footprint hit test hits empty ground');
+  }
+  if (pickUnitIdAtPoint(document, { x: 500, y: 598 }, 0) !== null) {
+    throw new Error('footprint hit test hits outside without tolerance');
+  }
+  if (pickUnitIdAtPoint(document, { x: 500, y: 598 }, 5) !== taxis.id) {
+    throw new Error('screen-pixel tolerance does not extend the hit');
+  }
+  logStep(
+    'acceptance step 6: overlapping drops are refused, touching is accepted',
+    'pass',
+    overlapped.errors[0],
+  );
+
+  logStep('acceptance step 7: shrinking past a unit is refused', 'running');
+  const blockers = unitsBlockingResize(document, 400, 900);
+  if (blockers.length === 0 || !blockers.some((blocker) => blocker.name === 'I Athenian taxis')) {
+    throw new Error('shrink blockers do not name the unit that would fall outside');
+  }
+  let shrinkError = '';
+  try {
+    resizeBattlefield(document, 400, 900);
+  } catch (error) {
+    shrinkError = error.message;
+  }
+  if (!shrinkError.includes('I Athenian taxis')) {
+    throw new Error('shrink refusal does not name the blocking unit');
+  }
+  // A shrink that keeps every footprint still succeeds.
+  resizeBattlefield(document, 1400, 700);
+  logStep('acceptance step 7: shrinking past a unit is refused', 'pass', shrinkError);
+}
 
 async function phaseSave() {
   const store = new IndexedDBScenarioStore({ dbName: DB_NAME });
@@ -247,6 +390,7 @@ async function run() {
   verdict.className = '';
   details.textContent = '';
   try {
+    await phaseUnitPlacement();
     const phase = readPhase();
     if (phase?.phase === 'reopen') {
       await phaseReopen(phase);

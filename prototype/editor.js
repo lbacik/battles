@@ -5,9 +5,11 @@
 // The editor talks to browser storage only through the narrow scenario store
 // interface (ADR 0003); the domain model stays framework-free.
 import {
+  FACING_SNAP_DEG,
   MAX_BATTLEFIELD_HEIGHT_M,
   MAX_BATTLEFIELD_WIDTH_M,
   GROUND_COVER_CATEGORIES,
+  UNIT_PICK_TOLERANCE_PX,
   addGroundCoverFeature,
   clampMapZoom,
   cloneScenario,
@@ -23,14 +25,19 @@ import {
   isProvisionalRuleset,
   mapViewBox,
   niceScaleBarMetres,
+  normalizeFacing,
   panMapViewByPixels,
+  pickUnitIdAtPoint,
+  proposeUnitPatch,
   removeGroundCoverFeature,
   resizeBattlefield,
+  snapFacing,
   suggestUnitName,
   toScreenPoint,
   unitFacingDeg,
   unitFootprint,
   unitPosition,
+  unitsBlockingResize,
   updateGroundCoverFeature,
   validateGroundCoverCandidate,
   validateScenario,
@@ -299,14 +306,24 @@ function commitDimension(dimension, raw) {
     failCommit(dimension, `Battlefield ${dimension} must be a number of metres.`);
     return;
   }
+  const candidateWidth = dimension === 'width' ? Number(raw) : state.document.battlefield.width;
+  const candidateHeight = dimension === 'height' ? Number(raw) : state.document.battlefield.height;
   let next;
   try {
-    next = resizeBattlefield(
-      state.document,
-      dimension === 'width' ? Number(raw) : state.document.battlefield.width,
-      dimension === 'height' ? Number(raw) : state.document.battlefield.height,
-    );
+    next = resizeBattlefield(state.document, candidateWidth, candidateHeight);
   } catch (error) {
+    // Shrinking past a unit is refused: the message names the blocking units
+    // and they are highlighted on the map and in the order of battle, like a
+    // refused unit drop.
+    const blockers = unitsBlockingResize(state.document, candidateWidth, candidateHeight);
+    if (blockers.length > 0) {
+      state.fieldErrors = { [dimension]: error.message };
+      state.unitConflictIds = blockers.map((blocker) => blocker.id).filter(Boolean);
+      state.status = error.message;
+      state.statusError = true;
+      render();
+      return;
+    }
     failCommit(dimension, error.message);
     return;
   }
@@ -690,6 +707,74 @@ function commitUnitField(unitId, field, raw) {
     commitEdit(next, `[data-unit-field="${field}"][data-id="${unitId}"]`);
     return;
   }
+  // Exact placement on the map: the front-edge midpoint in metres and the
+  // compass facing in degrees. Patched through proposeUnitPatch so a typed
+  // value is refused exactly like a conflicting drag or rotation.
+  if (field === 'positionX' || field === 'positionY') {
+    if (String(raw ?? '').trim() === '' || !Number.isFinite(Number(raw))) {
+      failUnitCommit(`unit-position-${unitId}`, 'Position must hold finite X and Y metre coordinates.', [unitId]);
+      return;
+    }
+    const position = {
+      x: field === 'positionX' ? Number(raw) : unit.position?.x,
+      y: field === 'positionY' ? Number(raw) : unit.position?.y,
+    };
+    if (position.x === unit.position?.x && position.y === unit.position?.y) {
+      state.fieldErrors = {};
+      state.unitConflictIds = [];
+      render();
+      return;
+    }
+    const proposal = proposeUnitPatch(state.document, unitId, { position });
+    if (!proposal.ok) {
+      failUnitCommit(`unit-position-${unitId}`, proposal.errors[0] || 'This position is not allowed.', proposal.conflictIds);
+      return;
+    }
+    commitEdit(proposal.document, `[data-unit-field="${field}"][data-id="${unitId}"]`);
+    return;
+  }
+  if (field === 'facing') {
+    if (String(raw ?? '').trim() === '' || !Number.isFinite(Number(raw))) {
+      failUnitCommit(`unit-facing-${unitId}`, 'Facing must be a compass bearing in degrees.', [unitId]);
+      return;
+    }
+    if (normalizeFacing(Number(raw)) === normalizeFacing(unit.facing)) {
+      state.fieldErrors = {};
+      state.unitConflictIds = [];
+      render();
+      return;
+    }
+    const proposal = proposeUnitPatch(state.document, unitId, { facing: Number(raw) });
+    if (!proposal.ok) {
+      failUnitCommit(`unit-facing-${unitId}`, proposal.errors[0] || 'This facing is not allowed.', proposal.conflictIds);
+      return;
+    }
+    commitEdit(proposal.document, `[data-unit-field="${field}"][data-id="${unitId}"]`);
+    return;
+  }
+}
+
+// Commit a map drag or rotation handle move. A refused drop or rotation is
+// never committed: the unit returns to its stored values and every unit the
+// refused placement would conflict with is highlighted. Every committed move
+// goes through commitEdit, so placement and rotation are undoable like any
+// other scenario change.
+function commitUnitGeometry(unitId, patch) {
+  if (!state.document) {
+    return;
+  }
+  const unit = unitById(state.document, unitId);
+  if (!unit) {
+    return;
+  }
+  const proposal = proposeUnitPatch(state.document, unitId, patch);
+  if (!proposal.ok) {
+    const field = patch.position !== undefined ? `unit-position-${unitId}` : `unit-facing-${unitId}`;
+    failUnitCommit(field, proposal.errors[0] || 'This placement is not allowed.', proposal.conflictIds);
+    toast(proposal.errors[0] || 'This placement is not allowed.');
+    return;
+  }
+  commitEdit(proposal.document);
 }
 
 function commitUnitPreset(unitId, presetKey) {
@@ -734,6 +819,15 @@ function committedFieldValue(input) {
     if (unitField === 'preset') {
       return currentPresetKey(unit);
     }
+    if (unitField === 'positionX') {
+      return String(unit.position?.x ?? '');
+    }
+    if (unitField === 'positionY') {
+      return String(unit.position?.y ?? '');
+    }
+    if (unitField === 'facing') {
+      return String(unit.facing ?? '');
+    }
     return String(unit[unitField] ?? '');
   }
   if (input.dataset.field === 'title') {
@@ -766,6 +860,19 @@ function fieldHasDraft(input) {
     }
     if (unitField === 'name' || unitField === 'side' || unitField === 'troopType') {
       return value !== String(unit[unitField] ?? '');
+    }
+    if (unitField === 'positionX' || unitField === 'positionY') {
+      const axis = unitField === 'positionX' ? 'x' : 'y';
+      if (String(value).trim() === '' || !Number.isFinite(Number(value))) {
+        return true;
+      }
+      return Number(value) !== Number(unit.position?.[axis]);
+    }
+    if (unitField === 'facing') {
+      if (String(value).trim() === '' || !Number.isFinite(Number(value))) {
+        return true;
+      }
+      return normalizeFacing(Number(value)) !== normalizeFacing(unit.facing);
     }
     if (String(value).trim() === '' || !Number.isFinite(Number(value))) {
       return true;
@@ -866,23 +973,40 @@ function unitSvg(document, unit, mapView, mpp, flags = {}) {
   const minEdgePx = Math.min(frontW, depthH) / mpp;
   const helperM = 16 * mpp;
   const helperBox = Math.max(frontW, depthH, helperM);
+  // The footprint is anchored at the front midpoint (the unit position): the
+  // local origin is the front edge midpoint and depth extends backwards
+  // (+y locally, rotated by the facing), exactly matching deriveFootprint.
+  const helperCy = depthH / 2;
   const helper =
     minEdgePx < 10
-      ? `<rect x="${-helperBox / 2}" y="${-helperBox / 2}" width="${helperBox}" height="${helperBox}" rx="${4 * mpp}" fill="none" stroke="${esc(color)}" stroke-width="${1.5 * mpp}" stroke-dasharray="${6 * mpp} ${4 * mpp}" opacity="0.85" class="unit-helper"/>` +
-        `<path d="M0 ${-helperBox / 2 - 10 * mpp} l${5 * mpp} ${5 * mpp} l${-5 * mpp} ${5 * mpp} l${-5 * mpp} ${-5 * mpp} Z" fill="${esc(color)}" opacity="0.9" class="unit-helper"/>`
+      ? `<rect x="${-helperBox / 2}" y="${helperCy - helperBox / 2}" width="${helperBox}" height="${helperBox}" rx="${4 * mpp}" fill="none" stroke="${esc(color)}" stroke-width="${1.5 * mpp}" stroke-dasharray="${6 * mpp} ${4 * mpp}" opacity="0.85" class="unit-helper"/>` +
+        `<path d="M0 ${helperCy - helperBox / 2 - 10 * mpp} l${5 * mpp} ${5 * mpp} l${-5 * mpp} ${5 * mpp} l${-5 * mpp} ${-5 * mpp} Z" fill="${esc(color)}" opacity="0.9" class="unit-helper"/>`
+      : '';
+  // Rotation handle for the selected unit: a stem forward of the front edge
+  // with a grab circle, pivoting the footprint about the front midpoint.
+  // Sizes scale with metres-per-pixel so the handle keeps a constant screen
+  // size at any zoom.
+  const reach = 20 * mpp;
+  const gripR = 7 * mpp;
+  const handle =
+    flags.selected
+      ? `<line x1="0" y1="0" x2="0" y2="${-reach}" stroke="${esc(color)}" stroke-width="${1.6 * mpp}" stroke-dasharray="${4 * mpp} ${3 * mpp}" class="rotate-stem"/>` +
+        `<circle cx="0" cy="${-reach}" r="${12 * mpp}" fill="transparent" class="rotate-hit" data-rotate-handle="${esc(unit.id || '')}"><title>Drag to rotate (snaps to ${FACING_SNAP_DEG}°, hold Shift for free rotation)</title></circle>` +
+        `<circle cx="0" cy="${-reach}" r="${gripR}" fill="#f8f9f0" stroke="${esc(color)}" stroke-width="${2 * mpp}" class="rotate-grip" data-rotate-handle="${esc(unit.id || '')}"><title>Drag to rotate (snaps to ${FACING_SNAP_DEG}°, hold Shift for free rotation)</title></circle>`
       : '';
   const classes = ['unit'];
   if (flags.selected) classes.push('selected');
   if (flags.conflict) classes.push('conflict');
   const outline = flags.conflict ? '#b91c1c' : esc(color);
   return `<g class="${classes.join(' ')}" transform="translate(${centre.x} ${centre.y)}" data-unit-id="${esc(unit.id || '')}">
-    <g transform="rotate(${facing)}">
+    <g class="unit-rotor" transform="rotate(${facing})">
       ${helper}
-      <rect x="${-frontW / 2}" y="${-depthH / 2}" width="${frontW}" height="${depthH}" fill="${esc(color)}" fill-opacity="0.32" stroke="${outline}" stroke-width="${(flags.selected || flags.conflict ? 3 : 1.6) * mpp}" class="unit-footprint"/>
-      <line x1="${-frontW / 2}" y1="${-depthH / 2}" x2="${frontW / 2}" y2="${-depthH / 2}" stroke="${outline}" stroke-width="${3 * mpp}"/>
+      <rect x="${-frontW / 2}" y="0" width="${frontW}" height="${depthH}" fill="${esc(color)}" fill-opacity="0.32" stroke="${outline}" stroke-width="${(flags.selected || flags.conflict ? 3 : 1.6) * mpp}" class="unit-footprint"/>
+      <line x1="${-frontW / 2}" y1="0" x2="${frontW / 2}" y2="0" stroke="${outline}" stroke-width="${3 * mpp}"/>
+      ${handle}
     </g>
-    <text x="0" y="${depthH / 2 + 8 * mpp + labelSize * 0.9}" text-anchor="middle" font-size="${labelSize}" class="unit-label">${esc(name)}</text>
-    ${dims ? `<text x="0" y="${depthH / 2 + 8 * mpp + labelSize * 0.9 + dimsSize * 1.25}" text-anchor="middle" font-size="${dimsSize}" class="unit-dims">${esc(dims)}</text>` : ''}
+    <text x="0" y="${depthH + 8 * mpp + labelSize * 0.9}" text-anchor="middle" font-size="${labelSize}" class="unit-label">${esc(name)}</text>
+    ${dims ? `<text x="0" y="${depthH + 8 * mpp + labelSize * 0.9 + dimsSize * 1.25}" text-anchor="middle" font-size="${dimsSize}" class="unit-dims">${esc(dims)}</text>` : ''}
     <title>${esc(name)}${dims ? ` · ${esc(dims)}` : ''}</title>
   </g>`;
 }
@@ -1197,7 +1321,7 @@ function orderOfBattleView(document) {
         </div>`;
       })
       .join('')}
-    <p class="readonly-note">Select a Unit to edit it in the inspector. New and duplicated Units are placed at the first free spot in the current view. Ground cover areas are drawn and edited in Terrain mode.</p>
+    <p class="readonly-note">Select a Unit to edit it in the inspector. New and duplicated Units are placed at the first free spot in the current view. Drag a Unit on the map to place it; drag its round handle to rotate it. Ground cover areas are drawn and edited in Terrain mode.</p>
   </div>`;
 }
 
@@ -1266,6 +1390,13 @@ function unitEditorView(document, unit) {
       <div><label class="field">Rank depth (m)<input type="number" data-unit-field="rankDepth" data-id="${esc(id)}" min="0.1" max="10" step="0.1" value="${esc(unit.rankDepth)}"${invalid(`unit-rankDepth-${id}`)}></label>${fieldError(`unit-rankDepth-${id}`)}</div>
     </div>
     <p class="preset-note">A spacing preset pre-fills both spacings in metres; the scenario stores the metres (the preset itself is not stored).</p>
+    <div class="field-pair">
+      <div><label class="field">Position X (m)<input type="number" data-unit-field="positionX" data-id="${esc(id)}" step="0.1" value="${esc(unit.position?.x ?? '')}"${invalid(`unit-position-${id}`)}></label>${fieldError(`unit-position-${id}`)}</div>
+      <div><label class="field">Position Y (m)<input type="number" data-unit-field="positionY" data-id="${esc(id)}" step="0.1" value="${esc(unit.position?.y ?? '')}"${invalid(`unit-position-${id}`)}></label></div>
+    </div>
+    <label class="field">Facing (°)<input type="number" data-unit-field="facing" data-id="${esc(id)}" min="0" max="360" step="1" value="${esc(unit.facing ?? '')}"${invalid(`unit-facing-${id}`)}></label>
+    ${fieldError(`unit-facing-${id}`)}
+    <p class="preset-note">Position is the midpoint of the front edge in metres; facing is a compass bearing (0 = north, clockwise). Dragging the unit or its rotation handle edits the same values.</p>
     <div class="unit-actions">
       <button class="btn-secondary" data-action="duplicate-unit" data-id="${esc(id)}">Duplicate</button>
       <button class="btn-quiet btn-danger" data-action="delete-unit" data-id="${esc(id)}">Delete</button>
@@ -1779,7 +1910,7 @@ function editorView() {
             <span id="cursor-coords" class="cursor-coords" aria-label="Cursor coordinates in metres">X — · Y —</span>
           </div>
         </div>
-        <p class="map-hint">Scroll to zoom around the cursor · drag with the hand tool or while holding Space to pan · view changes never mark the scenario unsaved · grid is display-only</p>
+        <p class="map-hint">Click a Unit to select it · drag to place it (a refused drop returns and highlights the conflict) · drag the round handle to rotate about the front midpoint (snaps to ${FACING_SNAP_DEG}°, hold Shift for free rotation) · scroll to zoom · hand tool or Space to pan</p>
       </section>
       <aside class="right-panel">${inspectorView(document)}</aside>
     </main>${conflictDialogView()}`;
@@ -1942,6 +2073,32 @@ function handleMapAction(action) {
   return false;
 }
 
+// --- Map selection, dragging, and rotation ---------------------------------
+// Clicking selects the topmost unit whose real footprint is hit (with a
+// screen-pixel tolerance); dragging moves it; the rotation handle pivots the
+// footprint about the front midpoint with 15° snapping (Shift disables snap).
+// Drops and rotations commit through proposeUnitPatch: a refused placement is
+// never committed, the unit returns, and the conflict is highlighted. Every
+// committed move goes through commitEdit, so placement and rotation are
+// undoable like any other scenario change. Selection and the live drag
+// preview never touch the undo history.
+let activePointerDrag = null;
+
+function cancelPointerDrag() {
+  if (!activePointerDrag) {
+    return false;
+  }
+  activePointerDrag = null;
+  render();
+  return true;
+}
+
+// SVG rotate() turns clockwise like a compass bearing; normalize for display.
+function displayFacing(facing) {
+  const value = normalizeFacing(facing);
+  return value > 180 ? value - 360 : value;
+}
+
 function bindMap() {
   const svg = $('#battle-svg');
   const viewport = $('.map-viewport');
@@ -2013,13 +2170,20 @@ function bindMap() {
   });
 
   let pan = null;
+  const capturePointer = (event) => {
+    try {
+      svg.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture is best-effort; dragging still works without it.
+    }
+  };
   svg.addEventListener('pointerdown', (event) => {
+    const handActive = state.mapView.tool === 'hand' || state.spaceHeld || event.button === 1;
     // Dragging a vertex moves it; the pointerup commits one undo step, and a
     // refused move highlights the candidate and keeps the old geometry.
-    const handle = event.target?.closest?.('[data-vertex-index]');
-    const handActive = state.mapView.tool === 'hand' || state.spaceHeld || event.button === 1;
+    const vertexHandle = event.target?.closest?.('[data-vertex-index]');
     if (
-      handle &&
+      vertexHandle &&
       !state.terrainDraft &&
       !handActive &&
       event.button === 0 &&
@@ -2029,45 +2193,87 @@ function bindMap() {
     ) {
       event.preventDefault();
       terrainDrag = {
-        featureId: handle.dataset.featureId,
-        index: Number(handle.dataset.vertexIndex),
+        featureId: vertexHandle.dataset.featureId,
+        index: Number(vertexHandle.dataset.vertexIndex),
         pointerId: event.pointerId,
         pending: null,
       };
-      try {
-        svg.setPointerCapture(event.pointerId);
-      } catch {
-        // Pointer capture is best-effort; dragging still works without it.
-      }
+      capturePointer(event);
       return;
     }
-    if (!handActive || (event.button !== 0 && event.button !== 1)) return;
-    event.preventDefault();
-    pan = { x: event.clientX, y: event.clientY };
-    try {
-      svg.setPointerCapture(event.pointerId);
-    } catch {
-      // Pointer capture is best-effort; dragging still works without it.
+    if (handActive) {
+      if (event.button !== 0 && event.button !== 1) return;
+      event.preventDefault();
+      pan = { x: event.clientX, y: event.clientY };
+      capturePointer(event);
+      viewport.classList.add('panning');
+      return;
     }
-    viewport.classList.add('panning');
+    // Select-tool unit interaction: the rotation handle first, then the real
+    // footprint with a screen-pixel tolerance. Anything else (empty ground,
+    // terrain, labels outside the footprint) starts no drag.
+    if (event.button !== 0 || !state.document || state.mapView.tool !== 'select') return;
+    const handle = event.target?.closest?.('[data-rotate-handle]');
+    const handleId = handle?.dataset?.rotateHandle;
+    if (handleId && unitById(state.document, handleId)?.position) {
+      event.preventDefault();
+      activePointerDrag = {
+        kind: 'rotate',
+        unitId: handleId,
+        startClient: { clientX: event.clientX, clientY: event.clientY },
+        origin: { ...unitById(state.document, handleId).position },
+        moved: false,
+        previewFacing: undefined,
+      };
+      capturePointer(event);
+      return;
+    }
+    const cursor = svgToMap(svg, event.clientX, event.clientY);
+    if (!cursor) return;
+    const picked = pickUnitIdAtPoint(state.document, cursor, currentMpp() * UNIT_PICK_TOLERANCE_PX);
+    if (!picked || !unitById(state.document, picked)?.position) return;
+    event.preventDefault();
+    activePointerDrag = {
+      kind: 'move',
+      unitId: picked,
+      startClient: { clientX: event.clientX, clientY: event.clientY },
+      startMap: cursor,
+      origin: { ...unitById(state.document, picked).position },
+      moved: false,
+      preview: undefined,
+    };
+    capturePointer(event);
   });
   svg.addEventListener('pointermove', (event) => {
-    const cursor = svgToMap(svg, event.clientX, event.clientY);
-    const coords = $('#cursor-coords');
-    if (coords) {
-      if (cursor) {
-        const inside =
-          cursor.x >= 0 &&
-          cursor.x <= state.document.battlefield.width &&
-          cursor.y >= 0 &&
-          cursor.y <= state.document.battlefield.height;
-        coords.textContent = `X ${formatMetres(cursor.x)} · Y ${formatMetres(cursor.y)}${inside ? '' : ' · outside'}`;
-        coords.classList.toggle('outside', !inside);
-      } else {
-        coords.textContent = 'X — · Y —';
+    // A live drag preview suppresses the cursor readout for moves; rotations
+    // report the live facing instead.
+    if (!activePointerDrag?.moved) {
+      const cursor = svgToMap(svg, event.clientX, event.clientY);
+      const coords = $('#cursor-coords');
+      if (coords) {
+        if (cursor) {
+          const inside =
+            cursor.x >= 0 &&
+            cursor.x <= state.document.battlefield.width &&
+            cursor.y >= 0 &&
+            cursor.y <= state.document.battlefield.height;
+          coords.textContent = `X ${formatMetres(cursor.x)} · Y ${formatMetres(cursor.y)}${inside ? '' : ' · outside'}`;
+          coords.classList.toggle('outside', !inside);
+        } else {
+          coords.textContent = 'X — · Y —';
+        }
       }
     }
+    if (pan) {
+      const dxPx = event.clientX - pan.x;
+      const dyPx = event.clientY - pan.y;
+      pan = { x: event.clientX, y: event.clientY };
+      const next = panMapViewByPixels(state.mapView, dxPx, dyPx, currentMpp());
+      setMapView({ ...state.mapView, ...next });
+      return;
+    }
     if (terrainDrag && event.pointerId === terrainDrag.pointerId) {
+      const cursor = svgToMap(svg, event.clientX, event.clientY);
       if (cursor) {
         const pending = { x: round1(cursor.x), y: round1(cursor.y) };
         terrainDrag.pending = pending;
@@ -2083,16 +2289,93 @@ function bindMap() {
       }
       return;
     }
-    if (!pan) return;
-    const dxPx = event.clientX - pan.x;
-    const dyPx = event.clientY - pan.y;
-    pan = { x: event.clientX, y: event.clientY };
-    const next = panMapViewByPixels(state.mapView, dxPx, dyPx, currentMpp());
-    setMapView({ ...state.mapView, ...next });
+    if (!activePointerDrag) return;
+    const drag = activePointerDrag;
+    if (
+      !drag.moved &&
+      Math.hypot(event.clientX - drag.startClient.clientX, event.clientY - drag.startClient.clientY) > 4
+    ) {
+      drag.moved = true;
+      viewport.classList.add('unit-dragging');
+      if (drag.kind === 'move' && state.selectedUnitId !== drag.unitId) {
+        // Select on drag start without rebuilding the map mid-gesture: the
+        // full render happens on drop.
+        state.selectedUnitId = drag.unitId;
+        state.fieldErrors = {};
+        state.unitConflictIds = [];
+        for (const node of svg.querySelectorAll('g.unit.selected')) {
+          node.classList.remove('selected');
+        }
+        svg.querySelector(`g.unit[data-unit-id="${CSS.escape(drag.unitId)}"]`)?.classList.add('selected');
+      }
+    }
+    if (!drag.moved) return;
+    const cursor = svgToMap(svg, event.clientX, event.clientY);
+    if (!cursor) return;
+    if (drag.kind === 'move') {
+      const preview = {
+        x: drag.origin.x + (cursor.x - drag.startMap.x),
+        y: drag.origin.y + (cursor.y - drag.startMap.y),
+      };
+      drag.preview = preview;
+      const node = svg.querySelector(`g.unit[data-unit-id="${CSS.escape(drag.unitId)}"]`);
+      if (node) {
+        const screen = toScreenPoint(preview, state.document.battlefield.height);
+        node.setAttribute('transform', `translate(${screen.x} ${screen.y})`);
+      }
+    } else if (drag.kind === 'rotate') {
+      const dx = cursor.x - drag.origin.x;
+      const dy = cursor.y - drag.origin.y;
+      if (Math.hypot(dx, dy) <= 1e-9) return;
+      const raw = (Math.atan2(dx, dy) * 180) / Math.PI;
+      const facing = event.shiftKey ? normalizeFacing(raw) : snapFacing(raw, FACING_SNAP_DEG);
+      drag.previewFacing = facing;
+      const rotor = svg.querySelector(
+        `g.unit[data-unit-id="${CSS.escape(drag.unitId)}"] .unit-rotor`,
+      );
+      if (rotor) {
+        rotor.setAttribute('transform', `rotate(${displayFacing(facing)})`);
+      }
+      const coords = $('#cursor-coords');
+      if (coords) {
+        coords.textContent = event.shiftKey
+          ? `Facing ${facing.toFixed(1)}° (free rotation)`
+          : `Facing ${facing.toFixed(0)}° (snaps to ${FACING_SNAP_DEG}°, hold Shift for free)`;
+        coords.classList.remove('outside');
+      }
+    }
   });
-  const endPan = () => {
-    pan = null;
-    viewport.classList.remove('panning');
+  const endGesture = (event) => {
+    if (pan && (!event || event.type !== 'pointermove')) {
+      pan = null;
+      viewport.classList.remove('panning');
+    }
+    if (!activePointerDrag) return;
+    const drag = activePointerDrag;
+    activePointerDrag = null;
+    viewport.classList.remove('unit-dragging');
+    if (!drag.moved) {
+      if (drag.kind === 'move') {
+        // Click: single selection toggles. The pointerdown already hit-tested
+        // the real footprint, so this is a true footprint click.
+        state.selectedUnitId = state.selectedUnitId === drag.unitId ? null : drag.unitId;
+        state.fieldErrors = {};
+        state.unitConflictIds = [];
+        render();
+      } else {
+        render();
+      }
+      return;
+    }
+    if (drag.kind === 'move' && drag.preview) {
+      commitUnitGeometry(drag.unitId, { position: drag.preview });
+      return;
+    }
+    if (drag.kind === 'rotate' && drag.previewFacing !== undefined) {
+      commitUnitGeometry(drag.unitId, { facing: drag.previewFacing });
+      return;
+    }
+    render();
   };
   const endDrag = (event) => {
     if (terrainDrag && event.pointerId === terrainDrag.pointerId) {
@@ -2111,15 +2394,21 @@ function bindMap() {
   };
   svg.addEventListener('pointerup', (event) => {
     if (endDrag(event)) return;
-    endPan();
+    endGesture(event);
   });
   svg.addEventListener('pointercancel', (event) => {
     if (endDrag(event)) return;
-    endPan();
+    const wasActive = pan || activePointerDrag;
+    pan = null;
+    activePointerDrag = null;
+    viewport.classList.remove('panning');
+    viewport.classList.remove('unit-dragging');
+    if (wasActive) render();
+  });
   });
   svg.addEventListener('pointerleave', () => {
     const coords = $('#cursor-coords');
-    if (coords && !pan) coords.textContent = 'X — · Y —';
+    if (coords && !pan && !activePointerDrag?.moved) coords.textContent = 'X — · Y —';
   });
 }
 
@@ -2337,17 +2626,9 @@ async function importScenarioFile(file) {
 }
 
 document.addEventListener('click', async (event) => {
-  const unitNode = event.target?.closest?.('g.unit[data-unit-id]');
-  if (unitNode && state.view === 'editor' && state.document && !state.spaceHeld) {
-    const unitId = unitNode.dataset.unitId;
-    if (unitId && unitById(state.document, unitId)) {
-      state.selectedUnitId = state.selectedUnitId === unitId ? null : unitId;
-      state.fieldErrors = {};
-      state.unitConflictIds = [];
-      render();
-      return;
-    }
-  }
+  // Map unit selection is handled by the map pointer gesture (pointerdown
+  // hit-tests the real footprint, pointerup toggles on a click): clicks
+  // reaching the document carry no selection meaning.
   const element = event.target.closest('[data-action]');
   if (!element || element.disabled) return;
   const { action, id } = element.dataset;
@@ -2605,6 +2886,12 @@ function isEditableTarget(target) {
 // shortcut below is display-only and never marks the scenario as unsaved.
 document.addEventListener('keydown', (event) => {
   if (state.view !== 'editor' || !state.document) return;
+  // An active map drag or rotation is cancelled by Escape: the unit returns
+  // to its stored placement (the preview never touched the document).
+  if (event.key === 'Escape' && activePointerDrag && cancelPointerDrag()) {
+    event.preventDefault();
+    return;
+  }
   if (event.code === 'Space' && !isEditableTarget(event.target) && !event.repeat) {
     event.preventDefault();
     state.spaceHeld = true;
