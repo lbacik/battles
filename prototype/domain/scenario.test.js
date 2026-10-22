@@ -19,12 +19,16 @@ import {
   cloneScenario,
   collectWarnings,
   createScenario,
+  defaultFacingForSide,
   exportScenario,
+  findFreeUnitPosition,
   fitMapView,
   fitScale,
   fromScreenPoint,
   generateId,
   importScenarioDocument,
+  isProvisionalRuleset,
+  isProvisionalRulesetVersion,
   isUuid,
   isValidScenario,
   mapViewBox,
@@ -35,6 +39,7 @@ import {
   resizeBattlefield,
   roundScenarioToTenth,
   scenarioFileName,
+  suggestUnitName,
   toScreenPoint,
   unitFacingDeg,
   unitFootprint,
@@ -768,5 +773,63 @@ describe('reference scenario', () => {
     );
     // Exporting the stored file is byte-identical: it is the exported form.
     assert.equal(exportScenario(stored).json, file);
+  });
+});
+
+describe('order of battle helpers', () => {
+  it('badges provisional 0.x ruleset versions only', () => {
+    assert.equal(isProvisionalRulesetVersion('0.1'), true);
+    assert.equal(isProvisionalRulesetVersion('0.10'), true);
+    assert.equal(isProvisionalRulesetVersion('1.0'), false);
+    assert.equal(isProvisionalRulesetVersion(' 0.1 '), true);
+    assert.equal(isProvisionalRulesetVersion(''), false);
+    assert.equal(isProvisionalRulesetVersion(null), false);
+    assert.equal(isProvisionalRuleset({ id: 'polis-classical', version: '0.1' }), true);
+    assert.equal(isProvisionalRuleset({ id: 'polis-classical', version: '1.0' }), false);
+  });
+
+  it('suggests a unique unit name', () => {
+    const document = freshDocument();
+    assert.equal(suggestUnitName(document), 'New Unit');
+    document.units.push(probeUnit({ name: 'New Unit' }));
+    assert.equal(suggestUnitName(document), 'New Unit 2');
+    document.units.push(probeUnit({ name: 'new unit 2' }));
+    assert.equal(suggestUnitName(document), 'New Unit 3');
+  });
+
+  it('faces the first side south and the second side north', () => {
+    const document = freshDocument();
+    assert.equal(defaultFacingForSide(document, 'side-a'), 180);
+    assert.equal(defaultFacingForSide(document, 'side-b'), 0);
+    assert.equal(defaultFacingForSide(document, 'unknown'), 0);
+  });
+
+  it('finds the first free spot from the north-west of the search rect', () => {
+    const document = freshDocument();
+    const position = findFreeUnitPosition(document, { frontage: 10, depth: 10, facing: 0 });
+    assert.ok(position);
+    assert.deepEqual(validateScenario({
+      ...document,
+      units: [probeUnit({ position, facing: 0 })],
+    }), []);
+  });
+
+  it('avoids overlapping footprints and returns null when the view is full', () => {
+    const document = freshDocument();
+    document.units.push(probeUnit({ name: 'First', position: { x: 600, y: 400 } }));
+    const overlapping = findFreeUnitPosition(
+      document,
+      { frontage: 10, depth: 10, facing: 0 },
+      { minX: 595, maxX: 605, minY: 395, maxY: 405 },
+    );
+    assert.equal(overlapping, null);
+    const clear = findFreeUnitPosition(
+      document,
+      { frontage: 10, depth: 10, facing: 0 },
+      { minX: 100, maxX: 200, minY: 100, maxY: 200 },
+    );
+    assert.ok(clear);
+    assert.ok(clear.x >= 100 && clear.x <= 200);
+    assert.ok(clear.y >= 100 && clear.y <= 200);
   });
 });
