@@ -3,13 +3,16 @@
 //
 // The manoeuvre slice of the framework-free engine package: two Passive
 // players can play a battle turn after turn through the shared player
-// contract and a runner (see `./players.js`), with Hold, Move, and Charge
-// orders. An accepted Move carries a deterministic preview of the unit's
-// footprint after the Movement phase, an accepted Charge carries the flush
-// contact preview plus the contact record, and resolution executes moves and
-// charges in the given order (see `./movement.js` and `./charge.js` for the
+// contract and a runner (see `./players.js`), with Hold, Move, Charge,
+// Reform, and Withdraw orders. An accepted Move carries a deterministic
+// preview of the unit's footprint after the Movement phase, an accepted
+// Charge carries the flush contact preview plus the contact record, an
+// accepted Reform carries the new-formation footprint preview, an accepted
+// Withdraw carries the step-back preview plus the broken contacts, and
+// resolution executes every accepted order in the given order (see
+// `./movement.js`, `./charge.js`, `./reform.js`, and `./withdraw.js` for the
 // geometry). This module imports only the domain model, the ruleset package,
-// and the movement and charge geometry — no React, no Next.js, no DOM, no Node APIs —
+// and the order geometry — no React, no Next.js, no DOM, no Node APIs —
 // so it runs unchanged in the browser, in Node unit tests, and in any future
 // shell.
 //
@@ -47,10 +50,14 @@ import {
   movementAllowanceM,
   validateMoveOnField,
 } from './movement.js';
+import { validateReformOnField } from './reform.js';
+import { validateWithdrawOnField, withdrawParamsOf } from './withdraw.js';
 import {
   BATTLE_STATUS_CONCEDED,
   BATTLE_STATUS_ONGOING,
+  RANDOM_DRAW_EVENT,
   TURN_PHASE_ORDERS,
+  createRng,
 } from './battle.js';
 
 // The format version carried by every contract envelope: the submission,
@@ -61,17 +68,24 @@ export const SUBMISSION_FORMAT_VERSION = TURN_CONTRACT_VERSION;
 export const PLAYER_VIEW_FORMAT_VERSION = TURN_CONTRACT_VERSION;
 export const AVAILABLE_ACTIONS_FORMAT_VERSION = TURN_CONTRACT_VERSION;
 
-// Order kinds. Hold, Move, and Charge are permitted in this slice; Reform,
-// Shoot, Rally, and Withdraw are known kinds the engine reports as
+// Order kinds. Hold, Move, Charge, Reform, and Withdraw are permitted in
+// this slice; Shoot and Rally are known kinds the engine reports as
 // unavailable until their slices land (Withdraw and Rally still gate
 // permissions: an engaged unit may only Hold or Withdraw, a routed unit may
 // only Rally).
 export const ORDER_KIND_HOLD = 'Hold';
 export const ORDER_KIND_MOVE = 'Move';
 export const ORDER_KIND_CHARGE = 'Charge';
+export const ORDER_KIND_REFORM = 'Reform';
 export const ORDER_KIND_WITHDRAW = 'Withdraw';
 export const ORDER_KIND_RALLY = 'Rally';
-export const ORDER_KINDS = Object.freeze([ORDER_KIND_HOLD, ORDER_KIND_MOVE, ORDER_KIND_CHARGE]);
+export const ORDER_KINDS = Object.freeze([
+  ORDER_KIND_HOLD,
+  ORDER_KIND_MOVE,
+  ORDER_KIND_CHARGE,
+  ORDER_KIND_REFORM,
+  ORDER_KIND_WITHDRAW,
+]);
 export const KNOWN_ORDER_KINDS = Object.freeze([
   'Hold',
   'Move',
@@ -104,6 +118,12 @@ export const REJECTION_CONTACT_WITH_ENEMY = 'contact_with_enemy';
 export const REJECTION_ORDER_NOT_PERMITTED = 'order_not_permitted';
 export const REJECTION_OUTSIDE_FRONT_ARC = 'outside_front_arc';
 export const REJECTION_INVALID_CHARGE = 'invalid_charge';
+// Reform rejection codes (see `./reform.js`). `order_not_permitted` gates
+// Reform for engaged and routed units.
+export const REJECTION_INVALID_FORMATION = 'invalid_formation';
+// Withdraw rejection codes (see `./withdraw.js`). `order_not_permitted`
+// gates Withdraw for units that are not engaged (as well as routed units).
+export const REJECTION_INVALID_WITHDRAW = 'invalid_withdraw';
 
 // Whole-submission refusal codes: a stale turn number or a side that is not
 // active refuses the submission before any order is examined.
@@ -118,6 +138,18 @@ const COHESION_VALUES = Object.freeze({ Steady: 2, Disordered: 1, Routed: 0 });
 
 function cohesionValue(state) {
   return Object.hasOwn(COHESION_VALUES, state) ? COHESION_VALUES[state] : null;
+}
+
+// One cohesion step down: Steady fails to Disordered, Disordered to Routed.
+// A withdraw that fails its cohesion test costs exactly this.
+function stepDownCohesion(state) {
+  if (state === 'Steady') {
+    return 'Disordered';
+  }
+  if (state === 'Disordered') {
+    return 'Routed';
+  }
+  return state;
 }
 
 // Deep clone a JSON-shaped value. Battle state, views, and submissions are
@@ -241,17 +273,15 @@ export function buildPlayerView(battle) {
 // with reasons for the unavailable ones, the Charge and Shoot candidates,
 // and the movement allowance in metres at the unit's current terrain (the
 // open-ground allowance divided by the worst-cover factor there; the flat
-// river fee is per leg and never part of the allowance). Hold, Move, and
-// Charge are permitted in this slice; the Shoot candidates stay empty until
-// the Shoot slice lands. Permission follows the battle state: a routed unit
-// may only Rally, an engaged unit may only Hold or Withdraw, and a
-// disordered unit cannot charge.
+// river fee is per leg and never part of the allowance). Hold, Move, Charge,
+// Reform, and Withdraw are permitted in this slice; the Shoot candidates stay
+// empty until the Shoot slice lands. Permission follows the battle state: a
+// routed unit may only Rally, an engaged unit may only Hold or Withdraw, and
+// a disordered unit cannot charge.
 
 const UNAVAILABLE_REASONS = Object.freeze({
-  Reform: 'Reform is not available in this slice: only Hold, Move, and Charge are permitted.',
-  Shoot: 'Shoot is not available in this slice: only Hold, Move, and Charge are permitted.',
-  Rally: 'Rally is not available in this slice: only Hold, Move, and Charge are permitted.',
-  Withdraw: 'Withdraw is not available in this slice: only Hold, Move, and Charge are permitted.',
+  Shoot: 'Shoot is not available in this slice: only Hold, Move, Charge, Reform, and Withdraw are permitted.',
+  Rally: 'Rally is not available in this slice: only Hold, Move, Charge, Reform, and Withdraw are permitted.',
 });
 
 function movementParamsOf(battle) {
@@ -291,12 +321,17 @@ function permissionFor(unit) {
   }
   if (unit?.cohesion === 'Disordered') {
     return {
-      permitted: [{ kind: ORDER_KIND_HOLD }, { kind: ORDER_KIND_MOVE }],
+      permitted: [{ kind: ORDER_KIND_HOLD }, { kind: ORDER_KIND_MOVE }, { kind: ORDER_KIND_REFORM }],
       gated: [{ kind: ORDER_KIND_CHARGE, reason: 'Disordered units cannot charge.' }],
     };
   }
   return {
-    permitted: [{ kind: ORDER_KIND_HOLD }, { kind: ORDER_KIND_MOVE }, { kind: ORDER_KIND_CHARGE }],
+    permitted: [
+      { kind: ORDER_KIND_HOLD },
+      { kind: ORDER_KIND_MOVE },
+      { kind: ORDER_KIND_CHARGE },
+      { kind: ORDER_KIND_REFORM },
+    ],
     gated: [],
   };
 }
@@ -520,14 +555,32 @@ export function validateTurn(battle, submission) {
     battle.units.map((unit) => [unit.id, { position: { ...unit.position }, facing: unit.facing }]),
   );
   // Simulated engagements: contacts from the battle state plus every charge
-  // accepted earlier in this turn. A unit engaged here may only Hold or
-  // Withdraw; a target already engaged can still be charged again.
+  // accepted earlier in this turn, minus every withdraw accepted earlier in
+  // this turn. A unit engaged here may only Hold or Withdraw; a target
+  // already engaged can still be charged again.
   const engaged = new Map(
     battle.units
       .filter((unit) => isEngaged(unit))
       .map((unit) => [unit.id, { ...unit.engaged }]),
   );
+  // Simulated formations: each order validates against the state left by the
+  // orders before it (ADR 0004), so a Reform accepted earlier in this turn
+  // reshapes the footprint every later order sees.
+  const templates = new Map(
+    battle.units.map((unit) => [unit.id, {
+      soldiers: unit.soldiers,
+      files: unit.files,
+      lateralInterval: unit.lateralInterval,
+      rankDepth: unit.rankDepth,
+    }]),
+  );
+  function effectiveUnit(unitId) {
+    const base = byId.get(unitId);
+    const template = templates.get(unitId);
+    return { ...base, ...template };
+  }
   const params = movementParamsOf(battle);
+  const withdrawParams = battle?.parameters?.withdraw ?? RULESET_PARAMETERS.withdraw;
   // Preview of a unit's footprint at its simulated pose: the deterministic
   // Movement-phase footprint every accepted verdict carries. Shared with the
   // movement module so Hold and Move previews describe the same shape.
@@ -542,9 +595,31 @@ export function validateTurn(battle, submission) {
         return {
           id: unit.id,
           side: unit.side,
-          corners: footprintAt(unit, pose.position, pose.facing).corners,
+          corners: footprintAt(effectiveUnit(unit.id), pose.position, pose.facing).corners,
         };
       });
+  }
+  // Every enemy the withdrawing unit is engaged with: its own contact plus
+  // every unit whose contact points at it. All of them break on a withdraw.
+  function engagedEnemiesOf(unitId) {
+    const unit = byId.get(unitId);
+    const found = [];
+    const contact = engaged.get(unitId);
+    if (contact && typeof contact.unitId === 'string') {
+      const target = byId.get(contact.unitId);
+      if (target && target.side !== unit?.side && !found.includes(target.id)) {
+        found.push(target.id);
+      }
+    }
+    for (const [otherId, otherContact] of engaged) {
+      if (otherContact?.unitId === unitId && otherId !== unitId) {
+        const other = byId.get(otherId);
+        if (other && other.side !== unit?.side && !found.includes(otherId)) {
+          found.push(otherId);
+        }
+      }
+    }
+    return found;
   }
   const verdicts = submission.orders.map((order, orderIndex) => {
     const unitId = isRecord(order) ? order.unitId : undefined;
@@ -593,7 +668,7 @@ export function validateTurn(battle, submission) {
     }
     if (kind === ORDER_KIND_MOVE) {
       const planned = validateMoveOnField({
-        unit,
+        unit: effectiveUnit(unit.id),
         from: simulated.get(unit.id),
         legs: isRecord(order) ? order.legs : undefined,
         params,
@@ -621,9 +696,9 @@ export function validateTurn(battle, submission) {
       const targetId = isRecord(order) ? order.targetId : undefined;
       const target = typeof targetId === 'string' ? byId.get(targetId) : undefined;
       const planned = validateChargeOnField({
-        unit,
+        unit: effectiveUnit(unit.id),
         from: simulated.get(unit.id),
-        target,
+        target: target ? effectiveUnit(target.id) : undefined,
         targetPose: target ? simulated.get(target.id) : undefined,
         edge: isRecord(order) ? order.edge : undefined,
         approachLegs: isRecord(order) ? order.approach : undefined,
@@ -653,7 +728,7 @@ export function validateTurn(battle, submission) {
           edge: planned.contact.edge,
           aspect: planned.contact.aspect,
           frontageM: planned.contact.frontageM,
-          files: fightingFiles(target, planned.contact.frontageM),
+          files: fightingFiles(effectiveUnit(target.id), planned.contact.frontageM),
         });
       }
       return {
@@ -665,10 +740,80 @@ export function validateTurn(battle, submission) {
         charge: { ...planned.contact },
       };
     }
+    if (kind === ORDER_KIND_REFORM) {
+      const planned = validateReformOnField({
+        unit: effectiveUnit(unit.id),
+        reform: isRecord(order) ? order : undefined,
+        battlefield: battle.scenario.battlefield,
+        others: othersAt(unit.id),
+        terrainFeatures: battle.scenario?.terrainFeatures || [],
+        orderIndex,
+      });
+      if (!planned.ok) {
+        return reject(orderIndex, unit.id, planned.code, planned.details, planned.message);
+      }
+      templates.set(unit.id, {
+        soldiers: unit.soldiers,
+        files: planned.formation.files,
+        lateralInterval: planned.formation.lateralInterval,
+        rankDepth: planned.formation.rankDepth,
+      });
+      return {
+        orderIndex,
+        unitId: unit.id,
+        accepted: true,
+        preview: planned.preview,
+        reform: { ...planned.formation },
+      };
+    }
+    if (kind === ORDER_KIND_WITHDRAW) {
+      // Only an engaged unit may withdraw. Routed units never reach this
+      // branch (Rally is their only permitted order); any other unit ordered
+      // to withdraw is refused with the orders it may give instead.
+      if (!engaged.has(unit.id)) {
+        const permitted = unit.cohesion === 'Disordered'
+          ? [ORDER_KIND_HOLD, ORDER_KIND_MOVE, ORDER_KIND_REFORM]
+          : [ORDER_KIND_HOLD, ORDER_KIND_MOVE, ORDER_KIND_CHARGE, ORDER_KIND_REFORM];
+        return reject(orderIndex, unit.id, REJECTION_ORDER_NOT_PERMITTED,
+          { unitId: unit.id, reason: 'not-engaged', permitted },
+          `Order ${orderIndex}: unit "${unit.id}" is not Engaged and may not Withdraw.`);
+      }
+      const brokenIds = engagedEnemiesOf(unit.id);
+      const planned = validateWithdrawOnField({
+        unit: effectiveUnit(unit.id),
+        from: simulated.get(unit.id),
+        brokenIds,
+        params,
+        withdrawParams,
+        battlefield: battle.scenario.battlefield,
+        others: othersAt(unit.id),
+        terrainFeatures: battle.scenario?.terrainFeatures || [],
+        orderIndex,
+      });
+      if (!planned.ok) {
+        return reject(orderIndex, unit.id, planned.code, planned.details, planned.message);
+      }
+      simulated.set(unit.id, {
+        position: { ...planned.preview.position },
+        facing: planned.preview.facing,
+      });
+      engaged.delete(unit.id);
+      for (const enemyId of planned.brokeContactWith) {
+        engaged.delete(enemyId);
+      }
+      return {
+        orderIndex,
+        unitId: unit.id,
+        accepted: true,
+        preview: planned.preview,
+        movement: { availableM: planned.availableM, requiredM: planned.requiredM },
+        withdraw: { distanceM: planned.distanceM, brokeContactWith: [...planned.brokeContactWith] },
+      };
+    }
     return reject(orderIndex, unit.id, REJECTION_UNSUPPORTED_ORDER_KIND,
       { unitId: unit.id, kind },
       `Order ${orderIndex}: order kind "${String(kind)}" is not ` +
-        `available in this slice (only ${ORDER_KINDS.join(' and ')} are permitted).`);
+        `available in this slice (only ${ORDER_KINDS.join(', ')} are permitted).`);
   });
   const acceptedOrders = verdicts
     .filter((verdict) => verdict.accepted)
@@ -689,10 +834,12 @@ export function validateTurn(battle, submission) {
 // --- Resolution -------------------------------------------------------------
 // Resolution is a pure function from the battle state and a committed
 // decision to a new state and events. The Movement phase executes the
-// accepted moves in the given order at their validated previews; Shooting,
-// Combat, and Cohesion stay empty until their slices land. Resolution then
-// passes the turn and counts rounds as pairs of turns. A turn decision is
-// either a commit or a concede.
+// accepted moves, charges, reforms, and withdraws in the given order at their
+// validated previews; a withdraw also breaks every contact it held and then
+// tests cohesion by chance on the engine generator (failure costs a cohesion
+// step, recorded with the draw). Shooting, Combat, and Cohesion stay empty
+// until their slices land. Resolution then passes the turn and counts rounds
+// as pairs of turns. A turn decision is either a commit or a concede.
 
 export class TurnRejectedError extends Error {
   constructor(result) {
@@ -743,17 +890,93 @@ export function resolveTurn(battle, decision) {
   if (!result.ok) {
     throw new TurnRejectedError(result);
   }
-  // Execute the accepted moves and charges in the given order at their
-  // validated previews: the previews are deterministic, so resolution replays
-  // exactly what validation promised. Each charge also records the engagement
-  // on both units; a target charged twice keeps its first contact.
+  // Execute the accepted orders in the given order at their validated
+  // previews: the previews are deterministic, so resolution replays exactly
+  // what validation promised. Each charge also records the engagement on both
+  // units; a target charged twice keeps its first contact. Each reform
+  // changes the formation in place; each withdraw steps back, breaks every
+  // contact it held, and then tests cohesion by chance on the engine
+  // generator (the enemy neither pursues nor gets a free attack).
+  const rng = createRng(next.rngState);
   for (const verdict of result.verdicts) {
     if (!verdict.accepted || !verdict.preview) {
       continue;
     }
     const order = decision.submission.orders[verdict.orderIndex];
-    if (!isRecord(order) || order.kind !== ORDER_KIND_MOVE) {
-      if (!isRecord(order) || order.kind !== ORDER_KIND_CHARGE || !verdict.charge) {
+    if (!isRecord(order)) {
+      continue;
+    }
+    if (order.kind === ORDER_KIND_REFORM && verdict.reform) {
+      const target = next.units.find((unit) => unit.id === verdict.unitId);
+      target.files = verdict.reform.files;
+      target.lateralInterval = verdict.reform.lateralInterval;
+      target.rankDepth = verdict.reform.rankDepth;
+      next.events.push(
+        nextEvent(next, {
+          type: 'unit-reformed',
+          turnNumber: battle.turnNumber,
+          side: battle.activeSide,
+          unitId: verdict.unitId,
+          orderIndex: verdict.orderIndex,
+          files: verdict.reform.files,
+          lateralInterval: verdict.reform.lateralInterval,
+          rankDepth: verdict.reform.rankDepth,
+          position: { ...verdict.preview.position },
+          facing: verdict.preview.facing,
+        }),
+      );
+      continue;
+    }
+    if (order.kind === ORDER_KIND_WITHDRAW && verdict.withdraw) {
+      const target = next.units.find((unit) => unit.id === verdict.unitId);
+      target.position = { ...verdict.preview.position };
+      target.facing = verdict.preview.facing;
+      target.engaged = null;
+      for (const enemyId of verdict.withdraw.brokeContactWith) {
+        const enemy = next.units.find((unit) => unit.id === enemyId);
+        if (enemy && enemy.engaged?.unitId === target.id) {
+          enemy.engaged = null;
+        }
+      }
+      next.events.push(
+        nextEvent(next, {
+          type: 'unit-withdrew',
+          turnNumber: battle.turnNumber,
+          side: battle.activeSide,
+          unitId: verdict.unitId,
+          orderIndex: verdict.orderIndex,
+          position: { ...verdict.preview.position },
+          facing: verdict.preview.facing,
+          distanceM: verdict.withdraw.distanceM,
+          brokeContactWith: [...verdict.withdraw.brokeContactWith],
+          requiredM: verdict.movement.requiredM,
+        }),
+      );
+      const { cohesionPassChance } = withdrawParamsOf(next.parameters?.withdraw);
+      const value = rng.next();
+      next.rngState = rng.state;
+      const passed = value < cohesionPassChance;
+      const before = target.cohesion;
+      const after = passed ? before : stepDownCohesion(before);
+      target.cohesion = after;
+      next.events.push(
+        nextEvent(next, {
+          type: RANDOM_DRAW_EVENT,
+          purpose: 'withdraw-cohesion',
+          turnNumber: battle.turnNumber,
+          side: battle.activeSide,
+          unitId: verdict.unitId,
+          orderIndex: verdict.orderIndex,
+          value,
+          result: passed ? 'passed' : 'failed',
+          cohesionBefore: before,
+          cohesionAfter: after,
+        }),
+      );
+      continue;
+    }
+    if (order.kind !== ORDER_KIND_MOVE) {
+      if (order.kind !== ORDER_KIND_CHARGE || !verdict.charge) {
         continue;
       }
       const charger = next.units.find((unit) => unit.id === verdict.unitId);

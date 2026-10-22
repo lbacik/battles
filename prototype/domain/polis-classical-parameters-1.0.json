@@ -34,5 +34,10 @@
       "columnMaxFiles": 4,
       "riverCostM": 30
     }
+  },
+  "withdraw": {
+    "distanceM": 20,
+    "rateFactor": 0.5,
+    "cohesionPassChance": 0.5
   }
 }

@@ -104,6 +104,16 @@ export const RULESET_PARAMETERS = Object.freeze({
       riverCostM: 30,
     }),
   }),
+  // Withdraw (decision #6 item 13). An engaged unit steps straight back by
+  // `distanceM` without turning, billing the step at the reduced `rateFactor`
+  // exactly as rough ground bills a march, then tests cohesion by chance: the
+  // draw passes below `cohesionPassChance` and failure costs a cohesion step.
+  // Initial values; the Engine II gate sets the fighting parameters.
+  withdraw: Object.freeze({
+    distanceM: 20,
+    rateFactor: 0.5,
+    cohesionPassChance: 0.5,
+  }),
 });
 
 export const TROOP_TYPE_KEYS = Object.freeze([

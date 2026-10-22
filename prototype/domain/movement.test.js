@@ -540,11 +540,11 @@ describe('available actions', () => {
       .filter((entry) => entry.side === battle.activeSide)
       .find((entry) => entry.troopType === 'cavalry');
     const hopliteActions = actions.units.find((entry) => entry.unitId === hoplite.id);
-    assert.deepEqual(hopliteActions.permitted, [{ kind: 'Hold' }, { kind: 'Move' }, { kind: 'Charge' }]);
+    assert.deepEqual(hopliteActions.permitted, [{ kind: 'Hold' }, { kind: 'Move' }, { kind: 'Charge' }, { kind: 'Reform' }]);
     assert.equal(hopliteActions.movementAllowanceM, 90);
     assert.deepEqual(
       hopliteActions.unavailable.map((entry) => entry.kind).sort(),
-      ['Rally', 'Reform', 'Shoot', 'Withdraw'],
+      ['Rally', 'Shoot'],
     );
     if (cavalry) {
       const cavalryActions = actions.units.find((entry) => entry.unitId === cavalry.id);
