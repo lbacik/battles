@@ -20,8 +20,10 @@
 // Starting a battle snapshots the scenario, records the ruleset identifier,
 // the version actually used, and a parameter snapshot, the seed and the
 // generator state, the starting side drawn from the seed, the controller of
-// each side, and round 1. Every unit starts Steady. The scenario's own ruleset
-// reference is never changed.
+// each side, and round 1. The battle reuses the scenario's id as its battle
+// id, opens on turn 1 with the starting side active in the `orders` phase,
+// and stays `ongoing` until a side concedes. Every unit starts Steady. The
+// scenario's own ruleset reference is never changed.
 //
 // The seeded random generator belongs to the engine: `createRng` builds it
 // from the battle seed, and every draw is recorded as an event on the battle.
@@ -43,6 +45,15 @@ import { cloneScenario, validateScenario } from './scenario.js';
 
 export const BATTLE_KIND = 'battle';
 export const STARTING_ROUND = 1;
+export const STARTING_TURN_NUMBER = 1;
+
+// The phase a battle rests in while it waits for the active side's orders.
+// Resolution runs the Movement, Shooting, Combat, and Cohesion phases and
+// returns to `orders` for the next turn.
+export const TURN_PHASE_ORDERS = 'orders';
+
+export const BATTLE_STATUS_ONGOING = 'ongoing';
+export const BATTLE_STATUS_CONCEDED = 'conceded';
 
 export const STEADY_COHESION = 'Steady';
 export const COHESION_STATES = Object.freeze(['Steady', 'Disordered', 'Routed']);
@@ -387,11 +398,13 @@ function normalizeControllers(scenario, controllers) {
 // the battle's initial state: a scenario snapshot, the ruleset identifier,
 // the version actually used, and a parameter snapshot, the seed and the
 // generator state, the starting side drawn from the seed, the controllers,
-// and round 1. Every unit starts Steady. Pure apart from drawing an omitted
-// seed: the scenario is never changed, and its ruleset reference keeps
-// whatever version it carried. Throws when the scenario is structurally
-// invalid, when a controller is missing or unknown, or — with a
-// `BattleStartError` carrying every problem — when the scenario is unplayable.
+// round 1, and the turn tracking (`turnNumber` 1, `activeSide` the starting
+// side, phase `orders`, status `ongoing`). Every unit starts Steady. Pure
+// apart from drawing an omitted seed: the scenario is never changed, and its
+// ruleset reference keeps whatever version it carried. Throws when the
+// scenario is structurally invalid, when a controller is missing or unknown,
+// or — with a `BattleStartError` carrying every problem — when the scenario
+// is unplayable.
 export function startBattle(scenario, options = {}) {
   const { seed, controllers } = options;
   const normalizedControllers = normalizeControllers(scenario, controllers);
@@ -420,6 +433,7 @@ export function startBattle(scenario, options = {}) {
   ];
   return {
     kind: BATTLE_KIND,
+    id: scenario.id,
     scenario: cloneScenario(scenario),
     ruleset: { id: INSTALLED_RULESET_ID, version: INSTALLED_RULESET_VERSION },
     parameters: cloneValue(RULESET_PARAMETERS),
@@ -428,6 +442,10 @@ export function startBattle(scenario, options = {}) {
     startingSide,
     controllers: normalizedControllers,
     round: STARTING_ROUND,
+    turnNumber: 1,
+    activeSide: startingSide,
+    phase: TURN_PHASE_ORDERS,
+    status: BATTLE_STATUS_ONGOING,
     units: scenario.units.map((unit) => ({ ...cloneValue(unit), cohesion: STEADY_COHESION })),
     events,
   };
