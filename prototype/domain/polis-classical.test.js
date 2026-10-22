@@ -1,25 +1,30 @@
-// Unit tests for the provisional ruleset package. Run with: npm test
+// Unit tests for the ruleset package `polis-classical` 1.0. Run with: npm test
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import {
+  PROVISIONAL_SCENARIO_VERSION,
   RULESET_ID,
+  RULESET_PARAMETERS,
+  RULESET_PARAMETERS_FILE,
   RULESET_VERSION,
   TROOP_TYPE_CATALOGUE,
   TROOP_TYPE_KEYS,
   getTroopType,
+  isCompatibleScenarioRuleset,
   isKnownTroopType,
+  rulesetMajor,
   spacingClass,
 } from './polis-classical.js';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 
 describe('polis-classical catalogue', () => {
-  it('is versioned 0.1 and carries the six stable troop-type keys', () => {
+  it('is versioned 1.0 and keeps the six stable troop-type keys of 0.1', () => {
     assert.equal(RULESET_ID, 'polis-classical');
-    assert.equal(RULESET_VERSION, '0.1');
+    assert.equal(RULESET_VERSION, '1.0');
     assert.deepEqual([...TROOP_TYPE_KEYS].sort(), [
       'archer',
       'cavalry',
@@ -97,7 +102,7 @@ describe('polis-classical catalogue', () => {
   });
 
   it('imports nothing from React or Next.js', () => {
-    for (const file of ['geometry.js', 'scenario.js', 'store.js', 'polis-classical.js']) {
+    for (const file of ['geometry.js', 'scenario.js', 'store.js', 'polis-classical.js', 'battle.js']) {
       const source = readFileSync(path.join(here, file), 'utf8');
       assert.ok(!/from\s+['"]react['"]/.test(source), `${file} imports react`);
       assert.ok(!/from\s+['"]next/.test(source), `${file} imports next`);
@@ -156,5 +161,52 @@ describe('units whose troop type left the catalogue (decision #5 item 13)', () =
     assert.deepEqual(findUnknownTroopTypeUnits(createScenario({ title: 'Plain' })), []);
     assert.deepEqual(collectUnknownTroopTypeWarnings(createScenario({ title: 'Plain' })), []);
     assert.deepEqual(findUnknownTroopTypeUnits(null), []);
+  });
+});
+
+describe('polis-classical 1.0 parameters', () => {
+  it('keeps the parameter snapshot in a versioned data file inside the package', () => {
+    assert.equal(RULESET_PARAMETERS_FILE, 'polis-classical-parameters-1.0.json');
+    const stored = JSON.parse(readFileSync(path.join(here, RULESET_PARAMETERS_FILE), 'utf8'));
+    assert.deepEqual({ ...RULESET_PARAMETERS }, stored);
+    assert.deepEqual(stored.ruleset, { id: RULESET_ID, version: RULESET_VERSION });
+  });
+
+  it('marks the parameter values as placeholders for the Engine II gate', () => {
+    assert.equal(RULESET_PARAMETERS.status, 'placeholder');
+    assert.ok(RULESET_PARAMETERS.note.trim().length > 0);
+  });
+});
+
+describe('polis-classical version compatibility', () => {
+  it('starts scenarios with the same identifier and major version', () => {
+    assert.equal(isCompatibleScenarioRuleset({ id: 'polis-classical', version: '1.0' }), true);
+    assert.equal(isCompatibleScenarioRuleset({ id: 'polis-classical', version: '1.4' }), true);
+  });
+
+  it('accepts the provisional 0.1 catalogue version under 1.x', () => {
+    assert.equal(PROVISIONAL_SCENARIO_VERSION, '0.1');
+    assert.equal(isCompatibleScenarioRuleset({ id: 'polis-classical', version: '0.1' }), true);
+  });
+
+  it('refuses anything else as an incompatible ruleset reference', () => {
+    assert.equal(isCompatibleScenarioRuleset({ id: 'polis-classical', version: '0.2' }), false);
+    assert.equal(isCompatibleScenarioRuleset({ id: 'polis-classical', version: '2.0' }), false);
+    assert.equal(isCompatibleScenarioRuleset({ id: 'polis-classical', version: '2.1' }), false);
+    assert.equal(isCompatibleScenarioRuleset({ id: 'other-rules', version: '1.0' }), false);
+    assert.equal(isCompatibleScenarioRuleset({ id: 'polis-classical', version: '' }), false);
+    assert.equal(isCompatibleScenarioRuleset({ id: 'polis-classical' }), false);
+    assert.equal(isCompatibleScenarioRuleset({ version: '1.0' }), false);
+    assert.equal(isCompatibleScenarioRuleset(null), false);
+    assert.equal(isCompatibleScenarioRuleset('polis-classical 1.0'), false);
+  });
+
+  it('reads the major version without throwing', () => {
+    assert.equal(rulesetMajor('1.0'), 1);
+    assert.equal(rulesetMajor(' 0.1 '), 0);
+    assert.equal(rulesetMajor('2.0'), 2);
+    assert.equal(rulesetMajor(''), null);
+    assert.equal(rulesetMajor(null), null);
+    assert.equal(rulesetMajor(1), null);
   });
 });

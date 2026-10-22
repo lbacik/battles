@@ -1,25 +1,53 @@
-// PÓLIS provisional ruleset package `polis-classical` 0.1 (framework-free).
+// PÓLIS ruleset package `polis-classical` 1.0 (framework-free).
 //
-// The scenario editor binds every scenario to a ruleset from the start, but
-// the first ruleset with mechanics does not exist yet. This package is the
-// provisional catalogue-only ruleset the editor is built against: it holds
-// the six stable troop-type keys, their display names, the spacing presets
-// (close, normal, open) that pre-fill a unit's lateral interval and rank
-// depth in the editor, the permitted spacing ranges, the spacing-class
-// thresholds, and the missile range where a troop type has one.
+// The first ruleset with mechanics. It keeps the six stable troop-type keys of
+// the provisional catalogue-only `0.1`, with the same presets, permitted
+// ranges, spacing thresholds, and missile ranges. A parameter change bumps the
+// minor version; removing a key or changing a mechanism bumps the major
+// version.
 //
-// All numbers are placeholders. Quality variants (veterans, levies) would be
-// further keys; none exist in the first ruleset. Catalogue membership is a
-// playability concern, never a structural one: structural validation must
-// not consult this package.
+// Parameters live in the versioned data file
+// `./polis-classical-parameters-1.0.json` (placeholder values; the Engine II
+// gate sets them). The `RULESET_PARAMETERS` constant below mirrors that file
+// so the browser build and the engine share one snapshot without file access;
+// unit tests assert the two stay identical. Battle start snapshots the
+// parameters and records the version actually used.
 //
-// A parameter change bumps the ruleset minor version; removing a key or
-// changing a mechanism bumps the major version. The first ruleset with
-// mechanics is `1.0` and keeps these keys.
+// Compatibility: the installed ruleset declares which scenario ruleset
+// versions it can start. By default this is the same identifier and the same
+// major version; `polis-classical` `1.x` also accepts the provisional `0.1`,
+// because it keeps the same troop-type keys. Anything else is refused as an
+// incompatible ruleset reference. Starting a battle never changes the
+// scenario's own ruleset reference.
+//
+// Catalogue membership stays a playability concern, never a structural one:
+// structural validation must not consult this package.
 
-import { RULESET_ID, RULESET_VERSION } from './scenario.js';
+export const RULESET_ID = 'polis-classical';
+export const RULESET_VERSION = '1.0';
 
-export { RULESET_ID, RULESET_VERSION };
+// The provisional catalogue-only version the editor was built against. The
+// only `0.x` version the installed `1.x` ruleset can start.
+export const PROVISIONAL_SCENARIO_VERSION = '0.1';
+
+// Versioned parameter snapshot (placeholder values; the Engine II gate sets
+// them). Mirrors `./polis-classical-parameters-1.0.json`, which is canonical.
+export const RULESET_PARAMETERS_FILE = 'polis-classical-parameters-1.0.json';
+
+export const RULESET_PARAMETERS = Object.freeze({
+  ruleset: Object.freeze({ id: 'polis-classical', version: '1.0' }),
+  status: 'placeholder',
+  note: 'Placeholder values. Battle start only snapshots them; the Engine II gate sets them.',
+  battle: Object.freeze({
+    roundLimit: 12,
+    breakLossShare: 0.5,
+    drawMarginShare: 0.05,
+  }),
+  cohesion: Object.freeze({
+    start: 'Steady',
+    states: Object.freeze(['Steady', 'Disordered', 'Routed']),
+  }),
+});
 
 export const TROOP_TYPE_KEYS = Object.freeze([
   'hoplite',
@@ -210,4 +238,45 @@ export function spacingClass(troopKey, lateralInterval) {
     return 'open';
   }
   return 'normal';
+}
+
+// --- Ruleset version compatibility ------------------------------------------
+// The installed ruleset declares which scenario ruleset versions it can
+// start: the same identifier and the same major version, plus the provisional
+// `0.1` for `polis-classical` `1.x`. Anything else is refused as an
+// incompatible ruleset reference.
+
+// The major version of a ruleset version string, or null when it cannot be
+// read. Never throws.
+export function rulesetMajor(version) {
+  if (typeof version !== 'string') {
+    return null;
+  }
+  const match = /^\s*(\d+)\b/.exec(version);
+  if (!match) {
+    return null;
+  }
+  return Number(match[1]);
+}
+
+// True when a scenario carrying `reference` ({ id, version }) may start a
+// battle under the installed ruleset. Pure. Never throws.
+export function isCompatibleScenarioRuleset(reference) {
+  if (!reference || typeof reference !== 'object') {
+    return false;
+  }
+  if (reference.id !== RULESET_ID) {
+    return false;
+  }
+  if (typeof reference.version !== 'string') {
+    return false;
+  }
+  if (reference.version.trim() === PROVISIONAL_SCENARIO_VERSION) {
+    return true;
+  }
+  const scenarioMajor = rulesetMajor(reference.version);
+  if (scenarioMajor === null) {
+    return false;
+  }
+  return scenarioMajor === rulesetMajor(RULESET_VERSION);
 }
