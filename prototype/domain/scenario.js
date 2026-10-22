@@ -773,3 +773,228 @@ export function fitScale(battlefieldWidth, battlefieldHeight, viewportWidth, vie
 }
 
 export { deriveFootprint };
+// --- Map navigation view model (display only) -------------------------------
+// The editor map keeps its camera apart from the scenario document: zooming,
+// panning, fitting, toggling the grid, and moving the cursor never mutate the
+// document and never mark the scenario as unsaved. These helpers are pure and
+// framework-free so the editor and the unit tests share them.
+//
+// A map view is { zoom, center } where zoom 1 fits the battlefield (plus the
+// fixed editorial margin below) and center is a map-convention point
+// { x, y } in metres (origin south-west, x east, y north).
+export const MAP_VIEW_MIN_ZOOM = 0.2;
+export const MAP_VIEW_MAX_ZOOM = 32;
+
+// Fixed editorial margin around the battlefield, in metres. It frames axis
+// labels only; it is not stored and never affects validation.
+export const MAP_VIEW_PAD_LEFT_M = 70;
+export const MAP_VIEW_PAD_RIGHT_M = 60;
+export const MAP_VIEW_PAD_TOP_M = 60;
+export const MAP_VIEW_PAD_BOTTOM_M = 60;
+
+function baseViewSize(battlefield) {
+  const width = Number(battlefield?.width);
+  const height = Number(battlefield?.height);
+  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+    return null;
+  }
+  return {
+    width: width + MAP_VIEW_PAD_LEFT_M + MAP_VIEW_PAD_RIGHT_M,
+    height: height + MAP_VIEW_PAD_TOP_M + MAP_VIEW_PAD_BOTTOM_M,
+  };
+}
+
+export function clampMapZoom(zoom) {
+  if (!Number.isFinite(zoom)) return 1;
+  return Math.min(MAP_VIEW_MAX_ZOOM, Math.max(MAP_VIEW_MIN_ZOOM, zoom));
+}
+
+// The fitted view: the whole battlefield plus the editorial margin is
+// visible, centred on the battlefield centre.
+export function fitMapView(battlefield) {
+  const width = Number(battlefield?.width);
+  const height = Number(battlefield?.height);
+  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+    return { zoom: 1, center: { x: 0, y: 0 } };
+  }
+  return { zoom: 1, center: { x: width / 2, y: height / 2 } };
+}
+
+// Zoom keeping the map point under the cursor fixed on the screen. The cursor
+// and the previous centre are map-convention points in metres.
+export function zoomViewAroundCursor(view, cursorMap, newZoom) {
+  const zoom = clampMapZoom(newZoom);
+  const center = view?.center;
+  const cursor = cursorMap;
+  if (
+    !center ||
+    !Number.isFinite(center.x) ||
+    !Number.isFinite(center.y) ||
+    !cursor ||
+    !Number.isFinite(cursor.x) ||
+    !Number.isFinite(cursor.y)
+  ) {
+    return { zoom, center: { x: cursor?.x ?? 0, y: cursor?.y ?? 0 } };
+  }
+  const previousZoom = clampMapZoom(view?.zoom);
+  const ratio = previousZoom / zoom;
+  return {
+    zoom,
+    center: {
+      x: cursor.x + (center.x - cursor.x) * ratio,
+      y: cursor.y + (center.y - cursor.y) * ratio,
+    },
+  };
+}
+
+// Pan by a screen drag. Positive dxPx moves the pointer right, positive dyPx
+// moves it down; the content follows the pointer, so the centre moves the
+// opposite way in screen space (map y is flipped: down on screen is south).
+export function panMapViewByPixels(view, dxPx, dyPx, metresPerPixel) {
+  const zoom = clampMapZoom(view?.zoom);
+  const center = view?.center;
+  if (!center || !Number.isFinite(center.x) || !Number.isFinite(center.y)) {
+    return { zoom, center: { x: 0, y: 0 } };
+  }
+  const mpp = Number.isFinite(metresPerPixel) && metresPerPixel > 0 ? metresPerPixel : 1;
+  const dx = Number.isFinite(dxPx) ? dxPx : 0;
+  const dy = Number.isFinite(dyPx) ? dyPx : 0;
+  return {
+    zoom,
+    center: { x: center.x - dx * mpp, y: center.y + dy * mpp },
+  };
+}
+
+// SVG viewBox in screen coordinates (y down) for the current view. Rendering
+// flips the vertical axis through toScreenPoint; this is the only place the
+// flip happens.
+export function mapViewBox(view, battlefield) {
+  const base = baseViewSize(battlefield);
+  const height = Number(battlefield?.height);
+  if (!base || !Number.isFinite(height)) {
+    return { x: 0, y: 0, width: 100, height: 100 };
+  }
+  const zoom = clampMapZoom(view?.zoom);
+  const center = view?.center;
+  const width = base.width / zoom;
+  const viewHeight = base.height / zoom;
+  const centerScreenX = center && Number.isFinite(center.x) ? center.x : 0;
+  const centerScreenY =
+    center && Number.isFinite(center.y) ? height - center.y : height / 2;
+  return {
+    x: centerScreenX - width / 2,
+    y: centerScreenY - viewHeight / 2,
+    width,
+    height: viewHeight,
+  };
+}
+
+export function metresPerPixel(view, battlefield, viewportWidthPx) {
+  const viewport = Number(viewportWidthPx);
+  if (!Number.isFinite(viewport) || viewport <= 0) return 1;
+  return mapViewBox(view, battlefield).width / viewport;
+}
+
+const SCALE_BAR_STEPS_M = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000];
+
+// Pick a human-readable scale bar length (metres) whose on-screen width is
+// close to targetPx without exceeding maxPx.
+export function niceScaleBarMetres(mpp, targetPx = 120, maxPx = 180) {
+  const perPixel = Number.isFinite(mpp) && mpp > 0 ? mpp : 1;
+  const target = Number.isFinite(targetPx) && targetPx > 0 ? targetPx : 120;
+  const max = Number.isFinite(maxPx) && maxPx > 0 ? maxPx : 180;
+  let fallback = SCALE_BAR_STEPS_M[0];
+  for (const step of SCALE_BAR_STEPS_M) {
+    if (step / perPixel <= max) fallback = step;
+    if (step / perPixel >= target) return step;
+  }
+  return fallback;
+}
+
+// --- Unit footprint (ADR 0001, ADR 0002) ------------------------------------
+// A unit occupies a true-scale rectangular footprint derived from its
+// soldiers, files, and two spacings stored in metres on the unit: the lateral
+// interval per file and the depth per rank. Ranks follow as
+// ceil(soldiers / files); frontage = files x lateral interval;
+// depth = ranks x rank depth. Rendering must draw exactly this rectangle:
+// never enlarged for display.
+function numericField(unit, names) {
+  for (const name of names) {
+    const value = unit?.[name];
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))) {
+      return Number(value);
+    }
+  }
+  return undefined;
+}
+
+// Read the map position of a unit. Accepts { position: { x, y } } as well as
+// flat { x, y } shapes used across prototype sketches. Returns null when the
+// position is missing or not finite.
+export function unitPosition(unit) {
+  if (!unit || typeof unit !== 'object') return null;
+  const nested = unit.position;
+  const x =
+    nested && Number.isFinite(Number(nested.x))
+      ? Number(nested.x)
+      : Number.isFinite(Number(unit.x))
+        ? Number(unit.x)
+        : Number.NaN;
+  const y =
+    nested && Number.isFinite(Number(nested.y))
+      ? Number(nested.y)
+      : Number.isFinite(Number(unit.y))
+        ? Number(unit.y)
+        : Number.NaN;
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return { x, y };
+}
+
+// Compass bearing of the unit's front in degrees (0 = north, 90 = east).
+// Accepts `facingDeg`, `facing`, or `angle` spellings from prototype data.
+export function unitFacingDeg(unit) {
+  const value = numericField(unit, ['facingDeg', 'facing', 'angle', 'headingDeg']);
+  if (value === undefined) return 0;
+  let normalised = value % 360;
+  if (normalised > 180) normalised -= 360;
+  if (normalised <= -180) normalised += 360;
+  return normalised;
+}
+
+export function unitFootprint(unit) {
+  if (!unit || typeof unit !== 'object') return null;
+  const explicitFrontage = numericField(unit, ['frontageM', 'frontage']);
+  const explicitDepth = numericField(unit, ['depthM', 'depth']);
+  if (explicitFrontage !== undefined && explicitDepth !== undefined) {
+    if (explicitFrontage <= 0 || explicitDepth <= 0) return null;
+    const ranks = numericField(unit, ['ranks']);
+    return {
+      ranks: ranks !== undefined && ranks > 0 ? Math.ceil(ranks) : null,
+      frontageM: explicitFrontage,
+      depthM: explicitDepth,
+    };
+  }
+  const files = numericField(unit, ['files']);
+  const soldiers = numericField(unit, ['soldiers', 'strength']);
+  const lateral = numericField(unit, [
+    'lateralIntervalM',
+    'lateralInterval',
+    'intervalM',
+    'spacingM',
+    'spacing',
+  ]);
+  const rankDepth = numericField(unit, ['rankDepthM', 'rankDepth', 'depthPerRankM']);
+  const givenRanks = numericField(unit, ['ranks']);
+  if (!Number.isFinite(files) || files <= 0) return null;
+  let ranks = null;
+  if (Number.isFinite(soldiers) && soldiers > 0) {
+    ranks = Math.ceil(soldiers / files);
+  } else if (Number.isFinite(givenRanks) && givenRanks > 0) {
+    ranks = Math.ceil(givenRanks);
+  }
+  if (ranks === null || ranks <= 0) return null;
+  if (!Number.isFinite(lateral) || lateral <= 0) return null;
+  if (!Number.isFinite(rankDepth) || rankDepth <= 0) return null;
+  return { ranks, frontageM: files * lateral, depthM: ranks * rankDepth };
+}

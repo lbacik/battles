@@ -7,18 +7,30 @@
 import {
   MAX_BATTLEFIELD_HEIGHT_M,
   MAX_BATTLEFIELD_WIDTH_M,
+  clampMapZoom,
   createScenario,
   deriveFootprint,
   exportScenario,
+  fitMapView,
   importScenarioDocument,
+  mapViewBox,
+  niceScaleBarMetres,
+  panMapViewByPixels,
   toScreenPoint,
+  unitFacingDeg,
+  unitFootprint,
+  unitPosition,
   validateScenario,
+  zoomViewAroundCursor,
 } from './domain/scenario.js';
 import { getTroopType } from './domain/polis-classical.js';
 import { IndexedDBScenarioStore, ensurePersistentStorage } from './library/idb.js';
 
 const NARROW_NOTICE_WIDTH = 1280;
 
+// Map navigation state is display-only: zooming, panning, fitting, toggling
+// the grid, switching tools, and moving the cursor never mutate the scenario
+// document and never mark the scenario as unsaved.
 const state = {
   store: new IndexedDBScenarioStore(),
   library: [],
@@ -30,7 +42,17 @@ const state = {
   problems: [],
   persistent: null,
   newTitle: '',
+  mapView: null,
+  spaceHeld: false,
 };
+
+function ensureMapView(document) {
+  const fitted = fitMapView(document.battlefield);
+  if (!state.mapView) {
+    state.mapView = { ...fitted, showGrid: true, tool: 'select', viewportW: 800 };
+  }
+  return state.mapView;
+}
 
 const $ = (selector, root = document) => root.querySelector(selector);
 
@@ -68,7 +90,9 @@ function setStatus(message, isError = false) {
 // metres). Only rendering flips the vertical axis for the screen, through
 // toScreenPoint: screenY = battlefieldHeight - mapY. Terrain outlines and
 // unit footprints are drawn at true scale from the stored vertices: rendering
-// never moves outlines (no smoothing, no enlarged symbols).
+// never moves outlines (no smoothing, no enlarged symbols), and footprints
+// are never enlarged for display: at low zoom the renderer may only add
+// helper outlines or icons around (never instead of) the true rectangle.
 const GROUND_STYLES = {
   forest: { fill: '#9db38f', stroke: '#7a8f6d' },
   rough: { fill: '#d8d2b8', stroke: '#a89f83' },
@@ -81,8 +105,14 @@ const LINEAR_STYLES = {
   road: '#c9b98f',
 };
 
-function sideColor(document, sideId) {
-  const side = (document.sides || []).find((entry) => entry.id === sideId);
+function sideColor(document, unitOrSideId) {
+  const key =
+    unitOrSideId && typeof unitOrSideId === 'object'
+      ? (unitOrSideId.sideId ?? unitOrSideId.side ?? unitOrSideId.sideName)
+      : unitOrSideId;
+  const side = (document.sides || []).find(
+    (entry) => entry.id === key || entry.name === key,
+  );
   return side && side.color ? side.color : '#666666';
 }
 
@@ -90,30 +120,82 @@ function troopDisplayName(troopType) {
   return getTroopType(troopType)?.displayName || troopType;
 }
 
-function battlefieldSvg(document) {
+function unitLabelLines(unit, footprint) {
+  const name = String(unit?.name || 'Unit');
+  if (!footprint) return [name, ''];
+  const dims = `${Math.round(footprint.frontageM)} × ${Math.round(footprint.depthM)} m`;
+  return [name, dims];
+}
+
+function unitSvg(document, unit, mapView, mpp) {
+  const position = unitPosition(unit);
+  const footprint = unitFootprint(unit);
+  if (!position || !footprint) return '';
+  const { height: heightM } = document.battlefield;
+  const centre = toScreenPoint(position, heightM);
+  const facing = unitFacingDeg(unit);
+  const color = sideColor(document, unit);
+  const frontW = footprint.frontageM;
+  const depthH = footprint.depthM;
+  const [name, dims] = unitLabelLines(unit, footprint);
+  // Labels keep a constant screen size: font sizes are specified in metres
+  // divided by the zoom so text does not grow with the battlefield.
+  const zoom = clampMapZoom(mapView?.zoom);
+  const labelSize = 13 / zoom;
+  const dimsSize = 10.5 / zoom;
+  // Low-zoom helper: when the true footprint would render below ~10 px, add
+  // a dashed helper outline (and only then) so the unit stays findable. The
+  // true rectangle itself is always drawn at true scale.
+  const minEdgePx = Math.min(frontW, depthH) / mpp;
+  const helperM = 16 * mpp;
+  const helperBox = Math.max(frontW, depthH, helperM);
+  const helper =
+    minEdgePx < 10
+      ? `<rect x="${-helperBox / 2}" y="${-helperBox / 2}" width="${helperBox}" height="${helperBox}" rx="${4 * mpp}" fill="none" stroke="${esc(color)}" stroke-width="${1.5 * mpp}" stroke-dasharray="${6 * mpp} ${4 * mpp}" opacity="0.85" class="unit-helper"/>` +
+        `<path d="M0 ${-helperBox / 2 - 10 * mpp} l${5 * mpp} ${5 * mpp} l${-5 * mpp} ${5 * mpp} l${-5 * mpp} ${-5 * mpp} Z" fill="${esc(color)}" opacity="0.9" class="unit-helper"/>`
+      : '';
+  return `<g class="unit" transform="translate(${centre.x} ${centre.y)}">
+    <g transform="rotate(${facing)}">
+      ${helper}
+      <rect x="${-frontW / 2}" y="${-depthH / 2}" width="${frontW}" height="${depthH}" fill="${esc(color)}" fill-opacity="0.32" stroke="${esc(color)}" stroke-width="${1.6 * mpp}" class="unit-footprint"/>
+      <line x1="${-frontW / 2}" y1="${-depthH / 2}" x2="${frontW / 2}" y2="${-depthH / 2}" stroke="${esc(color)}" stroke-width="${3 * mpp}"/>
+    </g>
+    <text x="0" y="${depthH / 2 + 8 * mpp + labelSize * 0.9}" text-anchor="middle" font-size="${labelSize}" class="unit-label">${esc(name)}</text>
+    ${dims ? `<text x="0" y="${depthH / 2 + 8 * mpp + labelSize * 0.9 + dimsSize * 1.25}" text-anchor="middle" font-size="${dimsSize}" class="unit-dims">${esc(dims)}</text>` : ''}
+    <title>${esc(name)}${dims ? ` · ${esc(dims)}` : ''}</title>
+  </g>`;
+}
+
+function battlefieldSvg(document, mapView) {
   const { width: widthM, height: heightM } = document.battlefield;
   const toScreen = (x, y) => toScreenPoint({ x, y }, heightM);
-  const padLeft = 70;
-  const pad = 60;
-  const viewBox = `${-padLeft} ${-pad} ${widthM + padLeft + pad} ${heightM + pad * 2}`;
+  const box = mapViewBox(mapView, document.battlefield);
+  const viewBox = `${box.x} ${box.y} ${box.width} ${box.height}`;
+  const viewportW = mapView?.viewportW && mapView.viewportW > 0 ? mapView.viewportW : 800;
+  const mpp = box.width / viewportW;
+  const zoom = clampMapZoom(mapView?.zoom);
+  const axisSize = 13 / zoom;
+  const showGrid = mapView?.showGrid !== false;
 
   let grid = '';
-  for (let x = 0; x <= widthM; x += 100) {
-    const major = x % 500 === 0;
-    grid += `<line x1="${x}" y1="0" x2="${x}" y2="${heightM}" stroke="#7d8a76" stroke-width="${major ? 1 : 0.5}" opacity="${major ? 0.35 : 0.18}"/>`;
-  }
-  for (let y = 0; y <= heightM; y += 100) {
-    const major = y % 500 === 0;
-    const screenY = heightM - y;
-    grid += `<line x1="0" y1="${screenY}" x2="${widthM}" y2="${screenY}" stroke="#7d8a76" stroke-width="${major ? 1 : 0.5}" opacity="${major ? 0.35 : 0.18}"/>`;
+  if (showGrid) {
+    for (let x = 0; x <= widthM; x += 100) {
+      const major = x % 500 === 0;
+      grid += `<line x1="${x}" y1="0" x2="${x}" y2="${heightM}" stroke="#7d8a76" stroke-width="${major ? 1.4 : 0.7}" opacity="${major ? 0.4 : 0.2}"/>`;
+    }
+    for (let y = 0; y <= heightM; y += 100) {
+      const major = y % 500 === 0;
+      const screenY = heightM - y;
+      grid += `<line x1="0" y1="${screenY}" x2="${widthM}" y2="${screenY}" stroke="#7d8a76" stroke-width="${major ? 1.4 : 0.7}" opacity="${major ? 0.4 : 0.2}"/>`;
+    }
   }
   let xLabels = '';
   for (let x = 0; x <= widthM; x += 200) {
-    xLabels += `<text x="${x}" y="${heightM + 22}" text-anchor="middle" font-size="13" fill="#8a947c">${x}</text>`;
+    xLabels += `<text x="${x}" y="${heightM + 26 / zoom}" text-anchor="middle" font-size="${axisSize}" fill="#8a947c">${x}</text>`;
   }
   let yLabels = '';
   for (let y = 0; y <= heightM; y += 200) {
-    yLabels += `<text x="-12" y="${heightM - y + 4}" text-anchor="end" font-size="13" fill="#8a947c">${y}</text>`;
+    yLabels += `<text x="${-16 / zoom}" y="${heightM - y + axisSize * 0.35}" text-anchor="end" font-size="${axisSize}" fill="#8a947c">${y}</text>`;
   }
   const origin = toScreen(0, 0);
   const centre = toScreen(widthM / 2, heightM / 2);
@@ -146,45 +228,101 @@ function battlefieldSvg(document) {
     })
     .join('');
 
-  const units = (document.units || [])
-    .map((unit) => {
-      const color = sideColor(document, unit.side);
-      const footprint = deriveFootprint(unit);
-      const [frontLeft, frontRight] = footprint.corners.map((corner) =>
-        toScreen(corner.x, corner.y),
-      );
-      const middle = toScreen(
-        footprint.corners.reduce((sum, corner) => sum + corner.x, 0) / 4,
-        footprint.corners.reduce((sum, corner) => sum + corner.y, 0) / 4,
-      );
-      return `<g><polygon points="${project(footprint.corners)}" fill="${esc(color)}" fill-opacity="0.45" stroke="${esc(color)}" stroke-width="1.5"><title>${esc(unit.name)} · ${esc(troopDisplayName(unit.troopType))} · ${esc(unit.soldiers)} soldiers</title></polygon><line x1="${frontLeft.x}" y1="${frontLeft.y}" x2="${frontRight.x}" y2="${frontRight.y}" stroke="${esc(color)}" stroke-width="3.5"/><text x="${middle.x}" y="${middle.y}" text-anchor="middle" font-size="14" fill="#303a32" paint-order="stroke" stroke="#f4f3e9" stroke-width="3">${esc(unit.name)}</text></g>`;
-    })
-    .join('');
+  const units = Array.isArray(document.units) ? document.units : [];
+  const placed = units.filter((unit) => unitPosition(unit) && unitFootprint(unit));
+  const unplaced = units.length - placed.length;
 
-  const empty =
-    (document.units || []).length === 0 && (document.terrainFeatures || []).length === 0;
-
-  return `<svg viewBox="${viewBox}" role="img" aria-label="Battlefield, ${widthM} by ${heightM} metres, origin south-west">
-    <rect x="${-padLeft}" y="${-pad}" width="${widthM + padLeft + pad}" height="${heightM + pad * 2}" fill="#dfddce"/>
+  return `<svg id="battle-svg" viewBox="${viewBox}" role="img" aria-label="Battlefield, ${widthM} by ${heightM} metres, origin south-west" data-zoom="${zoom}">
+    <rect x="${box.x}" y="${box.y}" width="${box.width}" height="${box.height}" fill="#dfddce"/>
     <rect x="0" y="0" width="${widthM}" height="${heightM}" fill="#e8e5d5"/>
-    ${grid}
+    <g id="map-grid-group" style="display:${showGrid ? 'block' : 'none'}">${grid}</g>
     ${terrain}
-    ${units}
-    <rect x="0" y="0" width="${widthM}" height="${heightM}" fill="none" stroke="#6f7a65" stroke-width="2"/>
+    <rect x="0" y="0" width="${widthM}" height="${heightM}" fill="none" stroke="#6f7a65" stroke-width="2" vector-effect="non-scaling-stroke"/>
     ${xLabels}${yLabels}
-    <circle cx="${origin.x}" cy="${origin.y}" r="5" fill="#4e6047"/>
-    <text x="${origin.x + 10}" y="${origin.y - 10}" font-size="13" fill="#4e6047">origin (0, 0) · SW</text>
-    ${empty ? `<text x="${centre.x}" y="${centre.y}" text-anchor="middle" font-size="17" fill="#9aa08b">Empty battlefield — no units yet</text>` : ''}
+    <g id="map-units-group">${placed.map((unit) => unitSvg(document, unit, mapView, mpp)).join('')}</g>
+    <circle cx="${origin.x}" cy="${origin.y}" r="${5 * mpp}" fill="#4e6047"/>
+    <text x="${origin.x + 10 * mpp}" y="${origin.y - 10 * mpp}" font-size="${axisSize}" fill="#4e6047">origin (0, 0) · SW</text>
+    ${units.length === 0 ? `<text x="${centre.x}" y="${centre.y}" text-anchor="middle" font-size="${17 / zoom}" fill="#9aa08b">Empty battlefield — no units yet</text>` : ''}
+    ${unplaced > 0 ? `<text x="${centre.x}" y="${centre.y - 30 / zoom}" text-anchor="middle" font-size="${12 / zoom}" fill="#a46c5b">${unplaced} unit${unplaced === 1 ? '' : 's'} without a map position</text>` : ''}
     <g>
-      <line x1="60" y1="${heightM - 34}" x2="260" y2="${heightM - 34}" stroke="#6f7a65" stroke-width="3"/>
-      <line x1="60" y1="${heightM - 40}" x2="60" y2="${heightM - 28}" stroke="#6f7a65" stroke-width="2"/>
-      <line x1="260" y1="${heightM - 40}" x2="260" y2="${heightM - 28}" stroke="#6f7a65" stroke-width="2"/>
-      <text x="160" y="${heightM - 44}" text-anchor="middle" font-size="13" fill="#6f7a65">200 m</text>
-    </g>
-    <g>
-      <text x="${widthM - 14}" y="30" text-anchor="end" font-size="15" fill="#6f7a65">N ↑</text>
+      <text x="${widthM - 14 / zoom}" y="${30 / zoom}" text-anchor="end" font-size="${15 / zoom}" fill="#6f7a65">N ↑</text>
     </g>
   </svg>`;
+}
+
+// --- Map view helpers (display-only DOM updates) ----------------------------
+// Wheel zoom and hand panning update the SVG viewBox in place instead of
+// re-rendering the editor, so gestures stay smooth and form focus is kept.
+// None of these functions touch the scenario document or the saved status.
+function currentMpp() {
+  const viewport = $('.map-viewport');
+  if (!viewport || !state.document) return 1;
+  const rect = viewport.getBoundingClientRect();
+  const widthPx = rect.width > 0 ? rect.width : state.mapView?.viewportW || 800;
+  if (state.mapView) state.mapView.viewportW = widthPx;
+  return mapViewBox(state.mapView, state.document.battlefield).width / widthPx;
+}
+
+function svgToMap(svg, clientX, clientY) {
+  const point = new DOMPoint(clientX, clientY);
+  const matrix = svg.getScreenCTM();
+  if (!matrix) return null;
+  const local = point.matrixTransform(matrix.inverse());
+  const height = state.document?.battlefield?.height;
+  if (!Number.isFinite(height)) return null;
+  return { x: local.x, y: height - local.y };
+}
+
+function formatMetres(value) {
+  if (!Number.isFinite(value)) return '—';
+  return `${value.toFixed(1)} m`;
+}
+
+function updateScaleBar(mpp) {
+  const bar = $('#scale-bar');
+  const label = $('#scale-bar-label');
+  if (!bar || !label) return;
+  const lengthM = niceScaleBarMetres(mpp, 120);
+  bar.style.width = `${Math.max(8, lengthM / mpp)}px`;
+  label.textContent = lengthM >= 1000 ? `${lengthM / 1000} km` : `${lengthM} m`;
+}
+
+function updateMapDom() {
+  const svg = $('#battle-svg');
+  if (!svg || !state.document || !state.mapView) return;
+  const box = mapViewBox(state.mapView, state.document.battlefield);
+  svg.setAttribute('viewBox', `${box.x} ${box.y} ${box.width} ${box.height}`);
+  svg.dataset.zoom = String(clampMapZoom(state.mapView.zoom));
+  const grid = $('#map-grid-group');
+  if (grid) grid.style.display = state.mapView.showGrid ? 'block' : 'none';
+  const zoomLabel = $('#zoom-level');
+  if (zoomLabel) zoomLabel.textContent = `${Math.round(clampMapZoom(state.mapView.zoom) * 100)}%`;
+  updateScaleBar(currentMpp());
+}
+
+function setMapView(next) {
+  state.mapView = next;
+  updateMapDom();
+  const gridButton = $('[data-action="toggle-grid"]');
+  if (gridButton) {
+    gridButton.setAttribute('aria-pressed', String(next.showGrid));
+    gridButton.classList.toggle('active', next.showGrid);
+  }
+  const handButton = $('[data-action="map-tool-hand"]');
+  const selectButton = $('[data-action="map-tool-select"]');
+  if (handButton) {
+    handButton.setAttribute('aria-pressed', String(next.tool === 'hand'));
+    handButton.classList.toggle('active', next.tool === 'hand');
+  }
+  if (selectButton) {
+    selectButton.setAttribute('aria-pressed', String(next.tool !== 'hand'));
+    selectButton.classList.toggle('active', next.tool !== 'hand');
+  }
+  const viewport = $('.map-viewport');
+  if (viewport) {
+    viewport.classList.toggle('tool-hand', next.tool === 'hand');
+    viewport.classList.toggle('space-pan', state.spaceHeld);
+  }
 }
 
 // --- Views ---------------------------------------------------------------
@@ -220,19 +358,34 @@ function libraryView() {
 }
 
 function orderOfBattleView(document) {
-  const unitsOf = (sideId) => (document.units || []).filter((unit) => unit.side === sideId);
+  const units = Array.isArray(document.units) ? document.units : [];
+  const unitsOf = (side) =>
+    units.filter(
+      (unit) =>
+        (unit?.sideId ?? unit?.side ?? unit?.sideName) === side.id ||
+        (unit?.side ?? unit?.sideName) === side.name,
+    );
   return `<div class="panel"><span class="eyebrow">FORCES IN THE FIELD</span><h2>Order of battle</h2>
     ${document.sides
       .map((side) => {
-        const sideUnits = unitsOf(side.id);
-        const soldiers = sideUnits.reduce((sum, unit) => sum + unit.soldiers, 0);
+        const sideUnits = unitsOf(side);
+        const soldiers = sideUnits.reduce((sum, unit) => sum + (Number(unit?.soldiers) || 0), 0);
         return `<div class="side">
           <div class="side-name"><span class="swatch" style="background:${esc(side.color)}"></span>${esc(side.name)}</div>
           <p class="side-count">${sideUnits.length} ${sideUnits.length === 1 ? 'unit' : 'units'} · ${soldiers.toLocaleString('en')} soldiers</p>
           ${sideUnits
             .map((unit) => {
-              const footprint = deriveFootprint(unit);
-              return `<div class="unit-row"><span class="swatch" style="background:${esc(side.color)}"></span><div><div class="unit-name">${esc(unit.name)}</div><div class="unit-detail">${esc(troopDisplayName(unit.troopType))} · ${esc(unit.soldiers)} soldiers · ${esc(unit.files)} files × ${footprint.ranks} ranks</div></div></div>`;
+              let footprint = null;
+              try {
+                footprint = deriveFootprint(unit);
+              } catch {
+                footprint = null;
+              }
+              if (!footprint || !Number.isFinite(footprint.ranks)) footprint = unitFootprint(unit);
+              const detail = footprint
+                ? `${esc(troopDisplayName(unit.troopType))} · ${esc(unit.soldiers)} soldiers · ${esc(unit.files)} files × ${footprint.ranks} ranks`
+                : `${esc(troopDisplayName(unit.troopType))} · not placed`;
+              return `<div class="unit-row"><span class="swatch" style="background:${esc(side.color)}"></span><div><div class="unit-name">${esc(unit?.name || 'Unit')}</div><div class="unit-detail">${detail}</div></div></div>`;
             })
             .join('')}
         </div>`;
@@ -287,9 +440,28 @@ function terrainSummary(document) {
   return [...counts].map(([key, count]) => `${key} ${count}`).join(' · ');
 }
 
+function mapToolbarView() {
+  const view = state.mapView;
+  const zoom = clampMapZoom(view?.zoom);
+  const isHand = view?.tool === 'hand';
+  const showGrid = view?.showGrid !== false;
+  return `<div class="map-toolbar" role="toolbar" aria-label="Map navigation">
+    <button class="map-tool${isHand ? '' : ' active'}" data-action="map-tool-select" aria-pressed="${String(!isHand)}" title="Select (V)">Select</button>
+    <button class="map-tool${isHand ? ' active' : ''}" data-action="map-tool-hand" aria-pressed="${String(isHand)}" title="Hand: drag to pan (H, or hold Space)">Hand</button>
+    <span class="map-zoom-group" role="group" aria-label="Zoom">
+      <button class="map-tool" data-action="zoom-out" aria-label="Zoom out (−)">−</button>
+      <span id="zoom-level" aria-live="off">${Math.round(zoom * 100)}%</span>
+      <button class="map-tool" data-action="zoom-in" aria-label="Zoom in (+)">+</button>
+    </span>
+    <button class="map-tool" data-action="fit-view" title="Fit to battlefield (0)">Fit</button>
+    <button class="map-tool${showGrid ? ' active' : ''}" data-action="toggle-grid" aria-pressed="${String(showGrid)}" title="Toggle display-only grid (G)">Grid</button>
+  </div>`;
+}
+
 function editorView() {
   const document = state.document;
   const { width, height } = document.battlefield;
+  ensureMapView(document);
   return `<div class="editor-head">
       <button class="btn-quiet" data-action="back">← Library</button>
       <input data-field="title" value="${esc(document.title)}" maxlength="120" aria-label="Scenario title">
@@ -301,8 +473,16 @@ function editorView() {
     <main class="workspace">
       <aside class="left-panel">${orderOfBattleView(document)}</aside>
       <section class="map-panel">
-        <div class="map-caption">${metres(width)} × ${metres(height)} · origin south-west · metres · true scale</div>
-        ${battlefieldSvg(document)}
+        <div class="map-caption">${metres(width)} × ${metres(height)} · origin south-west · metres</div>
+        ${mapToolbarView()}
+        <div class="map-viewport${state.mapView.tool === 'hand' ? ' tool-hand' : ''}${state.spaceHeld ? ' space-pan' : ''}">
+          ${battlefieldSvg(document, state.mapView)}
+          <div class="map-status">
+            <span class="scale-bar" aria-label="Scale bar"><span id="scale-bar"></span><span id="scale-bar-label">—</span></span>
+            <span id="cursor-coords" class="cursor-coords" aria-label="Cursor coordinates in metres">X — · Y —</span>
+          </div>
+        </div>
+        <p class="map-hint">Scroll to zoom around the cursor · drag with the hand tool or while holding Space to pan · view changes never mark the scenario unsaved · grid is display-only</p>
       </section>
       <aside class="right-panel">${inspectorView(document)}</aside>
     </main>`;
@@ -317,6 +497,10 @@ function render() {
       const button = $('#new-form button[type="submit"]');
       if (button) button.disabled = !input.value.trim();
     });
+  }
+  if (state.view === 'editor') {
+    bindMap();
+    updateMapDom();
   }
 }
 
@@ -338,9 +522,125 @@ async function openScenario(id) {
   state.revision = entry ? entry.revision : null;
   state.problems = [];
   state.view = 'editor';
+  // Fresh camera on the new battlefield; keep the author's grid/tool preference.
+  state.mapView = {
+    ...fitMapView(document.battlefield),
+    showGrid: state.mapView?.showGrid !== false,
+    tool: state.mapView?.tool === 'hand' ? 'hand' : 'select',
+    viewportW: state.mapView?.viewportW || 800,
+  };
+  state.spaceHeld = false;
   setStatusAfterRender(`Opened · rev. ${state.revision}`);
   render();
   setStatus(`Opened · rev. ${state.revision}`);
+}
+
+// Display-only map navigation: none of these branches touch the scenario
+// document or the saved/unsaved status.
+function handleMapAction(action) {
+  if (!state.document) return false;
+  ensureMapView(state.document);
+  const view = state.mapView;
+  if (action === 'map-tool-select') {
+    setMapView({ ...view, tool: 'select' });
+    return true;
+  }
+  if (action === 'map-tool-hand') {
+    setMapView({ ...view, tool: 'hand' });
+    return true;
+  }
+  if (action === 'toggle-grid') {
+    setMapView({ ...view, showGrid: !view.showGrid });
+    return true;
+  }
+  if (action === 'zoom-in') {
+    setMapView({ ...view, ...zoomViewAroundCursor(view, view.center, view.zoom * 1.25) });
+    return true;
+  }
+  if (action === 'zoom-out') {
+    setMapView({ ...view, ...zoomViewAroundCursor(view, view.center, view.zoom / 1.25) });
+    return true;
+  }
+  if (action === 'fit-view') {
+    setMapView({
+      ...fitMapView(state.document.battlefield),
+      showGrid: view.showGrid,
+      tool: view.tool,
+      viewportW: view.viewportW,
+    });
+    return true;
+  }
+  return false;
+}
+
+function bindMap() {
+  const svg = $('#battle-svg');
+  const viewport = $('.map-viewport');
+  if (!svg || !viewport || !state.document) return;
+  // Measure the real viewport so the scale bar and helper outlines match it.
+  const rect = viewport.getBoundingClientRect();
+  if (rect.width > 0) state.mapView.viewportW = rect.width;
+
+  svg.addEventListener(
+    'wheel',
+    (event) => {
+      event.preventDefault();
+      const cursor = svgToMap(svg, event.clientX, event.clientY);
+      if (!cursor) return;
+      // Ctrl+wheel (trackpad pinch) sends small deltas: same path, finer step.
+      const factor = Math.exp(-event.deltaY * (event.ctrlKey ? 0.01 : 0.0015));
+      const next = zoomViewAroundCursor(state.mapView, cursor, state.mapView.zoom * factor);
+      setMapView({ ...state.mapView, ...next });
+    },
+    { passive: false },
+  );
+
+  let pan = null;
+  svg.addEventListener('pointerdown', (event) => {
+    const handActive = state.mapView.tool === 'hand' || state.spaceHeld || event.button === 1;
+    if (!handActive || (event.button !== 0 && event.button !== 1)) return;
+    event.preventDefault();
+    pan = { x: event.clientX, y: event.clientY };
+    try {
+      svg.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture is best-effort; dragging still works without it.
+    }
+    viewport.classList.add('panning');
+  });
+  svg.addEventListener('pointermove', (event) => {
+    const cursor = svgToMap(svg, event.clientX, event.clientY);
+    const coords = $('#cursor-coords');
+    if (coords) {
+      if (cursor) {
+        const inside =
+          cursor.x >= 0 &&
+          cursor.x <= state.document.battlefield.width &&
+          cursor.y >= 0 &&
+          cursor.y <= state.document.battlefield.height;
+        coords.textContent = `X ${formatMetres(cursor.x)} · Y ${formatMetres(cursor.y)}${inside ? '' : ' · outside'}`;
+        coords.classList.toggle('outside', !inside);
+      } else {
+        coords.textContent = 'X — · Y —';
+      }
+    }
+    if (!pan) return;
+    const dxPx = event.clientX - pan.x;
+    const dyPx = event.clientY - pan.y;
+    pan = { x: event.clientX, y: event.clientY };
+    const next = panMapViewByPixels(state.mapView, dxPx, dyPx, currentMpp());
+    setMapView({ ...state.mapView, ...next });
+  });
+  const endPan = () => {
+    pan = null;
+    viewport.classList.remove('panning');
+  };
+  svg.addEventListener('pointerup', endPan);
+  svg.addEventListener('pointercancel', endPan);
+  svg.addEventListener('pointerleave', () => {
+    const coords = $('#cursor-coords');
+    if (coords && !pan) coords.textContent = 'X — · Y —';
+  });
 }
 
 function setStatusAfterRender(message) {
@@ -426,6 +726,7 @@ document.addEventListener('click', async (event) => {
     render();
   }
   if (action === 'save') await saveScenario();
+  if (handleMapAction(action)) return;
   if (action === 'export') await exportScenarioById(id || null);
   if (action === 'delete') {
     if (!window.confirm('Delete this scenario?')) return;
@@ -513,6 +814,59 @@ document.addEventListener('change', (event) => {
       render();
     }
   }
+});
+
+function isEditableTarget(target) {
+  return Boolean(target?.closest?.('input, textarea, select, [contenteditable="true"]'));
+}
+
+// View-navigation shortcuts. Space temporarily pans like the hand tool; every
+// shortcut below is display-only and never marks the scenario as unsaved.
+document.addEventListener('keydown', (event) => {
+  if (state.view !== 'editor' || !state.document) return;
+  if (event.code === 'Space' && !isEditableTarget(event.target) && !event.repeat) {
+    event.preventDefault();
+    state.spaceHeld = true;
+    $('.map-viewport')?.classList.add('space-pan');
+    return;
+  }
+  if (isEditableTarget(event.target) || event.ctrlKey || event.metaKey || event.altKey) return;
+  const key = event.key.toLowerCase();
+  if (key === 'h') {
+    ensureMapView(state.document);
+    setMapView({ ...state.mapView, tool: 'hand' });
+  } else if (key === 'v' || key === 'escape') {
+    ensureMapView(state.document);
+    setMapView({ ...state.mapView, tool: 'select' });
+  } else if (key === 'g') {
+    ensureMapView(state.document);
+    setMapView({ ...state.mapView, showGrid: !state.mapView.showGrid });
+  } else if (key === '0') {
+    ensureMapView(state.document);
+    handleMapAction('fit-view');
+  } else if (key === '+' || key === '=') {
+    ensureMapView(state.document);
+    handleMapAction('zoom-in');
+  } else if (key === '-' || key === '_') {
+    ensureMapView(state.document);
+    handleMapAction('zoom-out');
+  }
+});
+
+document.addEventListener('keyup', (event) => {
+  if (event.code === 'Space') {
+    state.spaceHeld = false;
+    if (state.mapView?.tool !== 'hand') $('.map-viewport')?.classList.remove('space-pan');
+  }
+});
+
+window.addEventListener('blur', () => {
+  state.spaceHeld = false;
+  $('.map-viewport')?.classList.remove('space-pan');
+});
+
+window.addEventListener('resize', () => {
+  if (state.view === 'editor') updateMapDom();
 });
 
 async function init() {
