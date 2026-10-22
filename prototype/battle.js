@@ -541,7 +541,7 @@ function battleView() {
       <span class="active-side" data-testid="active-side"><span class="swatch" style="background:${esc(sideColorOf(document, activeSide))}"></span>${esc(sideName(document, activeSide))}</span>
       <span class="phase">Phase: ${esc(battle.phase)}</span>
       <span class="spacer"></span>
-      <span class="phase">Drafting: empty turns only (Hold, Move, and Charge validate in the engine)</span>
+      <span class="phase">Drafting: empty turns only (Hold, Move, Charge, Reform, and Withdraw validate in the engine)</span>
     </div>
     <main class="workspace">
       <aside class="left-panel">${orderOfBattleView(document)}</aside>

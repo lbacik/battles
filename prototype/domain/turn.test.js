@@ -146,9 +146,9 @@ describe('available actions', () => {
     const own = battle.units.filter((unit) => unit.side === battle.activeSide);
     assert.equal(actions.units.length, own.length);
     for (const entry of actions.units) {
-      assert.deepEqual(entry.permitted, [{ kind: ORDER_KIND_HOLD }, { kind: 'Move' }, { kind: 'Charge' }]);
+      assert.deepEqual(entry.permitted, [{ kind: ORDER_KIND_HOLD }, { kind: 'Move' }, { kind: 'Charge' }, { kind: 'Reform' }]);
       const kinds = entry.unavailable.map((item) => item.kind).sort();
-      assert.deepEqual(kinds, ['Rally', 'Reform', 'Shoot', 'Withdraw']);
+      assert.deepEqual(kinds, ['Rally', 'Shoot']);
       for (const item of entry.unavailable) {
         assert.ok(item.code && item.reason, 'unavailable kinds name a reason');
       }
