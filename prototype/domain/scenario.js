@@ -162,6 +162,36 @@ export function roundScenarioToTenth(document) {
   return copy;
 }
 
+// Every stored metre value stays on the 0.1 m grid: battlefield dimensions,
+// spacings, facings, positions, polygon vertices, and linear widths are all
+// whole multiples of 0.1 m. Returns the values that drift off that grid, so
+// the browser end-to-end test and the unit tests share one gate (release
+// gate, issue #20): an empty array means the document is identical to 0.1 m.
+export function valuesOffTenthGrid(document) {
+  const values = [document?.battlefield?.width, document?.battlefield?.height];
+  for (const unit of document?.units || []) {
+    values.push(
+      unit.lateralInterval,
+      unit.rankDepth,
+      unit.facing,
+      unit.position?.x,
+      unit.position?.y,
+    );
+  }
+  for (const feature of document?.terrainFeatures || []) {
+    if (Array.isArray(feature.polygon)) {
+      for (const point of feature.polygon) values.push(point.x, point.y);
+    }
+    if (Array.isArray(feature.path)) {
+      for (const point of feature.path) values.push(point.x, point.y);
+    }
+    if (Number.isFinite(feature.width)) values.push(feature.width);
+  }
+  return values.filter(
+    (value) => !Number.isFinite(value) || Math.abs(value * 10 - Math.round(value * 10)) > 1e-9,
+  );
+}
+
 // Create a new scenario document. The identifier is generated and immutable:
 // it is assigned here and never changed afterwards. The title is required.
 export function createScenario(input = {}) {

@@ -3,20 +3,26 @@
 // Runs the ten-step editor acceptance scenario (#4) plus persistence steps
 // 1–6 and 8 (#5) against the real IndexedDB scenario store (its own test
 // database, so the author's library is untouched):
-//   phase "units":  editor acceptance steps 4–8 (renamed sides with warnings,
-//                   six units, a spacing preset, a rotation to 30°, a refused
-//                   overlapping drop, accepted edge-to-edge touching, a refused
-//                   battlefield shrink, and multi-kind undo/redo);
-//   phase "save":   acceptance steps 1–3 (titled scenario at 1400 × 900 m with
-//                   a description; forest, rough ground, and a settlement with a
-//                   refused overlap; a two-level hill and a river crossed by a
-//                   road), then save, list, snapshot, and reload;
-//   phase "reopen": with a fresh store instance, list the library, reopen the
-//                   scenario by id with every value identical to 0.1 m and an
-//                   empty undo history, duplicate and delete the duplicate
-//                   (step 10), then persistence steps 2–6 and 8 (export/import
-//                   copies, two-tab conflict, five rejected imports, the unknown
-//                   troop-type key, and a simulated quota failure).
+// One "Acceptance plain" scenario runs through every phase, in acceptance
+// order, so the saved, reopened, duplicated, exported, and imported document
+// is the one built in steps 1–8:
+//   phase "setup":     acceptance steps 1–3 (titled scenario at 1400 × 900 m
+//                       with a description; forest, rough ground, and a
+//                       settlement with a refused overlap; a two-level hill and
+//                       a river crossed by a road);
+//   phase "units":     editor acceptance steps 4–8 on that same scenario
+//                       (renamed sides with warnings, six units, a spacing
+//                       preset, a rotation to 30°, a refused overlapping drop,
+//                       accepted edge-to-edge touching, a refused battlefield
+//                       shrink, and multi-kind undo/redo);
+//   phase "save":      acceptance step 9: save, list, snapshot, and reload;
+//   phase "reopen":    with a fresh store instance, list the library, reopen
+//                       the scenario by id with every value identical to 0.1 m
+//                       and an empty undo history, duplicate and delete the
+//                       duplicate (step 10), then persistence steps 1–6 and 8
+//                       (save/quit/reopen, export/import copies, two-tab
+//                       conflict, five rejected imports, the unknown troop-type
+//                       key, and a simulated quota failure).
 // Progress survives the reload in sessionStorage. Results are rendered into
 // the page and logged to the console for headless collection.
 import { deriveFootprint } from './domain/geometry.js';
@@ -44,6 +50,7 @@ import {
   snapFacing,
   unitsBlockingResize,
   validateElevationCandidate,
+  valuesOffTenthGrid,
   updateLinearFeature,
   validateGroundCoverCandidate,
   validateLinearCandidate,
@@ -130,34 +137,13 @@ function assertSameDocument(expected, actual) {
   }
 }
 
-// Every stored metre value keeps 0.1 m precision: battlefield dimensions,
-// spacings, facings, positions, polygon vertices, and linear widths are all
-// whole multiples of 0.1 m. The save/export/import round-trip gate (#20)
-// fails when any value drifts off that grid.
+// Every stored metre value keeps 0.1 m precision. The save/export/import
+// round-trip gate (#20) fails when any value drifts off that grid, using the
+// same off-grid walk the unit tests assert against.
 function assertMetresToTenth(document) {
-  const values = [document.battlefield.width, document.battlefield.height];
-  for (const unit of document.units || []) {
-    values.push(
-      unit.lateralInterval,
-      unit.rankDepth,
-      unit.facing,
-      unit.position?.x,
-      unit.position?.y,
-    );
-  }
-  for (const feature of document.terrainFeatures || []) {
-    if (Array.isArray(feature.polygon)) {
-      for (const point of feature.polygon) values.push(point.x, point.y);
-    }
-    if (Array.isArray(feature.path)) {
-      for (const point of feature.path) values.push(point.x, point.y);
-    }
-    if (Number.isFinite(feature.width)) values.push(feature.width);
-  }
-  for (const value of values) {
-    if (!Number.isFinite(value) || Math.abs(value * 10 - Math.round(value * 10)) > 1e-9) {
-      throw new Error(`value ${value} is not on the 0.1 m grid`);
-    }
+  const off = valuesOffTenthGrid(document);
+  if (off.length > 0) {
+    throw new Error(`value ${off[0]} is not on the 0.1 m grid`);
   }
 }
 
@@ -223,13 +209,12 @@ const ACCEPTANCE_GROUNDS = [
 // overlapping drop is refused with a highlight, edge-to-edge touching is
 // accepted. Step 7: shrinking the battlefield past a unit is refused, naming
 // the blocking units.
-async function phaseUnitPlacement() {
+// Acceptance scenario steps 4–8 (issue #4) build on the scenario steps 1–3
+// drafted: the same document is renamed, fielded, edited, and undone, then
+// handed to step 9 so the saved scenario carries the sides and units.
+async function phaseUnitPlacement(drafted) {
   logStep('acceptance step 4: rename the sides Athens and Sparta', 'running');
-  const renamed = createScenario({
-    title: 'Acceptance plain',
-    battlefield: { width: 1400, height: 900 },
-    description: 'Editor acceptance probe: steps 1-10.',
-  });
+  const renamed = drafted;
   renamed.sides[0].name = 'Athens';
   renamed.sides[1].name = 'Sparta';
   renamed.sides[0].color = '#1d4ed8';
@@ -381,7 +366,9 @@ async function phaseUnitPlacement() {
   if (!shrinkError.includes('I Athenian taxis')) {
     throw new Error('shrink refusal does not name the blocking unit');
   }
-  // A shrink that keeps every footprint still succeeds.
+  // A shrink that keeps every footprint still succeeds. resizeBattlefield
+  // returns a new document, so the draft keeps its 1400 × 900 m battlefield
+  // for step 9; only the refusal-free return matters here.
   resizeBattlefield(document, 1400, 700);
   logStep('acceptance step 7: shrinking past a unit is refused', 'pass', shrinkError);
 
@@ -432,6 +419,7 @@ async function phaseUnitPlacement() {
     'pass',
     '4 undo steps · 4 redo steps',
   );
+  return document;
 }
 
 function probeUnitForUndo(document) {
@@ -457,7 +445,9 @@ function probeUnitForUndo(document) {
   };
 }
 
-async function phaseSave() {
+// Acceptance scenario steps 1–3 (issue #4): draft the scenario the later
+// steps build on. Returns the unsaved document.
+async function phaseSetup() {
   const store = new IndexedDBScenarioStore({ dbName: DB_NAME });
   logStep('clear the end-to-end test database', 'running');
   await store.clear();
@@ -466,7 +456,7 @@ async function phaseSave() {
   logStep('acceptance step 1: create "Acceptance plain" with a required title', 'running');
   let created = createScenario({
     title: 'Acceptance plain',
-    description: 'Editor acceptance probe: save, reload, and reopen.',
+    description: 'Editor acceptance probe: steps 1-10.',
   });
   if (!created.id || created.title !== 'Acceptance plain') {
     throw new Error('created scenario is incomplete');
@@ -637,21 +627,28 @@ async function phaseSave() {
     throw new Error('the refusal carries no highlight ring');
   }
   logStep('acceptance step 3: refuse a hill crossing a sibling with a highlight', 'pass', crossingHill.reason);
+  return created;
+}
 
+// Acceptance scenario step 9 (issue #4), which is also persistence step 1
+// (issue #5): save the scenario built in steps 1–8, snapshot it, and reload
+// the browser. The reopen half runs as phaseReopen after the reload.
+async function phaseSaveAndReload(document) {
+  const store = new IndexedDBScenarioStore({ dbName: DB_NAME });
   logStep('acceptance step 9: save it through the scenario store', 'running');
-  const metadata = await store.save(created);
-  const snapshot = await store.load(created.id);
+  const metadata = await store.save(document);
+  const snapshot = await store.load(document.id);
   if (!snapshot) throw new Error('saved scenario cannot be loaded back');
   logStep('acceptance step 9: save it through the scenario store', 'pass', `rev. ${metadata.revision}`);
 
   logStep('acceptance step 9: list the scenario in the library', 'running');
   const listed = await store.list();
-  if (!listed.some((entry) => entry.id === created.id && entry.title === title)) {
+  if (!listed.some((entry) => entry.id === document.id && entry.title === document.title)) {
     throw new Error('saved scenario is missing from the library');
   }
   logStep('acceptance step 9: list the scenario in the library', 'pass', `${listed.length} in library`);
 
-  sessionStorage.setItem(PHASE_KEY, JSON.stringify({ phase: 'reopen', id: created.id, snapshot }));
+  sessionStorage.setItem(PHASE_KEY, JSON.stringify({ phase: 'reopen', id: document.id, snapshot }));
   logStep('acceptance step 9: reload the browser', 'running', 'reloading…');
   store.close();
   location.reload();
@@ -676,6 +673,24 @@ async function phaseReopen(phase) {
   if (!reopened) throw new Error('scenario cannot be reopened after reload');
   assertSameDocument(phase.snapshot, reopened);
   logStep('acceptance step 9: reopen the scenario with identical values', 'pass', reopened.title);
+
+  logStep('acceptance step 9: renamed sides and placed units survive the reload', 'running');
+  if (reopened.sides[0].name !== 'Athens' || reopened.sides[1].name !== 'Sparta') {
+    throw new Error(
+      `renamed sides did not survive the reload: ${reopened.sides.map((side) => side.name).join(', ')}`,
+    );
+  }
+  if ((reopened.units || []).length !== 6) {
+    throw new Error(`expected 6 placed units after reload, got ${(reopened.units || []).length}`);
+  }
+  if (collectWarnings(reopened).length !== 0) {
+    throw new Error(`empty-side warnings persist with units fielded: ${collectWarnings(reopened).join('; ')}`);
+  }
+  logStep(
+    'acceptance step 9: renamed sides and placed units survive the reload',
+    'pass',
+    'Athens/Sparta · 6 units',
+  );
 
   logStep('keep the drawn ground cover identical and valid', 'running');
   const grounds = (reopened.terrainFeatures || []).filter((feature) => feature.kind === 'ground');
@@ -707,6 +722,8 @@ async function phaseReopen(phase) {
   const { json: reopenedJson } = exportScenario(reopened);
   const reimported = importScenarioDocument(reopenedJson);
   assertMetresToTenth(reimported);
+  // Import assigns a new identifier; every other value must survive verbatim.
+  assertSameDocument({ ...reopened, id: reimported.id }, reimported);
   logStep('acceptance step 9: every value is identical to 0.1 m', 'pass', 'save/export/import agree');
 
   logStep('acceptance step 9: the undo history is empty after reopening', 'running');
@@ -718,6 +735,11 @@ async function phaseReopen(phase) {
     throw new Error('a fresh editing session must have nothing to redo');
   }
   logStep('acceptance step 9: the undo history is empty after reopening', 'pass', 'nothing to undo or redo');
+  logStep(
+    'persistence step 1: save, quit, and reopen keeps every value identical to 0.1 m',
+    'pass',
+    'library hit · 0.1 m · empty history',
+  );
 
   logStep('acceptance step 10: duplicate the scenario, then delete the duplicate', 'running');
   const duplicate = duplicateScenario(reopened);
@@ -744,11 +766,11 @@ async function phaseReopen(phase) {
     'duplicate rev. 1 removed, original kept',
   );
 
-  await phasePersistenceStep2And3(store, reopened);
-  await phasePersistenceStep4(store, reopened);
-  await phasePersistenceStep5(store);
-  await phasePersistenceStep8(store, reopened);
-  await phasePersistenceStep6(store);
+  await phasePersistenceExportImportCopies(store, reopened);
+  await phasePersistenceTwoTabConflict(store, reopened);
+  await phasePersistenceRejectBadFiles(store);
+  await phasePersistenceQuotaFailure(store, reopened);
+  await phasePersistenceUnknownTroopKey(store);
 
   await phaseBattleTurns();
 
@@ -759,7 +781,7 @@ async function phaseReopen(phase) {
 // Persistence acceptance steps 2–3 (#5): export the scenario, delete it,
 // import the file as a new copy with a new identifier and identical content,
 // import the same file again, and prove the two copies are independent.
-async function phasePersistenceStep2And3(store, reopened) {
+async function phasePersistenceExportImportCopies(store, reopened) {
   logStep('persistence step 2: export, delete, and import as a new copy', 'running');
   const countBefore = (await store.list()).length;
   const { json } = exportScenario(reopened);
@@ -809,13 +831,18 @@ async function phasePersistenceStep2And3(store, reopened) {
 // Persistence acceptance step 4 (#5): two tabs. A second tab saves first, so
 // the first tab's save raises a save conflict instead of silently
 // overwriting; overwriting only on request and saving as a copy both work.
-async function phasePersistenceStep4(store, reopened) {
+async function phasePersistenceTwoTabConflict(store, reopened) {
   logStep('persistence step 4: a stale second-tab save asks Overwrite or Save as copy', 'running');
   const firstTab = await store.load(reopened.id);
   const secondTab = await store.load(reopened.id);
   const listed = await store.list();
   const storedRevision = listed.find((item) => item.id === reopened.id)?.revision ?? 1;
-  await store.save({ ...secondTab, description: 'Second tab wins first.' });
+  // Both tabs save through the editor's save path: the first tab to save wins,
+  // so the second save below raises a conflict instead of overwriting silently.
+  await performSave(store, { ...secondTab, description: 'Second tab wins first.' }, {
+    loadedRevision: storedRevision,
+    storedRevision,
+  });
   let conflicted = null;
   try {
     await performSave(store, { ...firstTab, description: 'First tab.' }, {
@@ -848,7 +875,7 @@ async function phasePersistenceStep4(store, reopened) {
 
 // Persistence acceptance step 5 (#5): each bad file is rejected with its
 // specific cause and the library is unchanged.
-async function phasePersistenceStep5(store) {
+async function phasePersistenceRejectBadFiles(store) {
   logStep('persistence step 5: reject bad files with a specific cause', 'running');
   const countBefore = (await store.list()).length;
   const probe = createScenario({ title: 'Persistence step 5 probe' });
@@ -928,7 +955,7 @@ async function phasePersistenceStep5(store) {
 // Persistence acceptance step 8 (#5): a save that hits a simulated quota
 // error shows an error, leaves the previous version intact, and keeps the
 // unsaved-changes indicator (the caller stays dirty).
-async function phasePersistenceStep8(store, reopened) {
+async function phasePersistenceQuotaFailure(store, reopened) {
   logStep('persistence step 8: a quota failure keeps the previous version and stays dirty', 'running');
   const quota = new Error('QuotaExceededError: storage is full');
   quota.name = 'QuotaExceededError';
@@ -961,7 +988,7 @@ async function phasePersistenceStep8(store, reopened) {
 // troop-type key is unknown to the catalogue. It opens (validates), the unit
 // is marked (the warning helper names it, which is what the editor's issues
 // panel shows), it saves, and the key is preserved verbatim after reopening.
-async function phasePersistenceStep6(store) {
+async function phasePersistenceUnknownTroopKey(store) {
   logStep('persistence step 6: import a file with an unknown troop-type key', 'running');
   const authored = createScenario({ title: 'Persistence step 6 probe' });
   authored.units.push({
@@ -1266,13 +1293,14 @@ async function run() {
       await phaseBattleResume(prePhase);
       return;
     }
-    await phaseUnitPlacement();
     const phase = readPhase();
     if (phase?.phase === 'reopen') {
       await phaseReopen(phase);
-    } else {
-      await phaseSave();
+      return;
     }
+    const drafted = await phaseSetup();
+    const finished = await phaseUnitPlacement(drafted);
+    await phaseSaveAndReload(finished);
   } catch (error) {
     fail('end-to-end run failed', error);
   }
