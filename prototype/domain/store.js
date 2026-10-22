@@ -10,8 +10,13 @@
 // document and travels in the metadata records returned by the store.
 //
 // Interface (every implementation must honour it):
-//   list()   -> Promise<ScenarioMetadata[]>
+//   list()   -> Promise<ScenarioMetadata[]> (entries carry a status and, when
+//             they cannot be opened, a cause: { id, title, revision,
+//             updatedAt, status, cause }; status is 'ok', 'unreadable', or
+//             'unsupported-version')
 //   load(id) -> Promise<ScenarioDocument | null>
+//   loadRaw(id) -> Promise<stored record | null> (the raw record, for raw
+//             export of entries that cannot be read; deep-cloned)
 //   save(document) -> Promise<ScenarioMetadata>
 //   remove(id) -> Promise<boolean>
 //   clear()  -> Promise<void>
@@ -20,8 +25,12 @@
 // increments it on every subsequent save of the same id. The document id is
 // immutable: a save never changes it. Implementations must deep-clone across
 // the boundary so callers cannot mutate stored state.
+// save() is atomic: it validates and clones before mutating anything, so a
+// failure (for example a simulated quota error) rejects and leaves the
+// previous version intact.
 
 import { assertValidScenario, cloneScenario } from './scenario.js';
+import { classifyStoredRecord, compareLibraryEntries } from './library.js';
 
 export class MemoryScenarioStore {
   constructor() {
@@ -30,15 +39,33 @@ export class MemoryScenarioStore {
 
   async list() {
     return [...this.records.values()]
-      .map((record) => ({ ...record.metadata }))
-      .sort((a, b) =>
-        a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0,
-      );
+      .map((record) =>
+        classifyStoredRecord({
+          id: record.metadata.id,
+          document: record.document,
+          revision: record.metadata.revision,
+          updatedAt: record.metadata.updatedAt,
+        }),
+      )
+      .sort(compareLibraryEntries);
   }
 
   async load(id) {
     const record = this.records.get(id);
     return record ? cloneScenario(record.document) : null;
+  }
+
+  async loadRaw(id) {
+    const record = this.records.get(id);
+    if (!record) return null;
+    return JSON.parse(
+      JSON.stringify({
+        id: record.metadata.id,
+        document: record.document,
+        revision: record.metadata.revision,
+        updatedAt: record.metadata.updatedAt,
+      }),
+    );
   }
 
   async save(document) {

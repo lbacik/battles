@@ -26,6 +26,14 @@ import {
   validateScenario,
   zoomViewAroundCursor,
 } from './domain/scenario.js';
+import {
+  SaveConflictError,
+  duplicateScenario,
+  exportRawRecord,
+  isQuotaError,
+  isUnsupportedDocument,
+  performSave,
+} from './domain/library.js';
 import { getTroopType } from './domain/polis-classical.js';
 import { IndexedDBScenarioStore, ensurePersistentStorage } from './library/idb.js';
 
@@ -54,6 +62,9 @@ const state = {
   // View navigation and selection are not recorded (the map has neither).
   history: { past: [], future: [] },
   persistent: null,
+  persistRequested: false,
+  dirty: false,
+  conflict: null,
   newTitle: '',
   mapView: null,
   spaceHeld: false,
@@ -568,18 +579,46 @@ function setMapView(next) {
 }
 
 // --- Views ---------------------------------------------------------------
+// One library row. Readable entries offer open, duplicate, export, and
+// delete. Entries that cannot be read — and documents with a newer format
+// version than this application supports — offer only raw export and delete,
+// so the stored data can never be opened or silently overwritten.
+function libraryEntryView(entry) {
+  if (!entry.id) {
+    return `<li class="library-entry unreadable">
+      <div><div class="title">Unreadable scenario</div>
+      <div class="meta">Unreadable · ${esc(entry.cause || 'unknown cause')}</div></div>
+    </li>`;
+  }
+  const safeId = esc(entry.id);
+  if (entry.status === 'ok') {
+    return `<li class="library-entry">
+      <div><div class="title">${esc(entry.title)}</div>
+      <div class="meta">revision ${entry.revision} · updated ${esc(entry.updatedAt)}</div></div>
+      <div class="actions">
+        <button class="btn-secondary" data-action="open" data-id="${safeId}">Open</button>
+        <button class="btn-secondary" data-action="duplicate" data-id="${safeId}">Duplicate</button>
+        <button class="btn-secondary" data-action="export" data-id="${safeId}">Export</button>
+        <button class="btn-quiet btn-danger" data-action="delete" data-id="${safeId}">Delete</button>
+      </div>
+    </li>`;
+  }
+  const label =
+    entry.status === 'unsupported-version' ? 'Needs a newer application' : 'Unreadable';
+  return `<li class="library-entry unreadable">
+    <div><div class="title">${esc(entry.title)}</div>
+    <div class="meta">${label} · ${esc(entry.cause || 'unknown cause')}</div></div>
+    <div class="actions">
+      <button class="btn-secondary" data-action="export-raw" data-id="${safeId}">Export raw</button>
+      <button class="btn-quiet btn-danger" data-action="delete" data-id="${safeId}">Delete</button>
+    </div>
+  </li>`;
+}
+
 function libraryView() {
   const items = state.library
     .map(
-      (entry) => `<li>
-        <div><div class="title">${esc(entry.title)}</div>
-        <div class="meta">revision ${entry.revision} · updated ${esc(entry.updatedAt)}</div></div>
-        <div class="actions">
-          <button class="btn-secondary" data-action="open" data-id="${esc(entry.id)}">Open</button>
-          <button class="btn-secondary" data-action="export" data-id="${esc(entry.id)}">Export</button>
-          <button class="btn-quiet btn-danger" data-action="delete" data-id="${esc(entry.id)}">Delete</button>
-        </div>
-      </li>`,
+      (entry) => libraryEntryView(entry),
     )
     .join('');
   return `<div class="library">
@@ -746,7 +785,28 @@ function editorView() {
         <p class="map-hint">Scroll to zoom around the cursor · drag with the hand tool or while holding Space to pan · view changes never mark the scenario unsaved · grid is display-only</p>
       </section>
       <aside class="right-panel">${inspectorView(document)}</aside>
-    </main>`;
+    </main>${conflictDialogView()}`;
+}
+
+// Asked when the stored revision moved since the scenario was opened (for
+// example in another tab). Overwrite keeps the identifier and moves the
+// revision forward; Save as copy keeps both versions under a new identifier.
+function conflictDialogView() {
+  if (!state.conflict) return '';
+  const { loadedRevision, storedRevision } = state.conflict;
+  return `<div class="conflict-backdrop">
+    <section class="conflict-dialog" role="dialog" aria-modal="true" aria-labelledby="conflict-title">
+      <h2 id="conflict-title">This scenario changed elsewhere</h2>
+      <p>The stored copy is now at revision ${esc(String(storedRevision))}, but this
+      editor opened revision ${esc(String(loadedRevision))}. Overwriting replaces the
+      stored copy; saving as a copy keeps both under a new identifier.</p>
+      <div class="conflict-actions">
+        <button class="btn-primary" data-action="conflict-overwrite">Overwrite</button>
+        <button class="btn-secondary" data-action="conflict-copy">Save as copy</button>
+        <button class="btn-quiet" data-action="conflict-cancel">Cancel</button>
+      </div>
+    </section>
+  </div>`;
 }
 
 function render(refocusSelector) {
@@ -774,6 +834,21 @@ async function refreshLibrary() {
 }
 
 async function openScenario(id) {
+  const entry = (await state.store.list()).find((item) => item.id === id);
+  if (!entry) {
+    toast('Scenario not found. It may have been deleted.');
+    await refreshLibrary();
+    render();
+    return;
+  }
+  // Entries that cannot be read are never opened, and documents with a newer
+  // format version are refused: the stored data is left untouched.
+  if (entry.status !== 'ok') {
+    toast(entry.cause || 'This scenario cannot be opened.');
+    await refreshLibrary();
+    render();
+    return;
+  }
   const document = await state.store.load(id);
   if (!document) {
     toast('Scenario not found. It may have been deleted.');
@@ -781,14 +856,24 @@ async function openScenario(id) {
     render();
     return;
   }
-  const entry = (await state.store.list()).find((item) => item.id === id);
+  if (isUnsupportedDocument(document)) {
+    toast(
+      `This scenario needs a newer application (format version ${document.formatVersion}); the stored data was left untouched.`,
+    );
+    await refreshLibrary();
+    render();
+    return;
+  }
   state.document = document;
   // A reopened scenario starts with a clean slate: the saved version for
   // the unsaved-changes indicator and an empty undo history.
   state.savedDocument = cloneScenario(document);
-  state.revision = entry ? entry.revision : null;
+  state.revision = Number.isInteger(entry.revision) ? entry.revision : null;
   state.history = { past: [], future: [] };
   state.fieldErrors = {};
+  state.problems = [];
+  state.dirty = false;
+  state.conflict = null;
   state.view = 'editor';
   // Fresh camera on the new battlefield; keep the author's grid/tool preference.
   state.mapView = {
@@ -916,31 +1001,168 @@ function setStatusAfterRender(message) {
   state.statusError = false;
 }
 
-async function saveScenario() {
+// The first save that needs browser storage requests persistent storage;
+// when the browser refuses, the library shows an unobtrusive notice that
+// data may be removed and recommends export as the only backup.
+async function ensurePersistenceOnce() {
+  if (state.persistRequested) return state.persistent;
+  state.persistRequested = true;
+  state.persistent = await ensurePersistentStorage();
+  return state.persistent;
+}
+
+async function saveScenario(options = {}) {
+  const overwrite = options.overwrite === true;
   // Structural errors block saving; completeness warnings (the issues
   // panel) never do: a scenario with warnings still saves.
   const errors = validateScenario(state.document);
   if (errors.length) {
     state.status = 'Cannot save: fix the highlighted problems.';
     state.statusError = true;
+    state.dirty = true;
     render();
     return;
   }
+  await ensurePersistenceOnce();
+  const storedEntry = (await state.store.list()).find(
+    (item) => item.id === state.document.id,
+  );
+  const storedRevision =
+    storedEntry && Number.isInteger(storedEntry.revision)
+      ? storedEntry.revision
+      : null;
   try {
-    const metadata = await state.store.save(state.document);
+    const metadata = await performSave(state.store, state.document, {
+      loadedRevision: state.revision,
+      storedRevision,
+      overwrite,
+    });
     state.document = await state.store.load(metadata.id);
     state.savedDocument = cloneScenario(state.document);
     state.revision = metadata.revision;
     state.fieldErrors = {};
+    state.problems = [];
+    state.dirty = false;
+    state.conflict = null;
     state.status = `Saved · rev. ${metadata.revision} · ${new Date(metadata.updatedAt).toLocaleTimeString('en')}`;
     state.statusError = false;
+    await refreshLibrary();
     render();
     toast('Scenario saved.');
   } catch (error) {
-    state.status = `Save failed: ${error.message}`;
+    if (error instanceof SaveConflictError) {
+      state.conflict = {
+        loadedRevision: state.revision,
+        storedRevision: error.storedRevision,
+      };
+      state.dirty = true;
+      render();
+      return;
+    }
+    // The store save is atomic: a failure (for example a quota error) leaves
+    // the previous version intact, so the author keeps working on the same
+    // unsaved changes instead of losing them.
+    state.dirty = true;
+    state.status = isQuotaError(error)
+      ? quotaFailureMessage('Save')
+      : `Save failed: ${error.message}`;
     state.statusError = true;
     render();
   }
+}
+
+async function saveConflictCopy() {
+  state.conflict = null;
+  try {
+    await ensurePersistenceOnce();
+    const copy = duplicateScenario(state.document);
+    const metadata = await state.store.save(copy);
+    await refreshLibrary();
+    await openScenario(metadata.id);
+    toast(`Saved as a new copy: ${copy.title}.`);
+  } catch (error) {
+    state.dirty = true;
+    state.status = isQuotaError(error)
+      ? quotaFailureMessage('Save as copy')
+      : `Save as copy failed: ${error.message}`;
+    state.statusError = true;
+    render();
+  }
+}
+
+async function duplicateScenarioById(id) {
+  const document = await state.store.load(id);
+  if (!document) {
+    toast('Scenario not found. It may have been deleted.');
+    await refreshLibrary();
+    render();
+    return;
+  }
+  if (isUnsupportedDocument(document)) {
+    toast(
+      `Cannot duplicate: this scenario needs a newer application (format version ${document.formatVersion}).`,
+    );
+    return;
+  }
+  try {
+    await ensurePersistenceOnce();
+    const copy = duplicateScenario(document);
+    const metadata = await state.store.save(copy);
+    await refreshLibrary();
+    render();
+    toast(`Duplicated as "${copy.title}".`);
+  } catch (error) {
+    toast(`Duplicate failed: ${error.message}`);
+  }
+}
+
+async function exportRawScenarioById(id) {
+  const record = await state.store.loadRaw(id);
+  if (!record) {
+    toast('Nothing to export.');
+    return;
+  }
+  try {
+    const { fileName, json } = exportRawRecord(record);
+    downloadFile(fileName, json);
+    toast(`Exported raw ${fileName}.`);
+  } catch (error) {
+    toast(`Export failed: ${error.message}`);
+  }
+}
+
+// Quota failures never lose work: the store save is atomic, so the previous
+// version is intact and the author keeps the same unsaved changes.
+function quotaFailureMessage(what) {
+  return `${what} failed: browser storage is full (quota exceeded). The previous version is intact; your changes are still here.`;
+}
+
+function updateDirtyDom() {
+  if (state.view !== 'editor') return;
+  const statusElement = $('.status');
+  if (statusElement) {
+    statusElement.textContent = state.status;
+    statusElement.classList.toggle('error', state.statusError);
+  }
+  const head = $('.editor-head');
+  if (!head) return;
+  let flag = $('.dirty-flag');
+  if (state.dirty && !flag) {
+    flag = document.createElement('span');
+    flag.className = 'dirty-flag';
+    flag.title = 'Unsaved changes';
+    flag.textContent = '● unsaved';
+    statusElement?.after(flag);
+  } else if (!state.dirty && flag) {
+    flag.remove();
+  }
+}
+
+function markDirty(message = 'Unsaved changes', isError = false) {
+  state.dirty = true;
+  state.status = message;
+  state.statusError = isError;
+  updateDirtyDom();
 }
 
 function downloadFile(fileName, text) {
@@ -976,6 +1198,7 @@ async function importScenarioFile(file) {
     // Parsing (and its specific rejection messages) runs before anything is
     // stored, so a rejected file leaves the library unchanged.
     const copy = importScenarioDocument(text);
+    await ensurePersistenceOnce();
     const metadata = await state.store.save(copy);
     await refreshLibrary();
     await openScenario(metadata.id);
@@ -1009,12 +1232,30 @@ document.addEventListener('click', async (event) => {
     state.fieldErrors = {};
     state.status = '';
     state.statusError = false;
+    state.dirty = false;
+    state.conflict = null;
     await refreshLibrary();
     render();
   }
   if (action === 'save') await saveScenario();
+  if (action === 'duplicate') await duplicateScenarioById(id);
+  if (action === 'conflict-overwrite') {
+    state.conflict = null;
+    await saveScenario({ overwrite: true });
+    return;
+  }
+  if (action === 'conflict-copy') {
+    await saveConflictCopy();
+    return;
+  }
+  if (action === 'conflict-cancel') {
+    state.conflict = null;
+    render();
+    return;
+  }
   if (handleMapAction(action)) return;
   if (action === 'export') await exportScenarioById(id || null);
+  if (action === 'export-raw') await exportRawScenarioById(id);
   if (action === 'delete') {
     if (!window.confirm('Delete this scenario?')) return;
     await state.store.remove(id);
@@ -1184,7 +1425,10 @@ async function init() {
       event.returnValue = '';
     }
   });
-  state.persistent = await ensurePersistentStorage();
+  // Persistent storage is requested on the first save (see
+  // ensurePersistenceOnce), not on load: a fresh library has nothing to lose
+  // yet. When the browser refuses, the library view says so and recommends
+  // export as the only backup.
   await refreshLibrary();
   if (params.get('id')) {
     await openScenario(params.get('id'));

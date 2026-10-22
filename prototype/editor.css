@@ -212,3 +212,22 @@ input[aria-invalid="true"], textarea[aria-invalid="true"] { border-color: #b76e5
   font-size: 12px; z-index: 50; opacity: 0; pointer-events: none; transition: opacity .2s;
 }
 #toast.visible { opacity: 1; transform: translate(-50%, 0); }
+
+/* Library trust: unreadable entries, the unsaved-changes flag, and the
+   overwrite-or-copy conflict dialog. */
+.library-entry.unreadable { border-style: dashed; }
+.library-entry.unreadable .meta { color: #a46c5b; }
+.dirty-flag { font-size: 12px; color: #b3541e; white-space: nowrap; }
+.conflict-backdrop {
+  position: fixed; inset: 0; z-index: 40;
+  background: rgba(40, 45, 35, .45);
+  display: flex; align-items: center; justify-content: center;
+}
+.conflict-dialog {
+  background: var(--paper); border: 1px solid var(--line); border-radius: 10px;
+  padding: 22px 24px; max-width: 480px; margin: 0 16px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, .25);
+}
+.conflict-dialog h2 { margin: 0 0 10px; font-size: 18px; font-weight: 550; }
+.conflict-dialog p { font-size: 13px; line-height: 1.7; color: #4c5545; margin: 0; }
+.conflict-actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
