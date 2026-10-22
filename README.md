@@ -58,12 +58,26 @@ left, map in the centre, inspector on the right). No dependencies, no build step
 
 - `prototype/domain/scenario.js` — framework-free scenario model (imports
   nothing from React or Next.js): generated immutable UUIDs, required titles,
-  a default 1200 × 800 m battlefield within the 2000 m application limit, two
-  sides with default names and distinct colours, and the `polis-classical 0.1`
-  ruleset reference. Stored documents carry kind `scenario` and integer format
-  version 1; the revision counter stays in library metadata (ADR 0003). Map
-  coordinates follow ADR 0001 (origin south-west, x east, y north, metres);
-  only rendering flips the vertical axis.
+  optional descriptions, a default 1200 × 800 m battlefield within the 2000 m
+  application limit, two sides with default names and distinct colours, units
+  (soldiers, files, spacings in metres, front-midpoint position, compass
+  facing), ground cover, elevation, and linear terrain features, and the
+  `polis-classical 0.1` ruleset reference. Stored documents carry kind
+  `scenario` and integer format version 1; stored metre values are rounded to
+  0.1 m; the revision counter stays in library metadata (ADR 0003). Pure
+  structural validation covers counts, spacings, names, footprints (derived
+  as ranks = ceil(soldiers/files), frontage × depth, anchored at the front
+  midpoint), and terrain geometry. File exchange exports the stored document
+  and imports a file as a new copy, rejecting bad files with specific
+  messages. Map coordinates follow ADR 0001 (origin south-west, x east,
+  y north, metres); only rendering flips the vertical axis.
+- `prototype/domain/geometry.js` — true-scale footprint derivation and polygon
+  predicates (simple rings, overlap with positive area, elevation nesting).
+- `prototype/domain/polis-classical.js` — provisional `polis-classical 0.1`
+  troop-type catalogue (six keys with display names, close/normal/open
+  presets, permitted ranges, and spacing-class thresholds; placeholders).
+- `prototype/scenarios/acceptance-plain.json` — reference scenario as an
+  exported file; it round-trips through import and export identically.
 - `prototype/domain/store.js` — the narrow scenario store interface with an
   in-memory implementation for tests.
 - `prototype/library/idb.js` — the IndexedDB implementation used by the editor.
