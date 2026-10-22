@@ -105,6 +105,10 @@ const state = {
   awaitingHandoff: false,
   handoffSide: null,
   confirming: false,
+  // A concede needs its own confirmation step in the turn bar, separate from
+  // the empty-commit confirmation: requesting it locks drafting until the
+  // player confirms or cancels.
+  concedeConfirming: false,
   resolving: false,
   resolveToken: 0,
   status: '',
@@ -193,10 +197,38 @@ function isAutomatedController(controller) {
 
 function canDraftOrders() {
   const battle = state.battle;
-  if (!battle || state.awaitingHandoff || state.resolving || state.confirming) return false;
+  if (!battle || state.awaitingHandoff || state.resolving || state.confirming || state.concedeConfirming) return false;
   if (isBattleFinished(battle)) return false;
   if (battle.phase !== TURN_PHASE_ORDERS) return false;
   return !isAutomatedController(controllerOf(battle, battle.activeSide));
+}
+
+// A concede is offered in the turn bar during one's own turn only: the same
+// gate as drafting (an ongoing battle in the human side's Orders phase, with
+// no handoff wait, resolution, or open confirmation in the way). While the
+// concession itself waits for confirmation, drafting locks and the turn bar
+// shows the confirm step instead.
+function canConcede() {
+  const battle = state.battle;
+  if (!battle || state.awaitingHandoff || state.resolving || state.confirming || state.concedeConfirming) return false;
+  if (isBattleFinished(battle)) return false;
+  if (battle.phase !== TURN_PHASE_ORDERS) return false;
+  return !isAutomatedController(controllerOf(battle, battle.activeSide));
+}
+
+function requestConcede() {
+  if (!canConcede()) return false;
+  state.confirming = false;
+  state.concedeConfirming = true;
+  render();
+  return true;
+}
+
+function cancelConcede() {
+  if (!state.concedeConfirming) return false;
+  state.concedeConfirming = false;
+  render();
+  return true;
 }
 
 function ownBattleUnit(unitId) {
@@ -1494,6 +1526,61 @@ function battleLogView() {
     </div>`;
 }
 
+// The outcome screen of a finished battle: the winner or the draw, the
+// reason (an army break naming the broken sides; the round limit with both
+// lost shares and the margin; a concession naming who conceded), and both
+// sides' losses. The final map and the battle log stay viewable around it.
+function outcomeView() {
+  const battle = state.battle;
+  const document = state.scenario;
+  const result = battle.result && typeof battle.result === 'object' ? battle.result : null;
+  const winnerName = battle.winner ? sideName(document, battle.winner) : null;
+  const title = winnerName ? `${winnerName} wins` : 'Draw';
+  const sides = (document?.sides || []).filter((side) => side && typeof side.id === 'string');
+  const shares = result && typeof result.lostShares === 'object' && result.lostShares !== null ? result.lostShares : {};
+  const losses = result && typeof result.losses === 'object' && result.losses !== null ? result.losses : {};
+  const percent = (share) => (Number.isFinite(share) ? `${(share * 100).toFixed(1)}%` : '—');
+  const lossRows = sides.map((side) => {
+    const lost = losses[side.id];
+    const share = shares[side.id];
+    return `<li><strong>${esc(side.name || side.id)}</strong> — ${Number.isFinite(lost) ? `${esc(String(lost))} soldiers lost` : 'losses unknown'} · lost share ${esc(percent(share))}</li>`;
+  }).join('');
+  let reason = '';
+  if (!result || !result.reason) {
+    reason = `<p data-testid="outcome-reason">This battle ended (${esc(battle.status)}).</p>`;
+  } else if (result.reason === 'break') {
+    const broken = Array.isArray(result.brokenSides) ? result.brokenSides : [];
+    const names = broken.map((id) => sideName(document, id)).join(' and ');
+    reason = broken.length === 0
+      ? '<p data-testid="outcome-reason">Army break.</p>'
+      : broken.length > 1
+        ? `<p data-testid="outcome-reason">Army break — both sides broke (${esc(names)}). Neither side wins.</p>`
+        : `<p data-testid="outcome-reason">Army break — ${esc(names)} broke.</p>`;
+  } else if (result.reason === 'round-limit') {
+    const margin = result.margin;
+    const ids = sides.map((side) => side.id);
+    const difference = ids.length === 2 && Number.isFinite(shares[ids[0]]) && Number.isFinite(shares[ids[1]])
+      ? Math.abs(shares[ids[0]] - shares[ids[1]])
+      : null;
+    reason = `<p data-testid="outcome-reason">Round limit reached — the side with the lower lost share wins when the difference exceeds the margin.</p>`
+      + `<p data-testid="outcome-margin">Draw margin ${esc(percent(margin))} · difference ${esc(difference === null ? '—' : percent(difference))}.</p>`;
+  } else if (result.reason === 'concede') {
+    const conceded = (battle.events || []).find((event) => event?.type === 'turn-conceded');
+    const conceder = conceded?.side ? sideName(document, conceded.side) : null;
+    reason = conceder && winnerName
+      ? `<p data-testid="outcome-reason">Concession — ${esc(conceder)} conceded, so ${esc(winnerName)} wins.</p>`
+      : '<p data-testid="outcome-reason">Concession.</p>';
+  } else {
+    reason = `<p data-testid="outcome-reason">Ended: ${esc(result.reason)}.</p>`;
+  }
+  return `<section aria-label="Battle outcome" data-testid="battle-outcome">
+    <span class="eyebrow">OUTCOME</span>
+    <h3 data-testid="outcome-title">${esc(title)}</h3>
+    ${reason}
+    <ul class="outcome-losses" data-testid="outcome-losses">${lossRows}</ul>
+  </section>`;
+}
+
 function turnPanelView() {
   const battle = state.battle;
   const document = state.scenario;
@@ -1501,21 +1588,23 @@ function turnPanelView() {
   const logList = battleLogView();
   const turnResult = turnResultView();
   // Finished battles stay on the list as read-only: no orders, no commits,
-  // only the outcome and the log. Deletion happens from the library.
+  // only the outcome, the final map beside this panel, and the log. The
+  // rematch starts a new battle from this battle's scenario snapshot; "Open
+  // scenario in editor" opens the library's current scenario by the same id,
+  // not the snapshot. Deletion happens from the library.
   if (finished) {
-    const winner = battle.winner ? sideName(document, battle.winner) : null;
-    const result = battle.result && typeof battle.result === 'object' ? battle.result : null;
-    const outcome = winner ? ` · winner ${esc(winner)}` : ' · draw';
-    // The engine records machine reasons; the panel shows words.
-    const reasonLabels = { break: 'Army break', 'round-limit': 'Round limit', concede: 'Concession' };
-    const reasonLabel = result && result.reason ? reasonLabels[result.reason] || result.reason : null;
-    const reason = reasonLabel ? `<div class="kv"><dt>Ended by</dt><dd>${esc(reasonLabel)}</dd></div>` : '';
+    const snapshotId = battle?.scenario?.id;
     return `<div class="panel" data-testid="turn-panel">
     <span class="eyebrow">BATTLE OVER</span><h2>${esc(battle.status)}</h2>
-    <div class="kv"><dt>Status</dt><dd data-testid="battle-status">${esc(battle.status)}${outcome}</dd></div>
-    ${reason}
+    <div class="kv"><dt>Status</dt><dd data-testid="battle-status">${esc(battle.status)}${battle.winner ? ` · winner ${esc(sideName(document, battle.winner))}` : ' · draw'}</dd></div>
+    ${outcomeView()}
     <div class="handoff" data-testid="battle-finished">
-      <p>This battle is finished and read-only. It stays on the Battles list; delete it from the library.</p>
+      <p>This battle is finished and read-only. The final map and the battle log stay viewable; the battle stays on the Battles list.</p>
+      <div class="handoff-actions">
+        <button class="btn-primary" data-testid="rematch" data-action="rematch">Rematch</button>
+        <a class="btn-secondary" data-testid="back-to-library" href="editor.html">Back to library</a>
+        ${snapshotId ? `<a class="btn-secondary" data-testid="open-scenario-in-editor" href="editor.html?id=${encodeURIComponent(snapshotId)}">Open scenario in editor</a>` : ''}
+      </div>
     </div>
     ${turnResult}
     ${logList}
@@ -1606,9 +1695,22 @@ function battleView() {
   const document = state.scenario;
   const activeSide = battle.activeSide;
   const limit = roundLimitOf(battle);
+  const finished = isBattleFinished(battle);
   const announcement = state.announcement
     ? `<div class="announcement" data-testid="starting-announcement">${state.announcement}</div>`
     : '';
+  // The concede sits in the turn bar and is available only during one's own
+  // turn (the human side's Orders phase): otherwise it renders disabled, and a
+  // finished battle offers no concede at all. Conceding needs confirmation in
+  // the turn bar itself.
+  const concedeBox = finished
+    ? ''
+    : state.concedeConfirming
+      ? `<span class="concede-confirm" data-testid="concede-confirm-box">Concede the battle?
+          <button class="btn-primary" data-testid="concede-confirm" data-action="concede-confirm">Yes, concede</button>
+          <button class="btn-secondary" data-testid="concede-cancel" data-action="concede-cancel">Cancel</button>
+        </span>`
+      : `<button class="btn-secondary" data-testid="concede" data-action="concede"${canConcede() ? '' : ' disabled'} title="Concede the battle (only on your own turn)">Concede</button>`;
   return `<div class="topbar">
       <span class="brand">PÓLIS<small>BATTLE PLAYER</small></span>
       <span class="doc-title">${esc(document.title)}</span>
@@ -1623,6 +1725,7 @@ function battleView() {
       <span class="phase">Phase: ${esc(battle.phase)}</span>
       <span class="spacer"></span>
       <span class="phase">Drafting: every order kind with live validation (Hold, Move, Charge, Reform, Shoot, Rally, and Withdraw validate in the engine)</span>
+      ${concedeBox}
     </div>
     <main class="workspace">
       <aside class="left-panel">${orderOfBattleView(document)}</aside>
@@ -1736,6 +1839,7 @@ async function beginBattle(seedOverride = null) {
   state.awaitingHandoff = false;
   state.handoffSide = null;
   state.confirming = false;
+  state.concedeConfirming = false;
   state.selectedUnitId = null;
   state.drafts = [];
   state.draftSeq = 1;
@@ -1812,6 +1916,102 @@ async function maybeResolveAutomated() {
   }
 }
 
+// A concession ends the battle at once with the other side the winner (the
+// engine records the `turn-conceded` event first, then the uniform
+// `battle-ended` result). There is no handoff afterwards: the battle is
+// finished and read-only. The decision is appended to the stored decisions so
+// the Battles list keeps the full record.
+async function confirmConcede() {
+  const battle = state.battle;
+  if (!battle || !state.concedeConfirming) return false;
+  if (isBattleFinished(battle)) {
+    state.concedeConfirming = false;
+    render();
+    return false;
+  }
+  const side = battle.activeSide;
+  let next;
+  try {
+    next = resolveTurn(battle, { type: 'concede', side });
+  } catch (error) {
+    state.concedeConfirming = false;
+    setStatus(`Concede refused: ${error.message}`, true);
+    render();
+    return false;
+  }
+  state.battle = next;
+  state.decisions = [...state.decisions, { type: 'concede', side }];
+  state.concedeConfirming = false;
+  state.confirming = false;
+  state.awaitingHandoff = false;
+  state.handoffSide = null;
+  state.announcement = '';
+  state.selectedUnitId = null;
+  state.drafts = [];
+  state.validation = null;
+  setStatus(`${sideName(state.scenario, side)} conceded · ${sideName(state.scenario, next.winner)} wins.`);
+  render();
+  toast(`${sideName(state.scenario, side)} conceded.`);
+  await saveBattle();
+  render();
+  return true;
+}
+
+// A rematch starts a new battle from this battle's scenario snapshot (not the
+// library's current scenario, which may have changed since) with a fresh seed
+// and the same controllers. The finished battle stays stored and read-only.
+async function rematchBattle() {
+  const finished = state.battle;
+  if (!finished || !isBattleFinished(finished)) return false;
+  const snapshot = finished.scenario;
+  if (!snapshot) {
+    setStatus('Rematch refused: this battle has no scenario snapshot.', true);
+    render();
+    return false;
+  }
+  const controllers = { ...(finished.controllers || {}) };
+  const seed = drawSeed();
+  const battleId = generateId();
+  try {
+    state.battle = startBattle(snapshot, { seed, controllers, battleId });
+  } catch (error) {
+    if (error instanceof BattleStartError) {
+      state.problems = error.problems;
+      setStatus(`Rematch refused: ${error.problems.length} playability problem${error.problems.length === 1 ? '' : 's'}.`, true);
+    } else {
+      setStatus(`Rematch refused: ${error.message}`, true);
+    }
+    render();
+    return false;
+  }
+  state.scenario = state.battle.scenario;
+  state.battleId = battleId;
+  state.decisions = [];
+  state.problems = [];
+  state.awaitingHandoff = false;
+  state.handoffSide = null;
+  state.confirming = false;
+  state.concedeConfirming = false;
+  state.selectedUnitId = null;
+  state.drafts = [];
+  state.draftSeq = 1;
+  state.validation = null;
+  state.mapView = {
+    ...fitMapView(state.scenario.battlefield),
+    showGrid: true,
+    viewportW: 800,
+  };
+  const starter = sideName(state.scenario, state.battle.activeSide);
+  state.announcement = `<strong>${esc(starter)}</strong> begins the rematch — round 1, turn 1.`;
+  setStatus(`Rematch started · ${starter} to move.`);
+  render();
+  toast(`${starter} begins the rematch.`);
+  await saveBattle();
+  render();
+  void maybeResolveAutomated();
+  return true;
+}
+
 async function commitHumanTurn() {
   const battle = state.battle;
   if (!battle || state.awaitingHandoff) return;
@@ -1827,6 +2027,7 @@ async function commitHumanTurn() {
   if (!verdict.ok) {
     setStatus(`Commit refused: ${verdict.message} (${verdict.code}).`, true);
     state.confirming = false;
+    state.concedeConfirming = false;
     render();
     return;
   }
@@ -1835,6 +2036,7 @@ async function commitHumanTurn() {
   state.battle = next;
   state.decisions = [...state.decisions, decision];
   state.confirming = false;
+  state.concedeConfirming = false;
   state.awaitingHandoff = true;
   state.handoffSide = next.activeSide;
   state.announcement = '';
@@ -2201,6 +2403,7 @@ document.addEventListener('click', async (event) => {
   }
   if (action === 'commit-empty') {
     state.confirming = true;
+    state.concedeConfirming = false;
     render();
     return;
   }
@@ -2211,6 +2414,22 @@ document.addEventListener('click', async (event) => {
   if (action === 'cancel-commit') {
     state.confirming = false;
     render();
+    return;
+  }
+  if (action === 'concede') {
+    requestConcede();
+    return;
+  }
+  if (action === 'concede-confirm') {
+    await confirmConcede();
+    return;
+  }
+  if (action === 'concede-cancel') {
+    cancelConcede();
+    return;
+  }
+  if (action === 'rematch') {
+    await rematchBattle();
     return;
   }
   if (action === 'confirm-commit') {
@@ -2246,6 +2465,7 @@ document.addEventListener('click', async (event) => {
     state.awaitingHandoff = false;
     state.handoffSide = null;
     state.confirming = false;
+    state.concedeConfirming = false;
     state.announcement = '';
     state.selectedUnitId = null;
     state.drafts = [];
@@ -2358,6 +2578,7 @@ async function init() {
       state.awaitingHandoff = false;
       state.handoffSide = null;
       state.confirming = false;
+      state.concedeConfirming = false;
       state.selectedUnitId = null;
       state.drafts = [];
       state.draftSeq = 1;
@@ -2492,5 +2713,17 @@ window.__battle = {
   },
   commitDraft() {
     return commitHumanTurn();
+  },
+  requestConcede() {
+    return requestConcede();
+  },
+  confirmConcede() {
+    return confirmConcede();
+  },
+  cancelConcede() {
+    return cancelConcede();
+  },
+  rematch() {
+    return rematchBattle();
   },
 };
