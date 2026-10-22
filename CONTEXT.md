@@ -5,7 +5,7 @@ Preparing scenarios and playing battles governed by a shared ruleset.
 ## Language
 
 **Scenario**:
-A prepared description of a battlefield, its sides, and their starting forces and positions, used to start a battle.
+A prepared description of a battlefield, its sides, and their starting forces and positions, used to start a battle. A scenario is written for one ruleset, whose troop types its units use.
 _Avoid_: Battle, saved game
 
 **Battlefield**:
@@ -17,7 +17,7 @@ A shaped piece of the battlefield that a ruleset may take into account: a ground
 _Avoid_: Tile, hex
 
 **Ground cover**:
-The category of surface at a place on the battlefield, such as open ground, forest, rough ground, water, or settlement. Each place has exactly one ground cover; elevation is independent of it.
+The category of surface at a place on the battlefield: open ground, forest, rough ground, water, or settlement. Each place has exactly one ground cover; elevation is independent of it. The categories describe the physical ground and are the same under any ruleset; a ruleset only gives them effects.
 _Avoid_: Terrain type (when elevation is meant too)
 
 **Side**:
@@ -63,6 +63,14 @@ _Avoid_: Scenario
 **Ruleset**:
 The system that defines permitted actions and how a battle is resolved. This product develops one ruleset with configurable parameters.
 _Avoid_: Scenario, rule editor
+
+**Structural validation**:
+Checking that a scenario is well formed on its own terms (geometry invariants, unit counts and spacings, names), without consulting any ruleset mechanics. A structurally valid scenario may still be unplayable.
+_Avoid_: Playability check
+
+**Playability validation**:
+Checking, by the ruleset, whether a structurally valid scenario can start a battle under that ruleset (for example permitted spacings or forbidden ground). It never changes the scenario.
+_Avoid_: Structural validation, editor validation
 
 **Player**:
 The participant making decisions for a side in a battle. A player may be human or, in the future, controlled by an LLM.
