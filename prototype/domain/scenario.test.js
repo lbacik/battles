@@ -1474,6 +1474,8 @@ describe('linear features (rivers and roads)', () => {
     assert.equal(document.terrainFeatures[0].width, 12);
     document = updateLinearFeature(document, id, { path: riverPath(10) });
     assert.deepEqual(document.terrainFeatures[0].path[0], { x: 10, y: 690 });
+    document = updateLinearFeature(document, id, { width: 12.06 });
+    assert.equal(document.terrainFeatures[0].width, 12.1);
     assert.deepEqual(validateScenario(document), []);
     assert.throws(() => updateLinearFeature(document, id, { width: 0 }), /positive/);
     assert.throws(() => updateLinearFeature(document, id, { category: 'lava' }), /category/);

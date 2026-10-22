@@ -1223,9 +1223,7 @@ function roundPath(points) {
 // { ok: false, reason, path } describing the refusal. `path` is the highlight
 // the editor shows: the clamped candidate when it survives, else whatever
 // survived of the drawn shape.
-export function validateLinearCandidate(document, path, options = {}) {
-  const { ignoreId = null } = options;
-  void ignoreId;
+export function validateLinearCandidate(document, path) {
   const battlefield = document?.battlefield;
   if (
     !battlefield ||
@@ -1329,7 +1327,7 @@ export function updateLinearFeature(document, id, patch = {}) {
   const index = copy.terrainFeatures.findIndex(
     (feature) => feature && feature.kind === 'linear' && feature.id === id,
   );
-  copy.terrainFeatures[index] = { ...copy.terrainFeatures[index], category, path, width };
+  copy.terrainFeatures[index] = { ...copy.terrainFeatures[index], category, path, width: round1(width) };
   return roundScenarioToTenth(copy);
 }
 

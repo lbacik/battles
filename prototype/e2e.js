@@ -369,7 +369,16 @@ async function phaseSave() {
   }
   logStep('draw a road crossing the river and the forest', 'pass', '5 vertices · 6 m');
 
-  logStep('edit a river vertex and change the road width', 'running');
+  logStep('move a river vertex and change the road width', 'running');
+  const river = created.terrainFeatures.find(
+    (feature) => feature.kind === 'linear' && feature.category === 'river',
+  );
+  const movedRiver = river.path.map((point, index) =>
+    index === 2 ? { x: point.x + 10, y: point.y } : point,
+  );
+  const riverCheck = validateLinearCandidate(created, movedRiver);
+  if (!riverCheck.ok) throw new Error(`moved river vertex refused: ${riverCheck.reason}`);
+  created = updateLinearFeature(created, river.id, { path: riverCheck.path });
   const road = created.terrainFeatures.find(
     (feature) => feature.kind === 'linear' && feature.category === 'road',
   );
@@ -377,14 +386,14 @@ async function phaseSave() {
     index === 2 ? { x: point.x + 10, y: point.y } : point,
   );
   const check = validateLinearCandidate(created, movedPath);
-  if (!check.ok) throw new Error(`moved river vertex refused: ${check.reason}`);
+  if (!check.ok) throw new Error(`moved road vertex refused: ${check.reason}`);
   created = updateLinearFeature(created, road.id, { path: check.path, width: 8 });
   const updatedRoad = created.terrainFeatures.find((feature) => feature.id === road.id);
   if (updatedRoad.width !== 8) throw new Error('road width change did not stick');
   if (validateScenario(created).length > 0) {
     throw new Error(`edited linears are invalid: ${validateScenario(created).join('; ')}`);
   }
-  logStep('edit a river vertex and change the road width', 'pass', '8 m');
+  logStep('move a river vertex and change the road width', 'pass', '8 m');
 
   logStep('clip an area reaching past the edge to the battlefield', 'running');
   created = addGroundCoverFeature(created, {
