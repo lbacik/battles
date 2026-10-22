@@ -1,5 +1,5 @@
 {
   "name": "poleis-ui-prototype",
   "private": true,
-  "scripts": { "prototype": "node prototype/server.mjs" }
+  "scripts": { "prototype": "node prototype/server.mjs", "test": "node --test prototype/domain/scenario.test.js prototype/domain/store.test.js" }
 }
