@@ -12,14 +12,14 @@ export const METRE_ROUNDING = 0.1;
 // to 0.1 m; this epsilon only absorbs floating-point noise, never design
 // tolerance (the 0.1 m footprint-overlap tolerance is applied explicitly
 // by shrinking footprints, not by widening this epsilon).
-const EPS = 1e-9;
+export const EPS = 1e-9;
 
 // Round a metre value to the stored precision of 0.1 m.
 export function round1(value) {
   return Math.round(value * 10) / 10;
 }
 
-function isFinitePoint(point) {
+export function isFinitePoint(point) {
   return (
     !!point &&
     typeof point === 'object' &&
@@ -278,6 +278,29 @@ export function polygonInsideOrOn(inner, outer) {
     }
   }
   return true;
+}
+
+// True when two footprint rings touch in any way: overlapping with positive
+// area, sharing an edge, or meeting at a point. Boundary contact counts, so
+// this is the shared predicate for playability (opposing footprints), battle
+// start (water), and movement (swept footprints and final contact).
+export function ringsTouch(a, b) {
+  for (let i = 0; i < a.length; i += 1) {
+    const p = a[i];
+    const q = a[(i + 1) % a.length];
+    for (let j = 0; j < b.length; j += 1) {
+      if (segmentsIntersect(p, q, b[j], b[(j + 1) % b.length])) {
+        return true;
+      }
+    }
+  }
+  if (a.some((point) => locatePoint(b, point) !== 'outside')) {
+    return true;
+  }
+  if (b.some((point) => locatePoint(a, point) !== 'outside')) {
+    return true;
+  }
+  return false;
 }
 
 export function pointsWithinBounds(points, width, height) {

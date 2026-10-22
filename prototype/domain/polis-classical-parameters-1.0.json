@@ -13,5 +13,19 @@
   "cohesion": {
     "start": "Steady",
     "states": ["Steady", "Disordered", "Routed"]
+  },
+  "movement": {
+    "maxLegs": 3,
+    "forwardArcDeg": 45,
+    "restrictedRateFactor": 0.5,
+    "wheelFactor": 0.5,
+    "allowanceM": {
+      "hoplite": 90,
+      "peltast": 140,
+      "archer": 110,
+      "slinger": 110,
+      "light_cavalry": 240,
+      "cavalry": 200
+    }
   }
 }
