@@ -7,7 +7,7 @@
     "lint": "node scripts/lint.mjs",
     "format:check": "node scripts/format-check.mjs",
     "typecheck": "node scripts/typecheck.mjs",
-    "test": "node --test prototype/domain/geometry.test.js prototype/domain/polis-classical.test.js prototype/domain/scenario.test.js prototype/domain/store.test.js prototype/domain/library.test.js prototype/domain/battle.test.js prototype/domain/battles.test.js prototype/domain/turn.test.js prototype/domain/movement.test.js prototype/domain/charge.test.js prototype/domain/reform-withdraw.test.js",
+    "test": "node --test prototype/domain/geometry.test.js prototype/domain/polis-classical.test.js prototype/domain/scenario.test.js prototype/domain/store.test.js prototype/domain/library.test.js prototype/domain/battle.test.js prototype/domain/battles.test.js prototype/domain/turn.test.js prototype/domain/movement.test.js prototype/domain/charge.test.js prototype/domain/reform-withdraw.test.js prototype/domain/engine-gate.test.js",
     "build": "node scripts/build.mjs",
     "test:e2e": "node scripts/e2e.mjs"
   }
