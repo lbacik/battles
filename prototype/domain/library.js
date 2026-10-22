@@ -17,6 +17,7 @@
 
 import {
   SCENARIO_FORMAT_VERSION,
+  classifyRulesetReference,
   cloneScenario,
   generateId,
   scenarioFileName,
@@ -187,6 +188,26 @@ export function classifyStoredRecord(record, options = {}) {
         `Format version ${document.formatVersion} is newer than the supported ` +
         `version ${supportedVersion}. Open it with a newer application; the ` +
         `stored data was left untouched.`,
+    };
+  }
+  // Ruleset mismatch (decision #5 item 12): an unknown ruleset identifier or
+  // a newer version of the same ruleset is never opened; the stored data is
+  // left untouched. The entry lists as unreadable with its cause and offers
+  // only raw export or delete. An older version of the same ruleset stays
+  // openable: it resolves against the current catalogue and an explicit Save
+  // rebinds the reference.
+  const classification = classifyRulesetReference(document.ruleset);
+  if (classification.status === 'unknown-ruleset' || classification.status === 'newer') {
+    return {
+      id,
+      title: titleOf(document),
+      revision,
+      updatedAt,
+      status: 'unreadable',
+      cause:
+        classification.status === 'unknown-ruleset'
+          ? `Stored scenario references ${classification.cause}; the stored data was left untouched.`
+          : `Stored scenario ${classification.cause}.`,
     };
   }
   let errors = [];

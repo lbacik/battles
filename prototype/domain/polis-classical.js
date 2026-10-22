@@ -154,6 +154,48 @@ export function isKnownTroopType(key) {
   return Object.hasOwn(TROOP_TYPE_CATALOGUE, key);
 }
 
+// --- Units whose troop type has left the catalogue (decision #5 item 13) -----
+// Catalogue membership is a ruleset concern, never a structural one: structural
+// validation stays silent (see scenario.js), and these helpers report what the
+// editor must mark. The scenario opens, the unknown key is preserved verbatim
+// in the document, the unit is shown with a neutral marking, the issues panel
+// warns, the author may reassign a troop type, and saving stays allowed.
+// Playability validation rejects such units at battle start. Pure.
+
+// Every unit whose troop-type key is unknown to the installed catalogue, in
+// document order: [{ index, id, name, troopType }]. Units without a troop-type
+// string are structurally invalid, not unknown, so they are skipped here.
+export function findUnknownTroopTypeUnits(document) {
+  const units = Array.isArray(document?.units) ? document.units : [];
+  const unknown = [];
+  units.forEach((unit, index) => {
+    if (!unit || typeof unit !== 'object') {
+      return;
+    }
+    const key = unit.troopType;
+    if (typeof key !== 'string' || key.trim() === '') {
+      return;
+    }
+    if (!isKnownTroopType(key)) {
+      unknown.push({ index, id: unit.id ?? null, name: unit.name ?? null, troopType: key });
+    }
+  });
+  return unknown;
+}
+
+// One issues-panel warning per unit whose troop-type key is unknown. The key
+// is quoted verbatim because it is preserved verbatim in the document.
+export function collectUnknownTroopTypeWarnings(document) {
+  return findUnknownTroopTypeUnits(document).map(({ name, troopType }) => {
+    const label =
+      typeof name === 'string' && name.trim() !== '' ? `"${name.trim()}"` : 'An unnamed unit';
+    return (
+      `${label} uses unknown troop type "${troopType}" (preserved verbatim). ` +
+      `Reassign a troop type, or battle start will refuse it.`
+    );
+  });
+}
+
 // Spacing class derived from the lateral interval and the troop type's
 // thresholds (never stored on the unit).
 export function spacingClass(troopKey, lateralInterval) {

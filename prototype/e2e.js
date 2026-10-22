@@ -20,6 +20,8 @@ import {
   addGroundCoverFeature,
   cloneScenario,
   createScenario,
+  exportScenario,
+  importScenarioDocument,
   normalizeFacing,
   pickUnitIdAtPoint,
   proposeUnitPatch,
@@ -31,6 +33,7 @@ import {
   validateGroundCoverCandidate,
   validateScenario,
 } from './domain/scenario.js';
+import { collectUnknownTroopTypeWarnings } from './domain/polis-classical.js';
 import { IndexedDBScenarioStore } from './library/idb.js';
 
 const DB_NAME = 'polis-scenarios-e2e';
@@ -435,6 +438,8 @@ async function phaseReopen(phase) {
     throw new Error(`hill levels changed across reload: ${reopenedHills.map((hill) => hill.level).join(', ')}`);
   }
   logStep('keep the nested hills identical with derived levels', 'pass', 'levels 1, 2');
+
+  await phasePersistenceStep6(store);
 
   details.textContent = JSON.stringify(
     {

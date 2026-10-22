@@ -13,6 +13,7 @@ import {
   addElevationFeature,
   addGroundCoverFeature,
   clampMapZoom,
+  classifyRulesetReference,
   cloneScenario,
   collectWarnings,
   createScenario,
@@ -33,9 +34,11 @@ import {
   panMapViewByPixels,
   pickUnitIdAtPoint,
   proposeUnitPatch,
+  rebindRulesetToCurrent,
   removeElevationFeature,
   removeGroundCoverFeature,
   resizeBattlefield,
+  rulesetCompatibilityNotice,
   snapFacing,
   suggestUnitName,
   toScreenPoint,
@@ -62,7 +65,9 @@ import {
 import {
   TROOP_TYPE_CATALOGUE,
   TROOP_TYPE_KEYS,
+  collectUnknownTroopTypeWarnings,
   getTroopType,
+  isKnownTroopType,
   spacingClass,
 } from './domain/polis-classical.js';
 import { IndexedDBScenarioStore, ensurePersistentStorage } from './library/idb.js';
@@ -971,7 +976,11 @@ function unitSvg(document, unit, mapView, mpp, flags = {}) {
   const { height: heightM } = document.battlefield;
   const centre = toScreenPoint(position, heightM);
   const facing = unitFacingDeg(unit);
-  const color = sideColor(document, unit);
+  // Units whose troop-type key has left the catalogue keep a neutral marking
+  // on the map: a grey footprint instead of the side colour. The key is still
+  // preserved verbatim in the document.
+  const unknownTroop = !isKnownTroopType(unit?.troopType);
+  const color = unknownTroop ? '#6b7280' : sideColor(document, unit);
   const frontW = footprint.frontageM;
   const depthH = footprint.depthM;
   const [name, dims] = unitLabelLines(unit, footprint);
@@ -1010,6 +1019,7 @@ function unitSvg(document, unit, mapView, mpp, flags = {}) {
   const classes = ['unit'];
   if (flags.selected) classes.push('selected');
   if (flags.conflict) classes.push('conflict');
+  if (unknownTroop) classes.push('unknown-troop');
   const outline = flags.conflict ? '#b91c1c' : esc(color);
   return `<g class="${classes.join(' ')}" transform="translate(${centre.x} ${centre.y)}" data-unit-id="${esc(unit.id || '')}">
     <g class="unit-rotor" transform="rotate(${facing})">
@@ -1020,7 +1030,8 @@ function unitSvg(document, unit, mapView, mpp, flags = {}) {
     </g>
     <text x="0" y="${depthH + 8 * mpp + labelSize * 0.9}" text-anchor="middle" font-size="${labelSize}" class="unit-label">${esc(name)}</text>
     ${dims ? `<text x="0" y="${depthH + 8 * mpp + labelSize * 0.9 + dimsSize * 1.25}" text-anchor="middle" font-size="${dimsSize}" class="unit-dims">${esc(dims)}</text>` : ''}
-    <title>${esc(name)}${dims ? ` · ${esc(dims)}` : ''}</title>
+    ${unknownTroop ? `<text x="0" y="${depthH + 8 * mpp + labelSize * 0.9 + dimsSize * 1.25 + (dims ? dimsSize * 1.25 : 0)}" text-anchor="middle" font-size="${dimsSize}" class="unit-dims">? unknown troop type</text>` : ''}
+    <title>${esc(name)}${dims ? ` · ${esc(dims)}` : ''}${unknownTroop ? ` · unknown troop type "${esc(unit?.troopType ?? '')}" (preserved)` : ''}</title>
   </g>`;
 }
 
@@ -1325,13 +1336,22 @@ function orderOfBattleView(document) {
                 footprint = null;
               }
               if (!footprint || !Number.isFinite(footprint.ranks)) footprint = unitFootprint(unit);
+              // Units whose troop-type key has left the catalogue keep a neutral
+              // marking in the roster: a grey swatch and a badge naming the
+              // preserved key. The issues panel warns.
+              const unknownTroop = !isKnownTroopType(unit?.troopType);
               const detail = footprint
                 ? `${esc(troopDisplayName(unit.troopType))} · ${esc(unit.soldiers)} soldiers · ${esc(unit.files)} files × ${footprint.ranks} ranks`
                 : `${esc(troopDisplayName(unit.troopType))} · not placed`;
               const classes = ['unit-row'];
               if (unit?.id === state.selectedUnitId) classes.push('selected');
               if (state.unitConflictIds.includes(unit?.id)) classes.push('conflict');
-              return `<button class="${classes.join(' ')}" data-action="select-unit" data-id="${esc(unit?.id || '')}" aria-pressed="${String(unit?.id === state.selectedUnitId)}"><span class="swatch" style="background:${esc(side.color)}"></span><div><div class="unit-name">${esc(unit?.name || 'Unit')}</div><div class="unit-detail">${detail}</div></div></button>`;
+              if (unknownTroop) classes.push('unknown-troop');
+              const swatch = unknownTroop ? '#9aa0a6' : side.color;
+              const unknownBadge = unknownTroop
+                ? `<div class="unit-detail"><span class="unknown-badge">Unknown troop type "${esc(unit?.troopType ?? '')}" · preserved</span></div>`
+                : '';
+              return `<button class="${classes.join(' ')}" data-action="select-unit" data-id="${esc(unit?.id || '')}" aria-pressed="${String(unit?.id === state.selectedUnitId)}"><span class="swatch" style="background:${esc(swatch)}"></span><div><div class="unit-name">${esc(unit?.name || 'Unit')}</div><div class="unit-detail">${detail}</div>${unknownBadge}</div></button>`;
             })
             .join('')}
         </div>`;
@@ -1378,10 +1398,20 @@ function unitEditorView(document, unit) {
   const sideOptions = (document.sides || [])
     .map((side) => `<option value="${esc(side.id)}"${side.id === unit.side ? ' selected' : ''}>${esc(side.name)}</option>`)
     .join('');
+  // A unit whose troop-type key has left the catalogue keeps its key verbatim:
+  // the select lists it as the selected "Unknown" option so the author can
+  // reassign a catalogue troop type. Choosing a known key commits normally.
+  const unknownTroop = !isKnownTroopType(unit.troopType);
+  const unknownOption = unknownTroop
+    ? `<option value="${esc(unit.troopType)}" selected>Unknown troop type "${esc(unit.troopType)}" (preserved)</option>`
+    : '';
   const troopOptions = TROOP_TYPE_KEYS.map((key) => {
     const label = TROOP_TYPE_CATALOGUE[key]?.displayName || key;
     return `<option value="${esc(key)}"${key === unit.troopType ? ' selected' : ''}>${esc(label)}</option>`;
   }).join('');
+  const unknownNote = unknownTroop
+    ? `<p class="unknown-note" role="note">This troop type left the catalogue; the key "${esc(unit.troopType)}" is preserved verbatim. Choose a troop type to reassign it — battle start will refuse an unknown key.</p>`
+    : '';
   return `<section class="unit-editor${state.unitConflictIds.includes(id) ? ' has-conflict' : ''}" aria-label="Unit">
     <span class="eyebrow">SELECTED UNIT</span>
     <h3>${esc(unit.name || 'Unit')}</h3>
@@ -1390,7 +1420,7 @@ function unitEditorView(document, unit) {
     ${fieldError(`unit-name-${id}`)}
     <div class="field-pair">
       <div><label class="field">Side<select data-unit-field="side" data-id="${esc(id)}"${invalid(`unit-side-${id}`)}>${sideOptions}</select></label>${fieldError(`unit-side-${id}`)}</div>
-      <div><label class="field">Troop type<select data-unit-field="troopType" data-id="${esc(id)}"${invalid(`unit-troopType-${id}`)}>${troopOptions}</select></label>${fieldError(`unit-troopType-${id}`)}</div>
+      <div><label class="field">Troop type<select data-unit-field="troopType" data-id="${esc(id)}"${invalid(`unit-troopType-${id}`)}>${unknownOption}${troopOptions}</select></label>${fieldError(`unit-troopType-${id}`)}${unknownNote}</div>
     </div>
     <div class="field-pair">
       <div><label class="field">Soldiers<input type="number" data-unit-field="soldiers" data-id="${esc(id)}" min="1" step="1" value="${esc(unit.soldiers)}"${invalid(`unit-soldiers-${id}`)}></label>${fieldError(`unit-soldiers-${id}`)}</div>
@@ -1431,7 +1461,15 @@ function inspectorView(document) {
   const size = document.battlefield;
   const errors = validateScenario(document);
   const warnings = collectWarnings(document);
-  const issueCount = errors.length + warnings.length;
+  // Catalogue warnings (decision #5 item 13): one warning per unit whose
+  // troop-type key is unknown. Saving stays allowed; the key is preserved.
+  const catalogueWarnings = collectUnknownTroopTypeWarnings(document);
+  // Ruleset notice (decision #5 item 12): an informational entry when the
+  // scenario references an older version of the same ruleset. An explicit
+  // Save rebinds the reference to the installed version.
+  const rulesetNotice = rulesetCompatibilityNotice(document.ruleset);
+  const notices = rulesetNotice ? [rulesetNotice] : [];
+  const issueCount = errors.length + warnings.length + catalogueWarnings.length + notices.length;
   const fieldError = (name) =>
     state.fieldErrors[name] ? `<p class="field-error" role="alert">${esc(state.fieldErrors[name])}</p>` : '';
   const invalid = (name) => (state.fieldErrors[name] ? ' aria-invalid="true"' : '');
@@ -1461,7 +1499,9 @@ function inspectorView(document) {
       <h3>Issues${issueCount ? ` <span class="issue-count">${issueCount}</span>` : ''}</h3>
       ${errors.map((problem) => `<p class="issue issue-error">${esc(problem)}</p>`).join('')}
       ${warnings.map((warning) => `<p class="issue issue-warning">${esc(warning)}</p>`).join('')}
-      ${issueCount === 0 ? '<p class="issues-empty">No issues.</p>' : '<p class="issues-note">Warnings never block saving; errors must be fixed before saving.</p>'}
+      ${catalogueWarnings.map((warning) => `<p class="issue issue-warning">${esc(warning)}</p>`).join('')}
+      ${notices.map((notice) => `<p class="issue issue-info">${esc(notice)}</p>`).join('')}
+      ${issueCount === 0 ? '<p class="issues-empty">No issues.</p>' : '<p class="issues-note">Warnings and notices never block saving; errors must be fixed before saving.</p>'}
     </section>
     <dl>
       <div class="kv"><dt>Identifier</dt><dd class="mono">${esc(document.id)}</dd></div>
@@ -2129,6 +2169,20 @@ async function openScenario(id) {
     render();
     return;
   }
+  // Ruleset mismatch (decision #5 item 12): an unknown ruleset identifier or
+  // a newer version of the same ruleset is never opened, and the stored data
+  // is left untouched. An older version opens against the current catalogue.
+  const reference = classifyRulesetReference(document.ruleset);
+  if (reference.status === 'unknown-ruleset' || reference.status === 'newer') {
+    toast(
+      reference.status === 'unknown-ruleset'
+        ? `This scenario references an ${reference.cause}; the stored data was left untouched.`
+        : `This scenario ${reference.cause}.`,
+    );
+    await refreshLibrary();
+    render();
+    return;
+  }
   state.document = document;
   // A reopened scenario starts with a clean slate: the saved version for
   // the unsaved-changes indicator and an empty undo history.
@@ -2565,10 +2619,36 @@ async function ensurePersistenceOnce() {
   return state.persistent;
 }
 
+// Fold an older ruleset reference into the installed one as part of an
+// explicit Save (decision #5 item 12). Opening never rebinds, so a scenario
+// that only sits in the editor keeps its stored reference; the rebound
+// version is what Save validates and stores. Not an undo step: the rebind is
+// part of the save itself.
+function commitRulesetRebind() {
+  if (!state.document) {
+    return;
+  }
+  const rebound = rebindRulesetToCurrent(state.document);
+  if (JSON.stringify(rebound.ruleset) === JSON.stringify(state.document.ruleset)) {
+    return;
+  }
+  state.document = rebound;
+  state.fieldErrors = {};
+}
+
 async function saveScenario(options = {}) {
   const overwrite = options.overwrite === true;
-  // Structural errors block saving; completeness warnings (the issues
-  // panel) never do: a scenario with warnings still saves.
+  // An explicit Save rebinds an older ruleset reference to the installed
+  // catalogue (decision #5 item 12). Opening never rebinds: only this path
+  // changes the reference, and the rebound document is what is validated and
+  // stored. Unknown troop-type keys are preserved verbatim either way.
+  const reference = classifyRulesetReference(state.document?.ruleset);
+  if (reference.status === 'older') {
+    commitRulesetRebind();
+  }
+  // Structural errors block saving; completeness warnings, catalogue warnings,
+  // and the ruleset notice (the issues panel) never do: a scenario with
+  // warnings still saves.
   const errors = validateScenario(state.document);
   if (errors.length) {
     state.status = 'Cannot save: fix the highlighted problems.';
@@ -2656,6 +2736,17 @@ async function duplicateScenarioById(id) {
   if (isUnsupportedDocument(document)) {
     toast(
       `Cannot duplicate: this scenario needs a newer application (format version ${document.formatVersion}).`,
+    );
+    return;
+  }
+  // Duplicating never opens the scenario, but a copy of a reference that
+  // cannot open is another entry that cannot open: refuse it like opening.
+  const reference = classifyRulesetReference(document.ruleset);
+  if (reference.status === 'unknown-ruleset' || reference.status === 'newer') {
+    toast(
+      reference.status === 'unknown-ruleset'
+        ? `Cannot duplicate: this scenario references an ${reference.cause}; the stored data was left untouched.`
+        : `Cannot duplicate: this scenario ${reference.cause}.`,
     );
     return;
   }
