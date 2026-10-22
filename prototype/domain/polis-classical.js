@@ -7,8 +7,8 @@
 // version.
 //
 // Parameters live in the versioned data file
-// `./polis-classical-parameters-1.0.json` (placeholder values; the Engine II
-// gate sets them). The `RULESET_PARAMETERS` constant below mirrors that file
+// `./polis-classical-parameters-1.0.json` (initial values; the Engine II gate
+// tunes them). The `RULESET_PARAMETERS` constant below mirrors that file
 // so the browser build and the engine share one snapshot without file access;
 // unit tests assert the two stay identical. Battle start snapshots the
 // parameters and records the version actually used.
@@ -54,7 +54,7 @@ export const RULESET_PARAMETERS = Object.freeze({
   // midpoint bills `frontageM * angleRad * wheelFactor` metres. `allowanceM`
   // is the distance one turn buys on open ground, per troop type. `terrain`
   // adjusts that billing for ground cover (see below). Initial values for the
-  // manoeuvre slice; the Engine II gate sets the fighting parameters.
+  // manoeuvre slice; the fighting parameters live in the `combat` block.
   //
   // Terrain and movement (decision #6 items 14-15). The terrain that applies
   // to a unit is the worst ground cover its footprint touches, ranked
@@ -114,6 +114,41 @@ export const RULESET_PARAMETERS = Object.freeze({
     rateFactor: 0.5,
     cohesionPassChance: 0.5,
   }),
+  // Combat between engaged units (decision #6 items 14-15, 17-18, 23; see
+  // `./combat.js`). Each side's strength is its fighting files × the troop
+  // type's `combatFactor`, multiplied once per modifier: `chargeBonus` while
+  // the charger's fresh-charge flag holds, the flank or rear aspect
+  // (`flankFactor`, `rearFactor`) for the flanking side, `elevationFactor`
+  // for the higher of the two combatants, the terrain factor of the worst
+  // ground cover under the combatant (`terrainFactor`, with settlement less
+  // punishing than forest as its defensive bonus), `disorderedFactor` while
+  // Disordered or Routed, and `riverFactor` while standing in a river.
+  // Losses are strength × a seeded draw × `lethality`. Cohesion strain is
+  // casualties × `cohesionPerCasualty`, times `loserFactor` for the side that
+  // inflicted fewer losses, plus `flankStrain` or `rearStrain` for the flanked
+  // side; ranks beyond the first, up to `depthCap`, multiply the strain down
+  // by `depthReduction` each for troop types with the depth trait. Strain
+  // accumulates on the unit and steps Steady to Disordered at
+  // `disorderedAt`, and to Routed at `routedAt`. Initial values for this
+  // slice.
+  combat: Object.freeze({
+    lethality: 0.06,
+    chargeBonus: 1.5,
+    flankFactor: 1.5,
+    rearFactor: 2.0,
+    elevationFactor: 1.2,
+    disorderedFactor: 0.7,
+    riverFactor: 0.7,
+    terrainFactor: Object.freeze({ open: 1, rough: 0.9, forest: 0.75, settlement: 0.9 }),
+    cohesionPerCasualty: 0.08,
+    loserFactor: 1.5,
+    flankStrain: 1.0,
+    rearStrain: 2.0,
+    depthCap: 4,
+    depthReduction: 0.1,
+    disorderedAt: 2.0,
+    routedAt: 4.0,
+  }),
 });
 
 export const TROOP_TYPE_KEYS = Object.freeze([
@@ -133,6 +168,8 @@ const TROOP_TYPES = {
     key: 'hoplite',
     displayName: 'Hoplites',
     role: 'close spacing, strong frontal fighter, depth endures',
+    combatFactor: 3,
+    depthEndures: true,
     presets: {
       close: { lateralInterval: 0.9, rankDepth: 0.9 },
       normal: { lateralInterval: 1.8, rankDepth: 1.8 },
@@ -149,6 +186,7 @@ const TROOP_TYPES = {
     key: 'peltast',
     displayName: 'Peltasts',
     role: 'open spacing, javelins, good in rough ground and forest',
+    combatFactor: 1.5,
     presets: {
       close: { lateralInterval: 0.9, rankDepth: 0.9 },
       normal: { lateralInterval: 1.5, rankDepth: 1.5 },
@@ -165,6 +203,7 @@ const TROOP_TYPES = {
     key: 'archer',
     displayName: 'Archers',
     role: 'long range, very weak in melee',
+    combatFactor: 0.6,
     presets: {
       close: { lateralInterval: 0.9, rankDepth: 0.9 },
       normal: { lateralInterval: 1.5, rankDepth: 1.5 },
@@ -181,6 +220,7 @@ const TROOP_TYPES = {
     key: 'slinger',
     displayName: 'Slingers',
     role: 'medium range, weak in melee',
+    combatFactor: 0.6,
     presets: {
       close: { lateralInterval: 0.9, rankDepth: 0.9 },
       normal: { lateralInterval: 1.5, rankDepth: 1.5 },
@@ -197,6 +237,7 @@ const TROOP_TYPES = {
     key: 'light_cavalry',
     displayName: 'Light cavalry',
     role: 'fast, javelins, avoids a hoplite front',
+    combatFactor: 1.5,
     presets: {
       close: { lateralInterval: 1.2, rankDepth: 2.0 },
       normal: { lateralInterval: 2.0, rankDepth: 3.0 },
@@ -213,6 +254,7 @@ const TROOP_TYPES = {
     key: 'cavalry',
     displayName: 'Cavalry',
     role: 'fast, charge bonus, poor in forest, rough ground, and settlement',
+    combatFactor: 2.5,
     presets: {
       close: { lateralInterval: 1.0, rankDepth: 2.0 },
       normal: { lateralInterval: 1.8, rankDepth: 2.8 },
