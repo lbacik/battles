@@ -262,6 +262,25 @@ button.unit-row.selectable:hover { border-color: var(--line); background: #fffff
 }
 #toast.visible { opacity: 1; transform: translate(-50%, 0); }
 
+/* Concede in the turn bar: available only during one's own turn (disabled
+   otherwise), with its confirmation step inline in the bar. */
+.turnbar .concede-confirm {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: #f9e9e4; border: 1px solid #b76e5a; border-radius: 4px;
+  padding: 6px 10px; color: #8a4636; font-size: 12px;
+}
+.turnbar .concede-confirm .btn-primary { min-height: 32px; padding: 6px 12px; }
+.turnbar .concede-confirm .btn-secondary { min-height: 32px; padding: 6px 12px; }
+.turnbar [data-testid="concede"] { min-height: 32px; padding: 6px 12px; }
+
+/* Battle outcome: winner or draw, the reason, and both sides' losses. The
+   round limit names both lost shares and the margin. */
+.outcome-losses { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.outcome-losses li { font-size: 12px; line-height: 1.6; }
+.outcome-losses li strong { font-weight: 650; }
+[data-testid="battle-outcome"] h3 { font-size: 16px; margin: 0 0 6px; }
+[data-testid="outcome-reason"], [data-testid="outcome-margin"] { font-size: 12px; line-height: 1.7; margin: 4px 0; }
+
 /* Turn result: the turn just resolved at a glance. Each category names its
    chance outcome on the `chance` lines; empty categories say None. */
 .result { margin: 12px 0 0; }
