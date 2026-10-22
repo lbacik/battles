@@ -124,8 +124,11 @@ export function createPassivePlayer() {
 // draws one order per unit from the available actions:
 //
 // - the order kind is drawn uniformly from the unit's permitted kinds;
-// - a Move aims at a random point inside the unit's movement allowance (the
-//   same allowance the available actions show), keeping the facing;
+// - a Move marches at full pace toward a random enemy (with jitter), keeping
+//   the facing — directed fuzzing, so Random vs Random meets and fights — and
+//   only wanders uniformly with no enemy left standing; when a charge
+//   candidate is already in reach, the move becomes a charge at the nearest
+//   such target instead of a march;
 // - a Charge names a random charge candidate with no approach legs;
 // - a Shoot names a random shoot candidate;
 // - a Reform draws files and spacings inside the troop type's permitted range;
@@ -271,8 +274,49 @@ function proposeOrder(kind, entry, view, byId, rng) {
     const battlefield = view.battlefield || {};
     const width = Number.isFinite(battlefield.width) ? battlefield.width : 0;
     const height = Number.isFinite(battlefield.height) ? battlefield.height : 0;
-    const angle = rng.next() * Math.PI * 2;
-    const distance = rng.next() * allowance;
+    // Close decisively: when a charge candidate is already in reach, charge
+    // the nearest such target instead of marching. Reach is a hint (position
+    // to position against the allowance); `validate` still decides.
+    const reachable = (entry.chargeCandidates || []).filter(
+      (candidate) => candidate && typeof candidate.targetId === 'string'
+        && Number.isFinite(candidate.distanceM) && candidate.distanceM <= allowance,
+    );
+    if (reachable.length > 0) {
+      reachable.sort((left, right) => {
+        if (left.distanceM !== right.distanceM) {
+          return left.distanceM - right.distanceM;
+        }
+        return left.targetId < right.targetId ? -1 : 1;
+      });
+      const candidate = reachable[0];
+      return {
+        unitId,
+        kind: 'Charge',
+        targetId: candidate.targetId,
+        edge: candidate.edge,
+        approach: [],
+      };
+    }
+    // Directed fuzzing for the Engine II gate: every move marches at full pace
+    // toward a random enemy (with jitter either side of the bearing) so Random
+    // vs Random closes, charges, and can break; with no enemy left standing
+    // the move wanders uniformly. The bearing matches the march convention
+    // below (angle 0 is +y).
+    let angle = rng.next() * Math.PI * 2;
+    let distance = rng.next() * allowance;
+    const enemies = (view.units || []).filter(
+      (unit) => unit && typeof unit.id === 'string' && unit.id !== unitId && unit.side !== seen.side
+        && Number.isFinite(unit.position?.x) && Number.isFinite(unit.position?.y),
+    );
+    if (enemies.length > 0) {
+      const foe = enemies[Math.floor(rng.next() * enemies.length)];
+      const bearing = Math.atan2(
+        foe.position.x - seen.position.x,
+        foe.position.y - seen.position.y,
+      );
+      angle = bearing + (rng.next() - 0.5) * (Math.PI / 2);
+      distance = allowance;
+    }
     const to = {
       x: round1(Math.min(Math.max(seen.position.x + Math.sin(angle) * distance, 1), Math.max(width - 1, 1))),
       y: round1(Math.min(Math.max(seen.position.y + Math.cos(angle) * distance, 1), Math.max(height - 1, 1))),

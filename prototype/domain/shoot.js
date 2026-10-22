@@ -559,9 +559,14 @@ export function resolveShootingPhase(battle, shootOrders) {
       const cohesionBefore = target.cohesion;
       if (total >= params.routedAt) {
         target.cohesion = 'Routed';
+        target.cohesionState = 'Routed';
       } else if (total >= params.disorderedAt && target.cohesion === 'Steady') {
         target.cohesion = 'Disordered';
+        target.cohesionState = 'Disordered';
       }
+      // Both stored state strings move together: nothing reads `cohesionState`
+      // preferentially (see `./cohesion.js`), so this keeps the mirror fields
+      // in sync without changing any engine read.
       if (target.cohesion !== cohesionBefore) {
         pushEvent({
           type: 'unit-cohesion',

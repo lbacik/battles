@@ -172,8 +172,8 @@ describe('polis-classical 1.0 parameters', () => {
     assert.deepEqual(stored.ruleset, { id: RULESET_ID, version: RULESET_VERSION });
   });
 
-  it('marks the parameter values as placeholders for the Engine II gate', () => {
-    assert.equal(RULESET_PARAMETERS.status, 'placeholder');
+  it('marks the parameter values as tuned for the Engine II gate', () => {
+    assert.equal(RULESET_PARAMETERS.status, 'tuned');
     assert.ok(RULESET_PARAMETERS.note.trim().length > 0);
   });
 });

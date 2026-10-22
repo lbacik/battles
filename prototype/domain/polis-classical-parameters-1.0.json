@@ -3,8 +3,8 @@
     "id": "polis-classical",
     "version": "1.0"
   },
-  "status": "placeholder",
-  "note": "Placeholder values. Battle start only snapshots them; the Engine II gate sets them.",
+  "status": "tuned",
+  "note": "Tuned values (Engine II gate): Random vs Random fuzzing on the reference scenarios reaches an end condition in every battle. No balance beyond battles ending is claimed.",
   "battle": {
     "roundLimit": 12,
     "breakLossShare": 0.5,
@@ -62,7 +62,7 @@
     "cohesionPassChance": 0.5
   },
   "combat": {
-    "lethality": 0.06,
+    "lethality": 0.3,
     "chargeBonus": 1.5,
     "flankFactor": 1.5,
     "rearFactor": 2.0,
@@ -75,7 +75,7 @@
       "forest": 0.75,
       "settlement": 0.9
     },
-    "cohesionPerCasualty": 0.08,
+    "cohesionPerCasualty": 0.3,
     "loserFactor": 1.5,
     "flankStrain": 1.0,
     "rearStrain": 2.0,
@@ -85,14 +85,14 @@
     "routedAt": 4.0
   },
   "shooting": {
-    "lethality": 0.02,
+    "lethality": 0.06,
     "openSpacingFactor": 0.6,
     "coverFactor": {
       "forest": 0.5,
       "settlement": 0.6
     },
     "disorderedFactor": 0.7,
-    "cohesionPerCasualty": 0.2,
+    "cohesionPerCasualty": 0.5,
     "disorderedAt": 2.0,
     "routedAt": 4.0
   }
