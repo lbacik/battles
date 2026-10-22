@@ -7,6 +7,8 @@
 import {
   MAX_BATTLEFIELD_HEIGHT_M,
   MAX_BATTLEFIELD_WIDTH_M,
+  GROUND_COVER_CATEGORIES,
+  addGroundCoverFeature,
   clampMapZoom,
   cloneScenario,
   collectWarnings,
@@ -22,15 +24,19 @@ import {
   mapViewBox,
   niceScaleBarMetres,
   panMapViewByPixels,
+  removeGroundCoverFeature,
   resizeBattlefield,
   suggestUnitName,
   toScreenPoint,
   unitFacingDeg,
   unitFootprint,
   unitPosition,
+  updateGroundCoverFeature,
+  validateGroundCoverCandidate,
   validateScenario,
   zoomViewAroundCursor,
 } from './domain/scenario.js';
+import { polygonArea, round1 } from './domain/geometry.js';
 import {
   SaveConflictError,
   duplicateScenario,
@@ -84,7 +90,26 @@ const state = {
   // values). Neither is recorded in the undo history.
   selectedUnitId: null,
   unitConflictIds: [],
+  // Terrain mode (left panel): 'forces' shows the order of battle, 'terrain'
+  // lists the ground cover areas and hosts the drawing tools. The map
+  // interactions below key off the draft and the selection, not the tab.
+  leftMode: 'forces',
+  selectedTerrainId: null,
+  selectedVertexIndex: null,
+  // The polygon being drawn: { category, points, error }. Display-only until
+  // the author finishes it; finishing validates and commits one undo step.
+  terrainDraft: null,
+  draftCategory: 'forest',
+  // The last refused terrain edit: { ring, reason, conflictId? }. Transient
+  // display state (like the map view): rendered as a red highlight, cleared
+  // by the next committed change.
+  terrainRefusal: null,
 };
+
+// A vertex drag is transient pointer state, not document state: it lives
+// outside `state` so a re-render never resurrects a stale drag.
+let terrainDrag = null;
+let suppressMapClick = false;
 
 function ensureMapView(document) {
   const fitted = fitMapView(document.battlefield);
@@ -169,6 +194,8 @@ function commitEdit(nextDocument, refocusSelector) {
   }
   state.status = '';
   state.statusError = false;
+  // A committed change supersedes the last refusal highlight.
+  state.terrainRefusal = null;
   render(refocusSelector);
 }
 
@@ -183,6 +210,7 @@ function undoEdit(refocusSelector) {
   if (state.selectedUnitId && !state.document.units.some((unit) => unit?.id === state.selectedUnitId)) {
     state.selectedUnitId = null;
   }
+  state.terrainRefusal = null;
   // Undoing back to the saved version clears the transient message so the
   // header falls back to the saved state; anything else stays marked dirty.
   state.status = isDirty() ? 'Undone.' : '';
@@ -201,6 +229,7 @@ function redoEdit(refocusSelector) {
   if (state.selectedUnitId && !state.document.units.some((unit) => unit?.id === state.selectedUnitId)) {
     state.selectedUnitId = null;
   }
+  state.terrainRefusal = null;
   state.status = isDirty() ? 'Redone.' : '';
   state.statusError = false;
   render(refocusSelector);
@@ -858,7 +887,54 @@ function unitSvg(document, unit, mapView, mpp, flags = {}) {
   </g>`;
 }
 
-function battlefieldSvg(document, mapView) {
+// Vertex handles, the draft shape, and the refusal highlight for Terrain mode.
+// All coordinates are map metres converted through `project` (map y-up to
+// screen y-down); handle radii are metres-per-pixel multiples so they keep a
+// constant screen size at any zoom.
+function terrainOverlaySvg(document, overlay, project, toScreen, mpp) {
+  const { selectedId, selectedIndex, draft, refusal } = overlay || {};
+  let out = '';
+  if (refusal && Array.isArray(refusal.ring) && refusal.ring.length >= 3) {
+    out += `<polygon points="${project(refusal.ring)}" fill="#b76e5a" fill-opacity="0.35" stroke="#b76e5a" stroke-width="${2.5 * mpp}" stroke-dasharray="${8 * mpp} ${5 * mpp}" class="terrain-refused"><title>${esc(refusal.reason || 'Refused shape')}</title></polygon>`;
+  }
+  if (draft && Array.isArray(draft.points) && draft.points.length > 0) {
+    const line = project(draft.points);
+    if (draft.points.length >= 3) {
+      out += `<polygon points="${line}" fill="#4e6047" fill-opacity="0.12" stroke="#4e6047" stroke-width="${2 * mpp}" stroke-dasharray="${7 * mpp} ${4 * mpp}" class="terrain-draft-fill"/>`;
+    } else {
+      out += `<polyline points="${line}" fill="none" stroke="#4e6047" stroke-width="${2 * mpp}" stroke-dasharray="${7 * mpp} ${4 * mpp}" class="terrain-draft-fill"/>`;
+    }
+    out += draft.points
+      .map((point) => {
+        const screen = toScreen(point.x, point.y);
+        return `<circle cx="${screen.x}" cy="${screen.y}" r="${5 * mpp}" fill="#4e6047" stroke="#f4f3e9" stroke-width="${1.5 * mpp}" class="terrain-draft-vertex"/>`;
+      })
+      .join('');
+  }
+  const selected =
+    selectedId && (document.terrainFeatures || []).find((feature) => feature?.id === selectedId);
+  if (selected && selected.kind === 'ground' && Array.isArray(selected.polygon)) {
+    const ring = selected.polygon;
+    out += ring
+      .map((point, index) => {
+        const edge = ring[(index + 1) % ring.length];
+        const mid = { x: (point.x + edge.x) / 2, y: (point.y + edge.y) / 2 };
+        const screen = toScreen(mid.x, mid.y);
+        return `<circle cx="${screen.x}" cy="${screen.y}" r="${4 * mpp}" fill="#faf9f4" stroke="#4e6047" stroke-width="${1.5 * mpp}" stroke-dasharray="${3 * mpp} ${2 * mpp}" class="terrain-edge-handle" data-edge-index="${index}" data-feature-id="${esc(selected.id)}"><title>Insert a vertex here</title></circle>`;
+      })
+      .join('');
+    out += ring
+      .map((point, index) => {
+        const screen = toScreen(point.x, point.y);
+        const active = index === selectedIndex;
+        return `<circle cx="${screen.x}" cy="${screen.y}" r="${(active ? 7 : 6) * mpp}" fill="${active ? '#4e6047' : '#faf9f4'}" stroke="#4e6047" stroke-width="${2 * mpp}" class="terrain-vertex${active ? ' selected' : ''}" data-vertex-index="${index}" data-feature-id="${esc(selected.id)}"><title>Vertex ${index + 1}: drag to move, Delete removes it</title></circle>`;
+      })
+      .join('');
+  }
+  return out;
+}
+
+function battlefieldSvg(document, mapView, overlay = {}) {
   const { width: widthM, height: heightM } = document.battlefield;
   const toScreen = (x, y) => toScreenPoint({ x, y }, heightM);
   const box = mapViewBox(mapView, document.battlefield);
@@ -899,11 +975,15 @@ function battlefieldSvg(document, mapView) {
       })
       .join(' ');
 
+  const refusalConflictId = overlay?.refusal?.conflictId;
   const terrain = (document.terrainFeatures || [])
     .map((feature) => {
       if (feature.kind === 'ground') {
         const style = GROUND_STYLES[feature.category] || { fill: '#cccccc', stroke: '#999999' };
-        return `<polygon points="${project(feature.polygon)}" fill="${style.fill}" fill-opacity="0.7" stroke="${style.stroke}" stroke-width="1.5"><title>${esc(feature.category)}</title></polygon>`;
+        const classes = ['terrain-ground'];
+        if (feature.id === overlay?.selectedId) classes.push('selected');
+        if (feature.id && feature.id === refusalConflictId) classes.push('conflict');
+        return `<polygon points="${project(feature.polygon)}" fill="${style.fill}" fill-opacity="0.7" stroke="${style.stroke}" stroke-width="${feature.id === overlay?.selectedId ? 3 : 1.5}" class="${classes.join(' ')}" data-feature-id="${esc(feature.id || '')}"><title>${esc(groundCoverLabel(feature.category))}</title></polygon>`;
       }
       if (feature.kind === 'elevation') {
         const middle = toScreen(
@@ -929,6 +1009,7 @@ function battlefieldSvg(document, mapView) {
     <rect x="0" y="0" width="${widthM}" height="${heightM}" fill="#e8e5d5"/>
     <g id="map-grid-group" style="display:${showGrid ? 'block' : 'none'}">${grid}</g>
     ${terrain}
+    <g id="map-terrain-overlay">${terrainOverlaySvg(document, overlay, project, toScreen, mpp)}</g>
     <rect x="0" y="0" width="${widthM}" height="${heightM}" fill="none" stroke="#6f7a65" stroke-width="2" vector-effect="non-scaling-stroke"/>
     ${xLabels}${yLabels}
     <g id="map-units-group">${placed.map((unit) => unitSvg(document, unit, mapView, mpp, { selected: unit?.id === state.selectedUnitId, conflict: state.unitConflictIds.includes(unit?.id) })).join('')}</g>
@@ -1116,7 +1197,7 @@ function orderOfBattleView(document) {
         </div>`;
       })
       .join('')}
-    <p class="readonly-note">Select a Unit to edit it in the inspector. New and duplicated Units are placed at the first free spot in the current view. Unit positions and terrain geometry are otherwise read-only in this release.</p>
+    <p class="readonly-note">Select a Unit to edit it in the inspector. New and duplicated Units are placed at the first free spot in the current view. Ground cover areas are drawn and edited in Terrain mode.</p>
   </div>`;
 }
 
@@ -1210,6 +1291,7 @@ function inspectorView(document) {
   const unit = selectedUnit();
   return `<div class="panel">${unit ? `${unitEditorView(document, unit)}<hr class="panel-divider">` : ''}
     <span class="eyebrow">SCENARIO INSPECTOR</span><h2>Scenario</h2>
+    ${terrainInspectorView(document)}
     <label class="field">Title (required)<input data-field="title" value="${esc(document.title)}" maxlength="120"${invalid('title')}></label>
     ${fieldError('title')}
     <div class="field-pair">
@@ -1260,6 +1342,394 @@ function terrainSummary(document) {
   return [...counts].map(([key, count]) => `${key} ${count}`).join(' · ');
 }
 
+// --- Terrain mode (ground cover areas) --------------------------------------
+// The left panel has two modes: the order of battle and the terrain list.
+// Drawing, category changes, vertex edits, and deletions all commit through
+// commitEdit, so every terrain change is undoable with no extra work.
+const GROUND_COVER_LABELS = {
+  forest: 'Forest',
+  rough: 'Rough ground',
+  water: 'Water',
+  settlement: 'Settlement',
+};
+
+function groundCoverLabel(category) {
+  return GROUND_COVER_LABELS[category] || String(category || 'Ground cover');
+}
+
+function groundFeatures(document) {
+  return (document.terrainFeatures || []).filter(
+    (feature) => feature && feature.kind === 'ground',
+  );
+}
+
+function selectedGroundFeature(document) {
+  if (!state.selectedTerrainId) return null;
+  return (
+    groundFeatures(document).find((feature) => feature.id === state.selectedTerrainId) || null
+  );
+}
+
+function groundAreaSquareMetres(feature) {
+  try {
+    return Math.round(polygonArea(feature.polygon));
+  } catch {
+    return null;
+  }
+}
+
+function categoryOptions(selected) {
+  return GROUND_COVER_CATEGORIES.map(
+    (category) =>
+      `<option value="${category}"${category === selected ? ' selected' : ''}>${esc(groundCoverLabel(category))}</option>`,
+  ).join('');
+}
+
+function leftPanelView(document) {
+  const isTerrain = state.leftMode === 'terrain';
+  return `<div class="mode-tabs" role="tablist" aria-label="Left panel mode">
+      <button class="mode-tab${isTerrain ? '' : ' active'}" role="tab" aria-selected="${String(!isTerrain)}" data-action="left-mode" data-mode="forces">Order of battle</button>
+      <button class="mode-tab${isTerrain ? ' active' : ''}" role="tab" aria-selected="${String(isTerrain)}" data-action="left-mode" data-mode="terrain">Terrain</button>
+    </div>
+    ${isTerrain ? terrainPanelView(document) : orderOfBattleView(document)}`;
+}
+
+function terrainPanelView(document) {
+  const grounds = groundFeatures(document);
+  const draft = state.terrainDraft;
+  const category = draft ? draft.category : state.draftCategory;
+  const drawing = draft
+    ? `<div class="terrain-drafting">
+        <p>Drawing ${esc(groundCoverLabel(draft.category))} — click the map to add vertices (${draft.points.length}).</p>
+        ${draft.error ? `<p class="field-error" role="alert">${esc(draft.error)}</p>` : ''}
+        <div class="terrain-actions">
+          <button class="btn-primary" data-action="terrain-draw-finish"${draft.points.length < 3 ? ' disabled' : ''}>Finish (Enter)</button>
+          <button class="btn-secondary" data-action="terrain-draw-cancel">Cancel (Esc)</button>
+        </div>
+        <p class="terrain-hint">Enter finishes · Escape cancels · Backspace removes the last vertex. Shapes reaching past the edge are clipped to the battlefield; overlapping areas are refused, never auto-clipped.</p>
+      </div>`
+    : `<label class="field">New area category<select data-field="terrain-new-category">${categoryOptions(category)}</select></label>
+      <div class="terrain-actions">
+        <button class="btn-primary" data-action="terrain-draw-start">Draw area</button>
+      </div>
+      <p class="terrain-hint">Click vertices on the map, then finish from the keyboard. A refused shape is highlighted in red.</p>`;
+  const items = grounds
+    .map((feature) => {
+      const area = groundAreaSquareMetres(feature);
+      const selected = feature.id === state.selectedTerrainId;
+      return `<li class="terrain-row${selected ? ' selected' : ''}">
+        <button class="terrain-select" data-action="terrain-select" data-id="${esc(feature.id)}" aria-pressed="${String(selected)}">
+          <span class="swatch" style="background:${esc((GROUND_STYLES[feature.category] || {}).fill || '#cccccc')}"></span>
+          <span><span class="unit-name">${esc(groundCoverLabel(feature.category))}</span>
+          <span class="unit-detail">${feature.polygon.length} vertices${area === null ? '' : ` · ${area.toLocaleString('en')} m²`}</span></span>
+        </button>
+        <button class="btn-quiet btn-danger" data-action="terrain-delete" data-id="${esc(feature.id)}" title="Delete this area (undoable)">Delete</button>
+      </li>`;
+    })
+    .join('');
+  return `<div class="panel"><span class="eyebrow">GROUND COVER</span><h2>Terrain</h2>
+    ${drawing}
+    ${grounds.length ? `<ul class="terrain-list">${items}</ul>` : '<p class="empty-terrain">No ground cover areas yet. Open ground is the default; draw forest, rough ground, water, or a settlement.</p>'}
+    <p class="readonly-note">Areas must not overlap; touching edge to edge is legal. Partly-outside shapes are clipped to the battlefield edge.</p>
+  </div>`;
+}
+
+function terrainInspectorView(document) {
+  const draft = state.terrainDraft;
+  if (draft) {
+    return `<section class="terrain-inspector" aria-label="Area being drawn">
+      <h3>New ${esc(groundCoverLabel(draft.category))} area</h3>
+      <label class="field">Category<select data-field="terrain-draft-category">${categoryOptions(draft.category)}</select></label>
+      <div class="kv"><dt>Vertices</dt><dd>${draft.points.length} (at least 3 to finish)</dd></div>
+      ${draft.error ? `<p class="field-error" role="alert">${esc(draft.error)}</p>` : ''}
+      <div class="terrain-actions">
+        <button class="btn-primary" data-action="terrain-draw-finish"${draft.points.length < 3 ? ' disabled' : ''}>Finish (Enter)</button>
+        <button class="btn-secondary" data-action="terrain-draw-cancel">Cancel (Esc)</button>
+      </div>
+    </section>`;
+  }
+  const feature = selectedGroundFeature(document);
+  if (!feature) return '';
+  const area = groundAreaSquareMetres(feature);
+  const vertices = feature.polygon
+    .map((point, index) => {
+      const selected = index === state.selectedVertexIndex;
+      return `<li class="terrain-vertex-row${selected ? ' selected' : ''}">
+        <span class="mono">${index + 1}. (${point.x.toFixed(1)}, ${point.y.toFixed(1)})</span>
+        <button class="btn-quiet btn-danger" data-action="terrain-vertex-delete" data-index="${index}"${feature.polygon.length <= 3 ? ' disabled' : ''} title="${feature.polygon.length <= 3 ? 'An area needs at least 3 vertices' : 'Delete this vertex (undoable)'}">Delete</button>
+      </li>`;
+    })
+    .join('');
+  return `<section class="terrain-inspector" aria-label="Selected ground cover area">
+    <h3>${esc(groundCoverLabel(feature.category))} area</h3>
+    <label class="field">Category<select data-field="terrain-category" data-id="${esc(feature.id)}">${categoryOptions(feature.category)}</select></label>
+    <div class="kv"><dt>Area</dt><dd>${area === null ? '—' : `${area.toLocaleString('en')} m²`}</dd></div>
+    <div class="kv"><dt>Vertices</dt><dd>${feature.polygon.length}</dd></div>
+    <ol class="terrain-vertex-list">${vertices}</ol>
+    <div class="terrain-actions">
+      <button class="btn-secondary btn-danger" data-action="terrain-delete" data-id="${esc(feature.id)}">Delete area</button>
+    </div>
+    <p class="terrain-hint">Drag a vertex on the map · click a small edge dot to insert a vertex · select a vertex and press Delete to remove it (at least three stay).</p>
+  </section>`;
+}
+
+// Refuse a terrain edit without touching the document: highlight the candidate
+// ring in red and explain why. Nothing is auto-clipped and nothing is
+// committed, so the author can adjust the shape and try again.
+function refuseTerrainEdit(reason, ring, conflictId) {
+  state.terrainRefusal = { ring: Array.isArray(ring) ? ring : [], reason, conflictId };
+  state.status = reason;
+  state.statusError = true;
+  render();
+}
+
+// Drop a terrain selection that the document no longer holds (after undo,
+// redo, or reopening). Called from render so the panels never show a ghost.
+function pruneTerrainSelection() {
+  if (!state.document) {
+    return;
+  }
+  if (state.selectedTerrainId && !selectedGroundFeature(state.document)) {
+    state.selectedTerrainId = null;
+    state.selectedVertexIndex = null;
+  }
+}
+
+function startTerrainDraft() {
+  if (!state.document || state.terrainDraft) {
+    return;
+  }
+  state.terrainDraft = { category: state.draftCategory, points: [], error: '' };
+  state.selectedTerrainId = null;
+  state.selectedVertexIndex = null;
+  state.terrainRefusal = null;
+  ensureMapView(state.document);
+  // Drawing clicks with the hand tool would pan instead, so drafting selects.
+  if (state.mapView.tool === 'hand') {
+    state.mapView = { ...state.mapView, tool: 'select' };
+  }
+  state.status = `Drawing ${groundCoverLabel(state.terrainDraft.category)}: click the map to add vertices, Enter finishes, Esc cancels.`;
+  state.statusError = false;
+  render();
+}
+
+function cancelTerrainDraft() {
+  if (!state.terrainDraft) {
+    return;
+  }
+  state.terrainDraft = null;
+  state.terrainRefusal = null;
+  state.status = 'Drawing cancelled.';
+  state.statusError = false;
+  render();
+}
+
+function addDraftVertex(point) {
+  const draft = state.terrainDraft;
+  if (!draft || !state.document) {
+    return;
+  }
+  const rounded = { x: round1(point.x), y: round1(point.y) };
+  // A double click lands two vertices on the same spot: keep the first and
+  // ignore the repeat, so the draft never holds a zero-length edge.
+  const last = draft.points[draft.points.length - 1];
+  if (last && last.x === rounded.x && last.y === rounded.y) {
+    return;
+  }
+  draft.points.push(rounded);
+  draft.error = '';
+  // A new vertex is a new attempt: the last refusal highlight goes away.
+  state.terrainRefusal = null;
+  state.status = `Drawing ${groundCoverLabel(draft.category)}: ${draft.points.length} vertices — Enter finishes, Esc cancels.`;
+  state.statusError = false;
+  render();
+}
+
+function popDraftVertex() {
+  const draft = state.terrainDraft;
+  if (!draft || draft.points.length === 0) {
+    return;
+  }
+  draft.points.pop();
+  draft.error = '';
+  state.terrainRefusal = null;
+  state.status = `Drawing ${groundCoverLabel(draft.category)}: ${draft.points.length} vertices — Enter finishes, Esc cancels.`;
+  state.statusError = false;
+  render();
+}
+
+function finishTerrainDraft() {
+  const draft = state.terrainDraft;
+  if (!draft || !state.document) {
+    return;
+  }
+  if (draft.points.length < 3) {
+    draft.error = 'An area needs at least 3 vertices.';
+    state.status = draft.error;
+    state.statusError = true;
+    render();
+    return;
+  }
+  const check = validateGroundCoverCandidate(state.document, draft.points);
+  if (!check.ok) {
+    draft.error = `${check.reason[0].toUpperCase()}${check.reason.slice(1)}.`;
+    refuseTerrainEdit(
+      `Cannot add a ground cover area: ${check.reason}.`,
+      check.ring,
+      check.conflictId,
+    );
+    return;
+  }
+  let next;
+  try {
+    next = addGroundCoverFeature(state.document, { category: draft.category, polygon: draft.points });
+  } catch (error) {
+    draft.error = error.message;
+    refuseTerrainEdit(error.message, draft.points, undefined);
+    return;
+  }
+  const before = new Set((state.document.terrainFeatures || []).map((feature) => feature?.id));
+  const added = (next.terrainFeatures || []).find((feature) => feature && !before.has(feature.id));
+  const drawn = JSON.stringify(draft.points.map((point) => ({ x: round1(point.x), y: round1(point.y) })));
+  const clipped = added && JSON.stringify(added.polygon) !== drawn;
+  state.terrainDraft = null;
+  state.draftCategory = draft.category;
+  state.selectedTerrainId = added ? added.id : null;
+  state.selectedVertexIndex = null;
+  commitEdit(next);
+  toast(
+    clipped
+      ? `${groundCoverLabel(draft.category)} area added, clipped to the battlefield.`
+      : `${groundCoverLabel(draft.category)} area added.`,
+  );
+}
+
+function selectTerrainFeature(id, vertexIndex = null) {
+  if (!state.document) {
+    return;
+  }
+  state.selectedTerrainId = id;
+  state.selectedVertexIndex = vertexIndex;
+  state.terrainRefusal = null;
+  render();
+}
+
+function commitTerrainCategory(id, category) {
+  if (!state.document) {
+    return;
+  }
+  let next;
+  try {
+    next = updateGroundCoverFeature(state.document, id, { category });
+  } catch (error) {
+    state.status = error.message;
+    state.statusError = true;
+    render();
+    return;
+  }
+  commitEdit(next);
+  toast(`Area is now ${groundCoverLabel(category)}.`);
+}
+
+function deleteTerrainFeature(id) {
+  if (!state.document) {
+    return;
+  }
+  const feature = groundFeatures(state.document).find((entry) => entry.id === id);
+  let next;
+  try {
+    next = removeGroundCoverFeature(state.document, id);
+  } catch (error) {
+    state.status = error.message;
+    state.statusError = true;
+    render();
+    return;
+  }
+  if (state.selectedTerrainId === id) {
+    state.selectedTerrainId = null;
+    state.selectedVertexIndex = null;
+  }
+  commitEdit(next);
+  toast(`${groundCoverLabel(feature?.category)} area deleted. Undo restores it.`);
+}
+
+function insertTerrainVertex(featureId, edgeIndex) {
+  if (!state.document) {
+    return;
+  }
+  const feature = groundFeatures(state.document).find((entry) => entry.id === featureId);
+  if (!feature) {
+    return;
+  }
+  const ring = feature.polygon;
+  const a = ring[edgeIndex];
+  const b = ring[(edgeIndex + 1) % ring.length];
+  if (!a || !b) {
+    return;
+  }
+  const midpoint = { x: round1((a.x + b.x) / 2), y: round1((a.y + b.y) / 2) };
+  const polygon = [...ring.slice(0, edgeIndex + 1), midpoint, ...ring.slice(edgeIndex + 1)];
+  const check = validateGroundCoverCandidate(state.document, polygon, { ignoreId: featureId });
+  if (!check.ok) {
+    refuseTerrainEdit(`Cannot insert a vertex: ${check.reason}.`, check.ring, check.conflictId);
+    return;
+  }
+  commitEdit(updateGroundCoverFeature(state.document, featureId, { polygon: check.ring }));
+  state.selectedTerrainId = featureId;
+  state.selectedVertexIndex = edgeIndex + 1;
+  render();
+  toast('Vertex inserted.');
+}
+
+function deleteTerrainVertex(featureId, index) {
+  if (!state.document) {
+    return;
+  }
+  const feature = groundFeatures(state.document).find((entry) => entry.id === featureId);
+  if (!feature || !feature.polygon[index]) {
+    return;
+  }
+  if (feature.polygon.length <= 3) {
+    state.status = 'An area needs at least 3 vertices: the vertex stays.';
+    state.statusError = true;
+    render();
+    return;
+  }
+  const polygon = feature.polygon.filter((_, other) => other !== index);
+  const check = validateGroundCoverCandidate(state.document, polygon, { ignoreId: featureId });
+  if (!check.ok) {
+    refuseTerrainEdit(`Cannot delete the vertex: ${check.reason}.`, check.ring, check.conflictId);
+    return;
+  }
+  commitEdit(updateGroundCoverFeature(state.document, featureId, { polygon: check.ring }));
+  state.selectedTerrainId = featureId;
+  state.selectedVertexIndex = null;
+  render();
+  toast('Vertex deleted.');
+}
+
+function commitDraggedVertex(featureId, index, point) {
+  if (!state.document) {
+    return;
+  }
+  const feature = groundFeatures(state.document).find((entry) => entry.id === featureId);
+  if (!feature || !feature.polygon[index]) {
+    return;
+  }
+  const polygon = feature.polygon.map((vertex, other) =>
+    other === index ? { x: round1(point.x), y: round1(point.y) } : vertex,
+  );
+  const check = validateGroundCoverCandidate(state.document, polygon, { ignoreId: featureId });
+  if (!check.ok) {
+    refuseTerrainEdit(`Cannot move the vertex: ${check.reason}.`, check.ring, check.conflictId);
+    return;
+  }
+  commitEdit(updateGroundCoverFeature(state.document, featureId, { polygon: check.ring }));
+  state.selectedTerrainId = featureId;
+  state.selectedVertexIndex = index;
+  render();
+}
+
 function mapToolbarView() {
   const view = state.mapView;
   const zoom = clampMapZoom(view?.zoom);
@@ -1297,12 +1767,13 @@ function editorView() {
       <button class="btn-primary" data-action="save">Save</button>
     </div>
     <main class="workspace">
-      <aside class="left-panel">${orderOfBattleView(document)}</aside>
+      <aside class="left-panel">${leftPanelView(document)}</aside>
       <section class="map-panel">
         <div class="map-caption">${metres(width)} × ${metres(height)} · origin south-west · metres</div>
         ${mapToolbarView()}
-        <div class="map-viewport${state.mapView.tool === 'hand' ? ' tool-hand' : ''}${state.spaceHeld ? ' space-pan' : ''}">
-          ${battlefieldSvg(document, state.mapView)}
+        <div class="map-viewport${state.mapView.tool === 'hand' ? ' tool-hand' : ''}${state.spaceHeld ? ' space-pan' : ''}${state.terrainDraft ? ' drafting' : ''}">
+          ${battlefieldSvg(document, state.mapView, terrainOverlay(document))}
+          ${state.terrainDraft ? `<p class="map-terrain-hint" role="status">Drawing ${esc(groundCoverLabel(state.terrainDraft.category))} · ${state.terrainDraft.points.length} vertices · click the map, Enter finishes, Esc cancels</p>` : ''}
           <div class="map-status">
             <span class="scale-bar" aria-label="Scale bar"><span id="scale-bar"></span><span id="scale-bar-label">—</span></span>
             <span id="cursor-coords" class="cursor-coords" aria-label="Cursor coordinates in metres">X — · Y —</span>
@@ -1336,6 +1807,7 @@ function conflictDialogView() {
 }
 
 function render(refocusSelector) {
+  pruneTerrainSelection();
   $('#app').innerHTML = state.view === 'editor' ? editorView() : libraryView();
   if (refocusSelector) {
     document.querySelector(refocusSelector)?.focus();
@@ -1403,6 +1875,11 @@ async function openScenario(id) {
   state.selectedUnitId = null;
   state.unitConflictIds = [];
   state.view = 'editor';
+  state.leftMode = 'forces';
+  state.selectedTerrainId = null;
+  state.selectedVertexIndex = null;
+  state.terrainDraft = null;
+  state.terrainRefusal = null;
   // Fresh camera on the new battlefield; keep the author's grid/tool preference.
   state.mapView = {
     ...fitMapView(document.battlefield),
@@ -1414,6 +1891,17 @@ async function openScenario(id) {
   setStatusAfterRender(`Opened · rev. ${state.revision}`);
   render();
   setStatus(`Opened · rev. ${state.revision}`);
+}
+
+// The terrain overlay is display state (draft, selection, refusal): it never
+// touches the document and never marks the scenario as unsaved.
+function terrainOverlay(document) {
+  return {
+    selectedId: state.selectedTerrainId,
+    selectedIndex: state.selectedVertexIndex,
+    draft: state.terrainDraft,
+    refusal: state.terrainRefusal,
+  };
 }
 
 // Display-only map navigation: none of these branches touch the scenario
@@ -1476,9 +1964,83 @@ function bindMap() {
     { passive: false },
   );
 
+  // Terrain clicks: drawing adds a vertex, an edge dot inserts one, a ground
+  // polygon selects its area, and empty map clears the selection. Panning
+  // (hand tool, Space, middle button) always wins over terrain clicks.
+  svg.addEventListener('click', (event) => {
+    if (suppressMapClick) {
+      suppressMapClick = false;
+      return;
+    }
+    if (!state.document || event.ctrlKey || event.metaKey || event.altKey) return;
+    const handActive = state.mapView.tool === 'hand' || state.spaceHeld;
+    if (handActive) return;
+    const target = event.target;
+    const vertexHandle = target?.closest?.('[data-vertex-index]');
+    const edgeHandle = target?.closest?.('[data-edge-index]');
+    if (state.terrainDraft) {
+      // Handles have their own pointer handlers; anywhere else adds a vertex.
+      if (vertexHandle || edgeHandle) return;
+      const cursor = svgToMap(svg, event.clientX, event.clientY);
+      if (!cursor) return;
+      addDraftVertex(cursor);
+      return;
+    }
+    if (edgeHandle) {
+      insertTerrainVertex(
+        edgeHandle.dataset.featureId,
+        Number(edgeHandle.dataset.edgeIndex),
+      );
+      return;
+    }
+    if (vertexHandle) {
+      selectTerrainFeature(
+        vertexHandle.dataset.featureId,
+        Number(vertexHandle.dataset.vertexIndex),
+      );
+      return;
+    }
+    const ground = target?.closest?.('[data-feature-id]');
+    if (ground && ground.dataset.featureId) {
+      if (state.leftMode === 'terrain') selectTerrainFeature(ground.dataset.featureId);
+      return;
+    }
+    if (state.leftMode === 'terrain' && (state.selectedTerrainId || state.selectedVertexIndex !== null)) {
+      state.selectedTerrainId = null;
+      state.selectedVertexIndex = null;
+      render();
+    }
+  });
+
   let pan = null;
   svg.addEventListener('pointerdown', (event) => {
+    // Dragging a vertex moves it; the pointerup commits one undo step, and a
+    // refused move highlights the candidate and keeps the old geometry.
+    const handle = event.target?.closest?.('[data-vertex-index]');
     const handActive = state.mapView.tool === 'hand' || state.spaceHeld || event.button === 1;
+    if (
+      handle &&
+      !state.terrainDraft &&
+      !handActive &&
+      event.button === 0 &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey
+    ) {
+      event.preventDefault();
+      terrainDrag = {
+        featureId: handle.dataset.featureId,
+        index: Number(handle.dataset.vertexIndex),
+        pointerId: event.pointerId,
+        pending: null,
+      };
+      try {
+        svg.setPointerCapture(event.pointerId);
+      } catch {
+        // Pointer capture is best-effort; dragging still works without it.
+      }
+      return;
+    }
     if (!handActive || (event.button !== 0 && event.button !== 1)) return;
     event.preventDefault();
     pan = { x: event.clientX, y: event.clientY };
@@ -1505,6 +2067,22 @@ function bindMap() {
         coords.textContent = 'X — · Y —';
       }
     }
+    if (terrainDrag && event.pointerId === terrainDrag.pointerId) {
+      if (cursor) {
+        const pending = { x: round1(cursor.x), y: round1(cursor.y) };
+        terrainDrag.pending = pending;
+        // Move the handle under the pointer without re-rendering: the
+        // document only changes on pointerup.
+        const handle = svg.querySelector(
+          `[data-vertex-index="${terrainDrag.index}"]`,
+        );
+        if (handle) {
+          handle.setAttribute('cx', String(pending.x));
+          handle.setAttribute('cy', String(state.document.battlefield.height - pending.y));
+        }
+      }
+      return;
+    }
     if (!pan) return;
     const dxPx = event.clientX - pan.x;
     const dyPx = event.clientY - pan.y;
@@ -1516,8 +2094,29 @@ function bindMap() {
     pan = null;
     viewport.classList.remove('panning');
   };
-  svg.addEventListener('pointerup', endPan);
-  svg.addEventListener('pointercancel', endPan);
+  const endDrag = (event) => {
+    if (terrainDrag && event.pointerId === terrainDrag.pointerId) {
+      const { featureId, index, pending } = terrainDrag;
+      terrainDrag = null;
+      // The pointerup after a drag must not also add a draft vertex.
+      suppressMapClick = true;
+      if (pending) {
+        commitDraggedVertex(featureId, index, pending);
+      } else {
+        selectTerrainFeature(featureId, index);
+      }
+      return true;
+    }
+    return false;
+  };
+  svg.addEventListener('pointerup', (event) => {
+    if (endDrag(event)) return;
+    endPan();
+  });
+  svg.addEventListener('pointercancel', (event) => {
+    if (endDrag(event)) return;
+    endPan();
+  });
   svg.addEventListener('pointerleave', () => {
     const coords = $('#cursor-coords');
     if (coords && !pan) coords.textContent = 'X — · Y —';
@@ -1761,6 +2360,38 @@ document.addEventListener('click', async (event) => {
     redoEdit('[data-action="redo"]');
     return;
   }
+  if (action === 'left-mode') {
+    const mode = element.dataset.mode === 'terrain' ? 'terrain' : 'forces';
+    if (state.leftMode !== mode) {
+      state.leftMode = mode;
+      render();
+    }
+    return;
+  }
+  if (action === 'terrain-draw-start') {
+    startTerrainDraft();
+    return;
+  }
+  if (action === 'terrain-draw-finish') {
+    finishTerrainDraft();
+    return;
+  }
+  if (action === 'terrain-draw-cancel') {
+    cancelTerrainDraft();
+    return;
+  }
+  if (action === 'terrain-select') {
+    selectTerrainFeature(id);
+    return;
+  }
+  if (action === 'terrain-delete') {
+    deleteTerrainFeature(id);
+    return;
+  }
+  if (action === 'terrain-vertex-delete') {
+    deleteTerrainVertex(state.selectedTerrainId, Number(element.dataset.index));
+    return;
+  }
   if (action === 'back') {
     if (isDirty() && !window.confirm('You have unsaved changes. Leave the editor without saving?')) {
       return;
@@ -1887,6 +2518,26 @@ document.addEventListener('change', (event) => {
   if (field === 'side-color') {
     commitSideColor(Number(event.target.dataset.index), event.target.value);
   }
+  // Terrain fields never hold invalid values: the category selects only offer
+  // known categories, and every geometry commit validates before touching
+  // the document.
+  if (field === 'terrain-new-category') {
+    state.draftCategory = GROUND_COVER_CATEGORIES.includes(event.target.value)
+      ? event.target.value
+      : 'forest';
+    return;
+  }
+  if (field === 'terrain-draft-category') {
+    if (state.terrainDraft && GROUND_COVER_CATEGORIES.includes(event.target.value)) {
+      state.terrainDraft.category = event.target.value;
+      state.terrainDraft.error = '';
+      render();
+    }
+    return;
+  }
+  if (field === 'terrain-category') {
+    commitTerrainCategory(event.target.dataset.id, event.target.value);
+  }
 });
 
 document.addEventListener('keydown', (event) => {
@@ -1961,6 +2612,33 @@ document.addEventListener('keydown', (event) => {
     return;
   }
   if (isEditableTarget(event.target) || event.ctrlKey || event.metaKey || event.altKey) return;
+  // Terrain drawing finishes or cancels from the keyboard: Enter finishes the
+  // polygon, Escape cancels it, Backspace removes the last vertex.
+  if (state.terrainDraft) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      finishTerrainDraft();
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      cancelTerrainDraft();
+      return;
+    }
+    if (event.key === 'Backspace') {
+      event.preventDefault();
+      popDraftVertex();
+      return;
+    }
+  } else if (
+    (event.key === 'Delete' || event.key === 'Backspace') &&
+    state.selectedTerrainId &&
+    state.selectedVertexIndex !== null
+  ) {
+    event.preventDefault();
+    deleteTerrainVertex(state.selectedTerrainId, state.selectedVertexIndex);
+    return;
+  }
   const key = event.key.toLowerCase();
   if (key === 'h') {
     ensureMapView(state.document);
@@ -1968,6 +2646,12 @@ document.addEventListener('keydown', (event) => {
   } else if (key === 'v' || key === 'escape') {
     ensureMapView(state.document);
     setMapView({ ...state.mapView, tool: 'select' });
+    if (key === 'escape' && (state.selectedTerrainId || state.selectedVertexIndex !== null)) {
+      state.selectedTerrainId = null;
+      state.selectedVertexIndex = null;
+      state.terrainRefusal = null;
+      render();
+    }
   } else if (key === 'g') {
     ensureMapView(state.document);
     setMapView({ ...state.mapView, showGrid: !state.mapView.showGrid });

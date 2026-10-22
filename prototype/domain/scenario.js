@@ -33,6 +33,7 @@
 import {
   clipPathToRect,
   clipPolygonToRect,
+  dedupePoints,
   deriveFootprint,
   isSimplePolygon,
   locatePoint,
@@ -738,6 +739,181 @@ export function resizeBattlefield(document, width, height) {
     .map((feature) => clipTerrainFeatureToBounds(feature, nextWidth, nextHeight))
     .filter(Boolean);
   return roundScenarioToTenth(copy);
+}
+
+// --- Ground cover editing (Terrain mode) --------------------------------------
+// The editor draws and edits ground cover areas (forest, rough ground, water,
+// settlement; open ground is the default and needs no feature) through these
+// pure helpers, so the browser editor, the browser end-to-end test, and Node
+// unit tests share one rules boundary (decisions #2 item 7, #4 items 7, 14):
+//
+// - drawn vertices are rounded to 0.1 m and clipped to the battlefield; the
+//   stored vertices are exactly the clipped boundary (#2 item 8, #4 item 7);
+// - a self-intersecting polygon, or one overlapping an existing ground cover
+//   area, is refused — never auto-clipped (#4 item 14). The refusal carries
+//   the candidate ring so the editor can highlight the conflicting area;
+// - touching edge to edge stays legal: only positive-area overlap is refused.
+function roundRing(points) {
+  return points.map((point) => ({ x: round1(point.x), y: round1(point.y) }));
+}
+
+function groundCoverById(document, id) {
+  return (document.terrainFeatures || []).find(
+    (feature) => feature && feature.kind === 'ground' && feature.id === id,
+  );
+}
+
+// Check a candidate ground cover polygon against the document without mutating
+// anything. Returns { ok: true, ring } with the exact vertices to store, or
+// { ok: false, reason, ring, conflictId? } describing the refusal. `ring` is
+// the highlight the editor shows: the clipped candidate for overlaps, the
+// drawn shape for self-intersections, and whatever survived for degenerate
+// input. `ignoreId` exempts one feature, so moving a vertex of a feature never
+// conflicts with the feature itself.
+export function validateGroundCoverCandidate(document, points, options = {}) {
+  const { ignoreId = null } = options;
+  const battlefield = document?.battlefield;
+  if (
+    !battlefield ||
+    !Number.isFinite(battlefield.width) ||
+    !Number.isFinite(battlefield.height)
+  ) {
+    return { ok: false, reason: 'the battlefield size is missing', ring: [] };
+  }
+  if (!Array.isArray(points) || points.length < 3) {
+    return { ok: false, reason: 'a ground cover area needs at least 3 vertices', ring: [] };
+  }
+  if (points.some((point) => !Number.isFinite(point?.x) || !Number.isFinite(point?.y))) {
+    return {
+      ok: false,
+      reason: 'a ground cover area must hold finite x and y metre coordinates',
+      ring: [],
+    };
+  }
+  const drawn = dedupePoints(roundRing(points));
+  if (drawn.length < 3) {
+    return {
+      ok: false,
+      reason: 'a ground cover area needs at least 3 distinct vertices',
+      ring: drawn,
+    };
+  }
+  if (!isSimplePolygon(drawn)) {
+    return {
+      ok: false,
+      reason: 'the polygon must be simple (no self-intersection)',
+      ring: drawn,
+    };
+  }
+  const clipped = dedupePoints(
+    roundRing(clipPolygonToRect(drawn, battlefield.width, battlefield.height)),
+  );
+  if (clipped.length < 3 || !(polygonArea(clipped) > 0)) {
+    return { ok: false, reason: 'the polygon lies outside the battlefield', ring: drawn };
+  }
+  if (!isSimplePolygon(clipped)) {
+    return {
+      ok: false,
+      reason: 'the polygon must be simple (no self-intersection)',
+      ring: clipped,
+    };
+  }
+  const grounds = (document.terrainFeatures || []).filter(
+    (feature) => feature && feature.kind === 'ground' && feature.id !== ignoreId,
+  );
+  for (const other of grounds) {
+    if (
+      Array.isArray(other.polygon) &&
+      other.polygon.length >= 3 &&
+      polygonsOverlapPositiveArea(clipped, other.polygon)
+    ) {
+      return {
+        ok: false,
+        reason: `the polygon overlaps the existing ${other.category || 'ground cover'} area`,
+        ring: clipped,
+        conflictId: other.id,
+      };
+    }
+  }
+  return { ok: true, ring: clipped };
+}
+
+// Draw a new ground cover area: validates the candidate, clips it to the
+// battlefield, and returns a new document with the feature appended. Throws a
+// human-readable error when the category is unknown or the candidate is
+// refused. Never mutates its input.
+export function addGroundCoverFeature(document, { category, polygon } = {}) {
+  if (!document || typeof document !== 'object') {
+    throw new Error('Cannot add a ground cover area: the scenario must be an object.');
+  }
+  if (!GROUND_COVER_CATEGORIES.includes(category)) {
+    throw new Error(
+      `Cannot add a ground cover area: category must be one of ${GROUND_COVER_CATEGORIES.join(', ')}.`,
+    );
+  }
+  const candidate = validateGroundCoverCandidate(document, polygon);
+  if (!candidate.ok) {
+    throw new Error(`Cannot add a ground cover area: ${candidate.reason}.`);
+  }
+  const copy = cloneScenario(document);
+  copy.terrainFeatures = Array.isArray(copy.terrainFeatures) ? copy.terrainFeatures : [];
+  copy.terrainFeatures.push({
+    id: generateId(),
+    kind: 'ground',
+    category,
+    polygon: candidate.ring,
+  });
+  return roundScenarioToTenth(copy);
+}
+
+// Change the category and/or polygon of one ground cover area. A polygon edit
+// is checked against every other ground cover area but never against the
+// feature itself. Throws when the feature is missing, the category is unknown,
+// or the candidate polygon is refused. Never mutates its input.
+export function updateGroundCoverFeature(document, id, patch = {}) {
+  if (!document || typeof document !== 'object') {
+    throw new Error('Cannot edit a ground cover area: the scenario must be an object.');
+  }
+  const existing = groundCoverById(document, id);
+  if (!existing) {
+    throw new Error('Cannot edit a ground cover area: no ground cover area with that id.');
+  }
+  const category = patch.category === undefined ? existing.category : patch.category;
+  if (!GROUND_COVER_CATEGORIES.includes(category)) {
+    throw new Error(
+      `Cannot edit a ground cover area: category must be one of ${GROUND_COVER_CATEGORIES.join(', ')}.`,
+    );
+  }
+  let polygon = existing.polygon;
+  if (patch.polygon !== undefined) {
+    const candidate = validateGroundCoverCandidate(document, patch.polygon, { ignoreId: id });
+    if (!candidate.ok) {
+      throw new Error(`Cannot edit a ground cover area: ${candidate.reason}.`);
+    }
+    polygon = candidate.ring;
+  }
+  const copy = cloneScenario(document);
+  const index = copy.terrainFeatures.findIndex(
+    (feature) => feature && feature.kind === 'ground' && feature.id === id,
+  );
+  copy.terrainFeatures[index] = { ...copy.terrainFeatures[index], category, polygon };
+  return roundScenarioToTenth(copy);
+}
+
+// Delete a whole ground cover area. Throws when the feature is missing. Never
+// mutates its input.
+export function removeGroundCoverFeature(document, id) {
+  if (!document || typeof document !== 'object') {
+    throw new Error('Cannot delete a ground cover area: the scenario must be an object.');
+  }
+  if (!groundCoverById(document, id)) {
+    throw new Error('Cannot delete a ground cover area: no ground cover area with that id.');
+  }
+  const copy = cloneScenario(document);
+  copy.terrainFeatures = copy.terrainFeatures.filter(
+    (feature) => !(feature && feature.kind === 'ground' && feature.id === id),
+  );
+  return copy;
 }
 
 export function isUuid(value) {

@@ -15,6 +15,7 @@ import {
   SCENARIO_FORMAT_VERSION,
   SCENARIO_KIND,
   ScenarioImportError,
+  addGroundCoverFeature,
   clampMapZoom,
   cloneScenario,
   collectWarnings,
@@ -36,6 +37,7 @@ import {
   niceScaleBarMetres,
   panMapViewByPixels,
   parseScenarioImport,
+  removeGroundCoverFeature,
   resizeBattlefield,
   roundScenarioToTenth,
   scenarioFileName,
@@ -44,6 +46,8 @@ import {
   unitFacingDeg,
   unitFootprint,
   unitPosition,
+  updateGroundCoverFeature,
+  validateGroundCoverCandidate,
   validateScenario,
   zoomViewAroundCursor,
 } from './scenario.js';
@@ -831,5 +835,192 @@ describe('order of battle helpers', () => {
     assert.ok(clear);
     assert.ok(clear.x >= 100 && clear.x <= 200);
     assert.ok(clear.y >= 100 && clear.y <= 200);
+  });
+});
+
+describe('ground cover editing', () => {
+  it('adds an area with a generated id and rounds vertices to 0.1 m', () => {
+    const document = freshDocument();
+    const added = addGroundCoverFeature(document, {
+      category: 'forest',
+      polygon: [
+        { x: 100.04, y: 100.06 },
+        { x: 200.04, y: 100.06 },
+        { x: 150.04, y: 180.06 },
+      ],
+    });
+    assert.equal(added.terrainFeatures.length, 1);
+    const [feature] = added.terrainFeatures;
+    assert.ok(isUuid(feature.id));
+    assert.equal(feature.kind, 'ground');
+    assert.equal(feature.category, 'forest');
+    assert.deepEqual(feature.polygon, [
+      { x: 100, y: 100.1 },
+      { x: 200, y: 100.1 },
+      { x: 150, y: 180.1 },
+    ]);
+    assert.deepEqual(validateScenario(added), []);
+    // The input document is never mutated.
+    assert.deepEqual(document.terrainFeatures, []);
+  });
+
+  it('clips a partly-outside polygon to the battlefield and stores the clipped boundary', () => {
+    const document = freshDocument();
+    const candidate = validateGroundCoverCandidate(document, [
+      { x: -50, y: 100 },
+      { x: 200, y: 100 },
+      { x: 200, y: 300 },
+      { x: -50, y: 300 },
+    ]);
+    assert.equal(candidate.ok, true);
+    assert.ok(candidate.ring.every((point) => point.x >= 0 && point.y >= 0));
+    assert.ok(candidate.ring.some((point) => point.x === 0));
+    const added = addGroundCoverFeature(document, {
+      category: 'rough',
+      polygon: [
+        { x: -50, y: 100 },
+        { x: 200, y: 100 },
+        { x: 200, y: 300 },
+        { x: -50, y: 300 },
+      ],
+    });
+    assert.deepEqual(added.terrainFeatures[0].polygon, candidate.ring);
+    assert.deepEqual(validateScenario(added), []);
+  });
+
+  it('refuses a polygon left empty by clipping', () => {
+    const document = freshDocument();
+    const candidate = validateGroundCoverCandidate(document, square(5000, 5000, 50));
+    assert.equal(candidate.ok, false);
+    assert.match(candidate.reason, /outside the battlefield/);
+    assert.throws(
+      () =>
+        addGroundCoverFeature(document, { category: 'forest', polygon: square(5000, 5000, 50) }),
+      /outside the battlefield/,
+    );
+  });
+
+  it('refuses a self-intersecting polygon with a highlight ring', () => {
+    const document = freshDocument();
+    const bowtie = [
+      { x: 100, y: 100 },
+      { x: 200, y: 200 },
+      { x: 200, y: 100 },
+      { x: 100, y: 200 },
+    ];
+    const candidate = validateGroundCoverCandidate(document, bowtie);
+    assert.equal(candidate.ok, false);
+    assert.match(candidate.reason, /self-intersection/);
+    assert.ok(Array.isArray(candidate.ring) && candidate.ring.length >= 3);
+    assert.throws(
+      () => addGroundCoverFeature(document, { category: 'forest', polygon: bowtie }),
+      /self-intersection/,
+    );
+  });
+
+  it('refuses an area overlapping an existing one and names the conflict', () => {
+    const withForest = addGroundCoverFeature(freshDocument(), {
+      category: 'forest',
+      polygon: square(100, 100),
+    });
+    const candidate = validateGroundCoverCandidate(withForest, square(150, 150, 100));
+    assert.equal(candidate.ok, false);
+    assert.match(candidate.reason, /overlap/);
+    assert.equal(candidate.conflictId, withForest.terrainFeatures[0].id);
+    assert.ok(Array.isArray(candidate.ring) && candidate.ring.length >= 3);
+    assert.throws(
+      () =>
+        addGroundCoverFeature(withForest, { category: 'water', polygon: square(150, 150, 100) }),
+      /overlap/,
+    );
+    // Touching edge to edge stays legal.
+    const touching = validateGroundCoverCandidate(withForest, [
+      { x: 200, y: 100 },
+      { x: 300, y: 100 },
+      { x: 300, y: 200 },
+      { x: 200, y: 200 },
+    ]);
+    assert.equal(touching.ok, true);
+  });
+
+  it('updates the category and moves a vertex without conflicting with itself', () => {
+    const withForest = addGroundCoverFeature(freshDocument(), {
+      category: 'forest',
+      polygon: square(100, 100),
+    });
+    const id = withForest.terrainFeatures[0].id;
+    const recategorised = updateGroundCoverFeature(withForest, id, { category: 'water' });
+    assert.equal(recategorised.terrainFeatures[0].category, 'water');
+    assert.deepEqual(validateScenario(recategorised), []);
+    const moved = updateGroundCoverFeature(withForest, id, {
+      polygon: [
+        { x: 100, y: 100 },
+        { x: 210, y: 100 },
+        { x: 200, y: 200 },
+        { x: 100, y: 200 },
+      ],
+    });
+    assert.deepEqual(validateScenario(moved), []);
+    assert.throws(
+      () => updateGroundCoverFeature(withForest, id, { category: 'lava' }),
+      /category must be one of/,
+    );
+  });
+
+  it('refuses an edit that would overlap a sibling area', () => {
+    let document = addGroundCoverFeature(freshDocument(), {
+      category: 'forest',
+      polygon: square(100, 100),
+    });
+    document = addGroundCoverFeature(document, { category: 'rough', polygon: square(400, 100) });
+    const roughId = document.terrainFeatures[1].id;
+    const candidate = validateGroundCoverCandidate(document, square(150, 150, 100), {
+      ignoreId: document.terrainFeatures[0].id,
+    });
+    assert.equal(candidate.ok, true);
+    assert.throws(
+      () => updateGroundCoverFeature(document, roughId, { polygon: square(150, 150, 100) }),
+      /overlap/,
+    );
+    assert.throws(() => updateGroundCoverFeature(document, 'missing-id', {}), /no ground cover area/);
+  });
+
+  it('refuses a polygon with fewer than three distinct vertices', () => {
+    const document = freshDocument();
+    assert.throws(
+      () =>
+        addGroundCoverFeature(document, {
+          category: 'forest',
+          polygon: [
+            { x: 100, y: 100 },
+            { x: 200, y: 100 },
+          ],
+        }),
+      /at least 3/,
+    );
+    assert.throws(
+      () =>
+        addGroundCoverFeature(document, {
+          category: 'forest',
+          polygon: [
+            { x: 100, y: 100 },
+            { x: 100, y: 100 },
+            { x: 100, y: 100 },
+          ],
+        }),
+      /at least 3/,
+    );
+  });
+
+  it('removes a whole area', () => {
+    let document = addGroundCoverFeature(freshDocument(), {
+      category: 'settlement',
+      polygon: square(100, 100),
+    });
+    const id = document.terrainFeatures[0].id;
+    document = removeGroundCoverFeature(document, id);
+    assert.deepEqual(document.terrainFeatures, []);
+    assert.deepEqual(validateScenario(document), []);
+    assert.throws(() => removeGroundCoverFeature(document, id), /no ground cover area/);
   });
 });
