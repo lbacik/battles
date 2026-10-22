@@ -138,7 +138,7 @@ describe('player view', () => {
 });
 
 describe('available actions', () => {
-  it('permits only Hold per unit, with reasons for the rest', () => {
+  it('permits Hold and Move per unit, with reasons for the rest', () => {
     const battle = freshBattle();
     const actions = availableActions(battle, battle.activeSide);
     assert.equal(actions.formatVersion, AVAILABLE_ACTIONS_FORMAT_VERSION);
@@ -146,16 +146,19 @@ describe('available actions', () => {
     const own = battle.units.filter((unit) => unit.side === battle.activeSide);
     assert.equal(actions.units.length, own.length);
     for (const entry of actions.units) {
-      assert.deepEqual(entry.permitted, [{ kind: ORDER_KIND_HOLD }]);
-      assert.deepEqual(entry.permitted, [{ kind: 'Hold' }]);
+      assert.deepEqual(entry.permitted, [{ kind: ORDER_KIND_HOLD }, { kind: 'Move' }]);
       const kinds = entry.unavailable.map((item) => item.kind).sort();
-      assert.deepEqual(kinds, ['Charge', 'Move', 'Shoot']);
+      assert.deepEqual(kinds, ['Charge', 'Shoot']);
       for (const item of entry.unavailable) {
         assert.ok(item.code && item.reason, 'unavailable kinds name a reason');
       }
       assert.deepEqual(entry.chargeCandidates, []);
       assert.deepEqual(entry.shootCandidates, []);
-      assert.equal(entry.movementAllowanceM, 0);
+      const source = battle.units.find((unit) => unit.id === entry.unitId);
+      assert.ok(
+        Number.isFinite(entry.movementAllowanceM) && entry.movementAllowanceM > 0,
+        `unit ${entry.unitId} (${source.troopType}) names a positive allowance in metres`,
+      );
     }
   });
 

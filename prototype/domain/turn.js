@@ -1,13 +1,15 @@
 // PÓLIS engine — turn contract: player view, available actions, order
 // validation, and turn resolution (framework-free).
 //
-// The second slice of the framework-free engine package: two Passive players
-// can play a battle turn after turn through the shared player contract and a
-// runner (see `./players.js`), with Hold as the only order. This module is
-// the tracer bullet for the whole turn contract of ADR 0005. It imports only
-// the domain model, the ruleset package, and the plane geometry helpers —
-// no React, no Next.js, no DOM, no Node APIs — so it runs unchanged in the
-// browser, in Node unit tests, and in any future shell.
+// The manoeuvre slice of the framework-free engine package: two Passive
+// players can play a battle turn after turn through the shared player
+// contract and a runner (see `./players.js`), with Hold and Move orders. An
+// accepted Move carries a deterministic preview of the unit's footprint after
+// the Movement phase, and resolution executes moves in the given order (see
+// `./movement.js` for the geometry). This module imports only the domain
+// model, the ruleset package, and the plane geometry helpers — no React, no
+// Next.js, no DOM, no Node APIs — so it runs unchanged in the browser, in
+// Node unit tests, and in any future shell.
 //
 // The contract, per ADR 0005:
 //
@@ -25,11 +27,18 @@
 // Turns alternate between the two sides (ADR 0004): one side gives its
 // orders and has them resolved, then the other side does the same, and a
 // pair of turns forms a round. Resolution runs the Movement, Shooting,
-// Combat, and Cohesion phases — empty in this slice, because Hold is the
-// only order — then passes the turn and counts rounds as pairs of turns.
+// Combat, and Cohesion phases — the Movement phase executes the accepted
+// moves in order, the rest stay empty until their slices land — then passes
+// the turn and counts rounds as pairs of turns.
 
-import { deriveFootprint } from './geometry.js';
-import { TROOP_TYPE_CATALOGUE } from './polis-classical.js';
+import { deriveFootprint, round1 } from './geometry.js';
+import { RULESET_PARAMETERS, TROOP_TYPE_CATALOGUE } from './polis-classical.js';
+import {
+  footprintAt,
+  movementAllowanceM,
+  normalizeFacing,
+  validateMoveOnField,
+} from './movement.js';
 import {
   BATTLE_STATUS_CONCEDED,
   BATTLE_STATUS_ONGOING,
@@ -44,11 +53,11 @@ export const SUBMISSION_FORMAT_VERSION = TURN_CONTRACT_VERSION;
 export const PLAYER_VIEW_FORMAT_VERSION = TURN_CONTRACT_VERSION;
 export const AVAILABLE_ACTIONS_FORMAT_VERSION = TURN_CONTRACT_VERSION;
 
-// Order kinds. Hold is the only permitted order in this slice; Move, Charge,
-// and Shoot are known kinds the engine reports as unavailable until their
-// slices land.
+// Order kinds. Hold and Move are permitted in this slice; Charge and Shoot
+// are known kinds the engine reports as unavailable until their slices land.
 export const ORDER_KIND_HOLD = 'Hold';
-export const ORDER_KINDS = Object.freeze([ORDER_KIND_HOLD]);
+export const ORDER_KIND_MOVE = 'Move';
+export const ORDER_KINDS = Object.freeze([ORDER_KIND_HOLD, ORDER_KIND_MOVE]);
 export const KNOWN_ORDER_KINDS = Object.freeze(['Hold', 'Move', 'Charge', 'Shoot']);
 
 // Resolution phases, in order. Each runs every turn, even while empty.
@@ -60,6 +69,13 @@ export const REJECTION_UNKNOWN_UNIT = 'unknown_unit';
 export const REJECTION_NOT_OWN_UNIT = 'not_own_unit';
 export const REJECTION_DUPLICATE_UNIT_ORDER = 'duplicate_unit_order';
 export const REJECTION_UNSUPPORTED_ORDER_KIND = 'unsupported_order_kind';
+// Move rejection codes (see `./movement.js` for the check order and the
+// `details` shapes).
+export const REJECTION_INVALID_MOVE = 'invalid_move';
+export const REJECTION_COLLISION = 'collision';
+export const REJECTION_BATTLEFIELD_EDGE = 'battlefield_edge';
+export const REJECTION_OUT_OF_REACH = 'out_of_reach';
+export const REJECTION_CONTACT_WITH_ENEMY = 'contact_with_enemy';
 
 // Whole-submission refusal codes: a stale turn number or a side that is not
 // active refuses the submission before any order is examined.
@@ -177,20 +193,24 @@ export function buildPlayerView(battle) {
 // --- Available actions ------------------------------------------------------
 // Computed per unit at the start of the turn: the permitted order kinds,
 // with reasons for the unavailable ones, the Charge and Shoot candidates,
-// and the movement allowance. Only Hold is permitted in this slice, so no
-// unit may move and both candidate lists stay empty.
+// and the movement allowance in metres on open ground. Hold and Move are
+// permitted in this slice; both candidate lists stay empty until the Charge
+// and Shoot slices land.
 
 const UNAVAILABLE_REASONS = Object.freeze({
-  Move: 'Move is not available in this slice: only Hold is permitted.',
-  Charge: 'Charge is not available in this slice: only Hold is permitted.',
-  Shoot: 'Shoot is not available in this slice: only Hold is permitted.',
+  Charge: 'Charge is not available in this slice: only Hold and Move are permitted.',
+  Shoot: 'Shoot is not available in this slice: only Hold and Move are permitted.',
 });
 
-function actionsForUnit(unit) {
+function movementParamsOf(battle) {
+  return battle?.parameters?.movement ?? RULESET_PARAMETERS.movement;
+}
+
+function actionsForUnit(unit, params) {
   return {
     unitId: unit.id,
-    permitted: [{ kind: ORDER_KIND_HOLD }],
-    unavailable: KNOWN_ORDER_KINDS.filter((kind) => kind !== ORDER_KIND_HOLD).map(
+    permitted: [{ kind: ORDER_KIND_HOLD }, { kind: ORDER_KIND_MOVE }],
+    unavailable: KNOWN_ORDER_KINDS.filter((kind) => !ORDER_KINDS.includes(kind)).map(
       (kind) => ({
         kind,
         code: REJECTION_UNSUPPORTED_ORDER_KIND,
@@ -199,7 +219,7 @@ function actionsForUnit(unit) {
     ),
     chargeCandidates: [],
     shootCandidates: [],
-    movementAllowanceM: 0,
+    movementAllowanceM: movementAllowanceM(unit, params),
   };
 }
 
@@ -211,12 +231,15 @@ export function availableActions(battle, side) {
   if (!ids.includes(side)) {
     throw new Error(`Unknown side "${side}" (one of: ${ids.join(', ')}).`);
   }
+  const params = movementParamsOf(battle);
   return {
     formatVersion: AVAILABLE_ACTIONS_FORMAT_VERSION,
     battleId: battle.id,
     turnNumber: battle.turnNumber,
     side,
-    units: battle.units.filter((unit) => unit.side === side).map(actionsForUnit),
+    units: battle.units
+      .filter((unit) => unit.side === side)
+      .map((unit) => actionsForUnit(unit, params)),
   };
 }
 
@@ -370,6 +393,38 @@ export function validateTurn(battle, submission) {
   }
   const byId = new Map(battle.units.map((unit) => [unit.id, unit]));
   const seen = new Map();
+  // Simulated footprints: each order validates against the state left by the
+  // orders before it (ADR 0004), starting from the battle state.
+  const simulated = new Map(
+    battle.units.map((unit) => [unit.id, { position: { ...unit.position }, facing: unit.facing }]),
+  );
+  const params = movementParamsOf(battle);
+  // Preview of a unit's footprint at its simulated pose: the deterministic
+  // Movement-phase footprint every accepted verdict carries.
+  function previewAt(unit, pose) {
+    const position = { x: round1(pose.position.x), y: round1(pose.position.y) };
+    const facing = normalizeFacing(round1(pose.facing));
+    return {
+      position,
+      facing,
+      corners: footprintAt(unit, position, facing).corners.map((corner) => ({
+        x: round1(corner.x),
+        y: round1(corner.y),
+      })),
+    };
+  }
+  function othersAt(moverId) {
+    return battle.units
+      .filter((unit) => unit.id !== moverId)
+      .map((unit) => {
+        const pose = simulated.get(unit.id);
+        return {
+          id: unit.id,
+          side: unit.side,
+          corners: footprintAt(unit, pose.position, pose.facing).corners,
+        };
+      });
+  }
   const verdicts = submission.orders.map((order, orderIndex) => {
     const unitId = isRecord(order) ? order.unitId : undefined;
     const unit = typeof unitId === 'string' ? byId.get(unitId) : undefined;
@@ -388,13 +443,44 @@ export function validateTurn(battle, submission) {
         `Order ${orderIndex}: unit "${unit.id}" already holds an order (order ${seen.get(unit.id)}).`);
     }
     seen.set(unit.id, orderIndex);
-    if (!isRecord(order) || order.kind !== ORDER_KIND_HOLD) {
-      return reject(orderIndex, unit.id, REJECTION_UNSUPPORTED_ORDER_KIND,
-        { unitId: unit.id, kind: isRecord(order) ? order.kind : undefined },
-        `Order ${orderIndex}: order kind "${String(isRecord(order) ? order.kind : order)}" is not ` +
-          `available in this slice (only ${ORDER_KIND_HOLD} is permitted).`);
+    const kind = isRecord(order) ? order.kind : undefined;
+    if (kind === ORDER_KIND_HOLD) {
+      return {
+        orderIndex,
+        unitId: unit.id,
+        accepted: true,
+        preview: previewAt(unit, simulated.get(unit.id)),
+      };
     }
-    return { orderIndex, unitId: unit.id, accepted: true };
+    if (kind === ORDER_KIND_MOVE) {
+      const planned = validateMoveOnField({
+        unit,
+        from: simulated.get(unit.id),
+        legs: isRecord(order) ? order.legs : undefined,
+        params,
+        battlefield: battle.scenario.battlefield,
+        others: othersAt(unit.id),
+        orderIndex,
+      });
+      if (!planned.ok) {
+        return reject(orderIndex, unit.id, planned.code, planned.details, planned.message);
+      }
+      simulated.set(unit.id, {
+        position: { ...planned.preview.position },
+        facing: planned.preview.facing,
+      });
+      return {
+        orderIndex,
+        unitId: unit.id,
+        accepted: true,
+        preview: planned.preview,
+        movement: { availableM: planned.availableM, requiredM: planned.requiredM },
+      };
+    }
+    return reject(orderIndex, unit.id, REJECTION_UNSUPPORTED_ORDER_KIND,
+      { unitId: unit.id, kind },
+      `Order ${orderIndex}: order kind "${String(kind)}" is not ` +
+        `available in this slice (only ${ORDER_KINDS.join(' and ')} are permitted).`);
   });
   const acceptedOrders = verdicts
     .filter((verdict) => verdict.accepted)
@@ -414,10 +500,11 @@ export function validateTurn(battle, submission) {
 
 // --- Resolution -------------------------------------------------------------
 // Resolution is a pure function from the battle state and a committed
-// decision to a new state and events. It runs the Movement, Shooting,
-// Combat, and Cohesion phases — empty in this slice, because Hold moves
-// nothing — then passes the turn and counts rounds as pairs of turns. A
-// turn decision is either a commit or a concede.
+// decision to a new state and events. The Movement phase executes the
+// accepted moves in the given order at their validated previews; Shooting,
+// Combat, and Cohesion stay empty until their slices land. Resolution then
+// passes the turn and counts rounds as pairs of turns. A turn decision is
+// either a commit or a concede.
 
 export class TurnRejectedError extends Error {
   constructor(result) {
@@ -467,6 +554,32 @@ export function resolveTurn(battle, decision) {
   const result = validateTurn(battle, decision.submission);
   if (!result.ok) {
     throw new TurnRejectedError(result);
+  }
+  // Execute the accepted moves in the given order at their validated
+  // previews: the previews are deterministic, so resolution replays exactly
+  // what validation promised.
+  for (const verdict of result.verdicts) {
+    if (!verdict.accepted || !verdict.preview) {
+      continue;
+    }
+    const order = decision.submission.orders[verdict.orderIndex];
+    if (!isRecord(order) || order.kind !== ORDER_KIND_MOVE) {
+      continue;
+    }
+    const target = next.units.find((unit) => unit.id === verdict.unitId);
+    target.position = { ...verdict.preview.position };
+    target.facing = verdict.preview.facing;
+    next.events.push(
+      nextEvent(next, {
+        type: 'unit-moved',
+        turnNumber: battle.turnNumber,
+        side: battle.activeSide,
+        unitId: verdict.unitId,
+        orderIndex: verdict.orderIndex,
+        position: { ...verdict.preview.position },
+        facing: verdict.preview.facing,
+      }),
+    );
   }
   for (const phase of TURN_PHASES) {
     next.events.push(

@@ -47,6 +47,27 @@ export const RULESET_PARAMETERS = Object.freeze({
     start: 'Steady',
     states: Object.freeze(['Steady', 'Disordered', 'Routed']),
   }),
+  // Manoeuvre on open ground (Engine I slice). A unit marches with 1-3 legs
+  // per Move; displacements within `forwardArcDeg` of the facing bill at the
+  // full rate, steeper, sideways, and backward steps bill
+  // `1 / restrictedRateFactor` per metre, and a facing change about the front
+  // midpoint bills `frontageM * angleRad * wheelFactor` metres. `allowanceM`
+  // is the distance one turn buys, per troop type. Initial values for the
+  // manoeuvre slice; the Engine II gate sets the fighting parameters.
+  movement: Object.freeze({
+    maxLegs: 3,
+    forwardArcDeg: 45,
+    restrictedRateFactor: 0.5,
+    wheelFactor: 0.5,
+    allowanceM: Object.freeze({
+      hoplite: 90,
+      peltast: 140,
+      archer: 110,
+      slinger: 110,
+      light_cavalry: 240,
+      cavalry: 200,
+    }),
+  }),
 });
 
 export const TROOP_TYPE_KEYS = Object.freeze([

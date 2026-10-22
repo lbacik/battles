@@ -30,8 +30,7 @@
 
 import {
   deriveFootprint,
-  locatePoint,
-  segmentsIntersect,
+  ringsTouch,
 } from './geometry.js';
 import {
   RULESET_ID as INSTALLED_RULESET_ID,
@@ -184,28 +183,9 @@ function footprintCorners(unit) {
   }
 }
 
-// True when two footprint rings touch in any way: overlapping with positive
-// area, sharing an edge, or meeting at a point. Boundary contact counts,
-// because playability refuses any opposing touch while structural validation
-// already tolerates sub-0.1 m overlaps as touching.
-function ringsTouch(a, b) {
-  for (let i = 0; i < a.length; i += 1) {
-    const p = a[i];
-    const q = a[(i + 1) % a.length];
-    for (let j = 0; j < b.length; j += 1) {
-      if (segmentsIntersect(p, q, b[j], b[(j + 1) % b.length])) {
-        return true;
-      }
-    }
-  }
-  if (a.some((point) => locatePoint(b, point) !== 'outside')) {
-    return true;
-  }
-  if (b.some((point) => locatePoint(a, point) !== 'outside')) {
-    return true;
-  }
-  return false;
-}
+// `ringsTouch` (see `./geometry.js`) is the shared touch predicate: boundary
+// contact counts, because playability refuses any opposing touch while
+// structural validation already tolerates sub-0.1 m overlaps as touching.
 
 // Ground cover water areas: every place whose category is `water`. Linear
 // river features are not water here: they have their own category and their
