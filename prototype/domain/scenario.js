@@ -916,6 +916,289 @@ export function removeGroundCoverFeature(document, id) {
   return copy;
 }
 
+// --- Elevation editing (Terrain mode) ------------------------------------------
+// The author draws hills as nested elevation polygons; levels follow from
+// nesting and are never typed (decisions #2 item 7, #4 items 7, 14). Elevation
+// is independent of ground cover: these helpers never consult ground features.
+//
+// - drawn vertices are rounded to 0.1 m and clipped to the battlefield; the
+//   stored vertices are exactly the clipped boundary, as for ground cover;
+// - a self-intersecting polygon, one crossing an existing elevation boundary,
+//   one only partly inside a parent (straddling a sibling or a parent edge),
+//   or one duplicating an existing ring is refused — never auto-adjusted. The
+//   refusal carries the candidate ring so the editor can highlight it;
+// - the level is derived from containment depth: a polygon outside every other
+//   is level 1, one wholly inside a level n polygon is level n + 1. Touching
+//   edge to edge stays legal;
+// - every mutating helper re-derives the levels of all surviving elevation
+//   features from containment, so deleting a level promotes its nested
+//   children (a level 2 peak inside a deleted level 1 hill becomes level 1)
+//   and drawing an outer ring around existing hills bumps them down.
+function elevationFeatureById(document, id) {
+  return (document.terrainFeatures || []).find(
+    (feature) => feature && feature.kind === 'elevation' && feature.id === id,
+  );
+}
+
+function elevationList(document, ignoreId = null) {
+  return (document?.terrainFeatures || []).filter(
+    (feature) =>
+      feature &&
+      feature.kind === 'elevation' &&
+      feature.id !== ignoreId &&
+      Array.isArray(feature.polygon) &&
+      feature.polygon.length >= 3,
+  );
+}
+
+// Derive the level of every elevation feature from containment depth: level 1
+// for polygons containing no other elevation polygon, level n + 1 for polygons
+// wholly inside a level n polygon. Mutates the passed feature array in place;
+// callers pass a fresh clone. Assumes the set is laminar (checked separately
+// by validateElevationCandidate and validateScenario).
+function relabelElevationLevels(features) {
+  const rings = features.filter(
+    (feature) => feature && feature.kind === 'elevation' && Array.isArray(feature.polygon),
+  );
+  for (const feature of rings) {
+    let depth = 0;
+    for (const other of rings) {
+      if (other === feature) {
+        continue;
+      }
+      if (
+        polygonArea(other.polygon) - polygonArea(feature.polygon) > 1e-6 &&
+        polygonInsideOrOn(feature.polygon, other.polygon)
+      ) {
+        depth += 1;
+      }
+    }
+    feature.level = depth + 1;
+  }
+}
+
+// Check a candidate elevation polygon against the document without mutating
+// anything. Returns { ok: true, ring, level, parentId? } with the exact
+// vertices to store and the derived level, or
+// { ok: false, reason, ring, conflictId? } describing the refusal. `ring` is
+// the highlight the editor shows: the clipped candidate for nesting refusals,
+// the drawn shape for self-intersections, and whatever survived for degenerate
+// input. `ignoreId` exempts one feature, so moving a vertex of a feature never
+// conflicts with the feature itself.
+export function validateElevationCandidate(document, points, options = {}) {
+  const { ignoreId = null } = options;
+  const battlefield = document?.battlefield;
+  if (
+    !battlefield ||
+    !Number.isFinite(battlefield.width) ||
+    !Number.isFinite(battlefield.height)
+  ) {
+    return { ok: false, reason: 'the battlefield size is missing', ring: [] };
+  }
+  if (!Array.isArray(points) || points.length < 3) {
+    return { ok: false, reason: 'a hill needs at least 3 vertices', ring: [] };
+  }
+  if (points.some((point) => !Number.isFinite(point?.x) || !Number.isFinite(point?.y))) {
+    return {
+      ok: false,
+      reason: 'a hill must hold finite x and y metre coordinates',
+      ring: [],
+    };
+  }
+  const drawn = dedupePoints(roundRing(points));
+  if (drawn.length < 3) {
+    return {
+      ok: false,
+      reason: 'a hill needs at least 3 distinct vertices',
+      ring: drawn,
+    };
+  }
+  if (!isSimplePolygon(drawn)) {
+    return {
+      ok: false,
+      reason: 'the polygon must be simple (no self-intersection)',
+      ring: drawn,
+    };
+  }
+  const clipped = dedupePoints(
+    roundRing(clipPolygonToRect(drawn, battlefield.width, battlefield.height)),
+  );
+  if (clipped.length < 3 || !(polygonArea(clipped) > 0)) {
+    return { ok: false, reason: 'the polygon lies outside the battlefield', ring: drawn };
+  }
+  if (!isSimplePolygon(clipped)) {
+    return {
+      ok: false,
+      reason: 'the polygon must be simple (no self-intersection)',
+      ring: clipped,
+    };
+  }
+  const others = elevationList(document, ignoreId);
+  const containers = [];
+  for (const other of others) {
+    let crosses = false;
+    for (let i = 0; i < clipped.length; i += 1) {
+      const a = clipped[i];
+      const b = clipped[(i + 1) % clipped.length];
+      for (let j = 0; j < other.polygon.length; j += 1) {
+        const c = other.polygon[j];
+        const d = other.polygon[(j + 1) % other.polygon.length];
+        const o1 = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+        const o2 = (b.x - a.x) * (d.y - a.y) - (b.y - a.y) * (d.x - a.x);
+        const o3 = (d.x - c.x) * (a.y - c.y) - (d.y - c.y) * (a.x - c.x);
+        const o4 = (d.x - c.x) * (b.y - c.y) - (d.y - c.y) * (b.x - c.x);
+        if (o1 * o2 < 0 && o3 * o4 < 0) {
+          crosses = true;
+          break;
+        }
+      }
+      if (crosses) {
+        break;
+      }
+    }
+    if (crosses) {
+      return {
+        ok: false,
+        reason: 'the polygon crosses the boundary of an existing elevation level (siblings must never cross)',
+        ring: clipped,
+        conflictId: other.id,
+      };
+    }
+    const candidateInside = polygonInsideOrOn(clipped, other.polygon);
+    const otherInside = polygonInsideOrOn(other.polygon, clipped);
+    if (candidateInside && otherInside) {
+      return {
+        ok: false,
+        reason: 'the polygon duplicates an existing elevation level',
+        ring: clipped,
+        conflictId: other.id,
+      };
+    }
+    if (candidateInside) {
+      if (!(polygonArea(other.polygon) - polygonArea(clipped) > 1e-6)) {
+        return {
+          ok: false,
+          reason: 'the polygon duplicates an existing elevation level',
+          ring: clipped,
+          conflictId: other.id,
+        };
+      }
+      containers.push(other);
+      continue;
+    }
+    if (otherInside) {
+      if (!(polygonArea(clipped) - polygonArea(other.polygon) > 1e-6)) {
+        return {
+          ok: false,
+          reason: 'the polygon duplicates an existing elevation level',
+          ring: clipped,
+          conflictId: other.id,
+        };
+      }
+      continue;
+    }
+    const candidateVertexInside = clipped.some(
+      (point) => locatePoint(other.polygon, point) === 'inside',
+    );
+    const otherVertexInside = other.polygon.some(
+      (point) => locatePoint(clipped, point) === 'inside',
+    );
+    if (candidateVertexInside || otherVertexInside) {
+      return {
+        ok: false,
+        reason: 'the polygon must sit wholly inside one elevation level (it straddles a boundary)',
+        ring: clipped,
+        conflictId: other.id,
+      };
+    }
+  }
+  let parent = null;
+  for (const container of containers) {
+    if (!parent || polygonArea(container.polygon) < polygonArea(parent.polygon)) {
+      parent = container;
+    }
+  }
+  return {
+    ok: true,
+    ring: clipped,
+    level: containers.length + 1,
+    parentId: parent ? parent.id : null,
+  };
+}
+
+// Draw a new hill: validates the candidate, clips it to the battlefield, and
+// returns a new document with the feature appended at its derived level.
+// Levels of pre-existing hills fully inside the new ring are re-derived, so a
+// new outer ring bumps them down. Throws a human-readable error when the
+// candidate is refused. Never mutates its input.
+export function addElevationFeature(document, { polygon } = {}) {
+  if (!document || typeof document !== 'object') {
+    throw new Error('Cannot add a hill: the scenario must be an object.');
+  }
+  const candidate = validateElevationCandidate(document, polygon);
+  if (!candidate.ok) {
+    throw new Error(`Cannot add a hill: ${candidate.reason}.`);
+  }
+  const copy = cloneScenario(document);
+  copy.terrainFeatures = Array.isArray(copy.terrainFeatures) ? copy.terrainFeatures : [];
+  copy.terrainFeatures.push({
+    id: generateId(),
+    kind: 'elevation',
+    level: candidate.level,
+    polygon: candidate.ring,
+  });
+  relabelElevationLevels(copy.terrainFeatures);
+  return roundScenarioToTenth(copy);
+}
+
+// Change the polygon of one hill. The candidate is checked against every other
+// elevation feature but never against the feature itself, and every surviving
+// level is re-derived. Throws when the feature is missing or the candidate
+// polygon is refused. Never mutates its input.
+export function updateElevationFeature(document, id, patch = {}) {
+  if (!document || typeof document !== 'object') {
+    throw new Error('Cannot edit a hill: the scenario must be an object.');
+  }
+  const existing = elevationFeatureById(document, id);
+  if (!existing) {
+    throw new Error('Cannot edit a hill: no hill with that id.');
+  }
+  let polygon = existing.polygon;
+  if (patch.polygon !== undefined) {
+    const candidate = validateElevationCandidate(document, patch.polygon, { ignoreId: id });
+    if (!candidate.ok) {
+      throw new Error(`Cannot edit a hill: ${candidate.reason}.`);
+    }
+    polygon = candidate.ring;
+  }
+  const copy = cloneScenario(document);
+  const index = copy.terrainFeatures.findIndex(
+    (feature) => feature && feature.kind === 'elevation' && feature.id === id,
+  );
+  copy.terrainFeatures[index] = { ...copy.terrainFeatures[index], polygon };
+  relabelElevationLevels(copy.terrainFeatures);
+  return roundScenarioToTenth(copy);
+}
+
+// Delete a whole hill. Nested children survive and are promoted: their levels
+// are re-derived from the remaining containment, so deleting a level 1 hill
+// leaves its former level 2 peak as level 1 and every nesting invariant stays
+// true. Throws when the feature is missing. Never mutates its input.
+export function removeElevationFeature(document, id) {
+  if (!document || typeof document !== 'object') {
+    throw new Error('Cannot delete a hill: the scenario must be an object.');
+  }
+  if (!elevationFeatureById(document, id)) {
+    throw new Error('Cannot delete a hill: no hill with that id.');
+  }
+  const copy = cloneScenario(document);
+  copy.terrainFeatures = copy.terrainFeatures.filter(
+    (feature) => !(feature && feature.kind === 'elevation' && feature.id === id),
+  );
+  relabelElevationLevels(copy.terrainFeatures);
+  return copy;
+}
+
 export function isUuid(value) {
   return typeof value === 'string' && UUID_PATTERN.test(value);
 }

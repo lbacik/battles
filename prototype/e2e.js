@@ -16,6 +16,7 @@
 // the page and logged to the console for headless collection.
 import { deriveFootprint } from './domain/geometry.js';
 import {
+  addElevationFeature,
   addGroundCoverFeature,
   cloneScenario,
   createScenario,
@@ -26,6 +27,7 @@ import {
   roundScenarioToTenth,
   snapFacing,
   unitsBlockingResize,
+  validateElevationCandidate,
   validateGroundCoverCandidate,
   validateScenario,
 } from './domain/scenario.js';
@@ -336,6 +338,49 @@ async function phaseSave() {
   }
   logStep('clip an area reaching past the edge to the battlefield', 'pass');
 
+  logStep('draw a hill with two nested levels (levels 1 and 2 derived)', 'running');
+  created = addElevationFeature(created, {
+    polygon: [
+      { x: 600, y: 300 },
+      { x: 900, y: 300 },
+      { x: 900, y: 550 },
+      { x: 600, y: 550 },
+    ],
+  });
+  created = addElevationFeature(created, {
+    polygon: [
+      { x: 700, y: 380 },
+      { x: 820, y: 380 },
+      { x: 820, y: 480 },
+      { x: 700, y: 480 },
+    ],
+  });
+  const hills = created.terrainFeatures.filter((feature) => feature.kind === 'elevation');
+  if (hills.length !== 2) throw new Error(`expected 2 hills, got ${hills.length}`);
+  if (hills[0].level !== 1 || hills[1].level !== 2) {
+    throw new Error(`levels are not derived from nesting: ${hills.map((hill) => hill.level).join(', ')}`);
+  }
+  if (validateScenario(created).length > 0) {
+    throw new Error(`drawn hills are invalid: ${validateScenario(created).join('; ')}`);
+  }
+  logStep('draw a hill with two nested levels (levels 1 and 2 derived)', 'pass', 'levels 1, 2');
+
+  logStep('refuse a hill crossing a sibling with a highlight', 'running');
+  const crossingHill = validateElevationCandidate(created, [
+    { x: 850, y: 400 },
+    { x: 1000, y: 400 },
+    { x: 1000, y: 520 },
+    { x: 850, y: 520 },
+  ]);
+  if (crossingHill.ok) throw new Error('a crossing hill was accepted');
+  if (!/cross|wholly inside|sibling/.test(crossingHill.reason)) {
+    throw new Error(`unexpected refusal reason: ${crossingHill.reason}`);
+  }
+  if (!Array.isArray(crossingHill.ring) || crossingHill.ring.length < 3) {
+    throw new Error('the refusal carries no highlight ring');
+  }
+  logStep('refuse a hill crossing a sibling with a highlight', 'pass', crossingHill.reason);
+
   logStep('save it through the scenario store', 'running');
   const metadata = await store.save(created);
   const snapshot = await store.load(created.id);
@@ -382,6 +427,14 @@ async function phaseReopen(phase) {
     throw new Error(`reopened terrain is invalid: ${validateScenario(reopened).join('; ')}`);
   }
   logStep('keep the drawn ground cover identical and valid', 'pass', '4 areas');
+
+  logStep('keep the nested hills identical with derived levels', 'running');
+  const reopenedHills = (reopened.terrainFeatures || []).filter((feature) => feature.kind === 'elevation');
+  if (reopenedHills.length !== 2) throw new Error(`expected 2 hills, got ${reopenedHills.length}`);
+  if (reopenedHills[0].level !== 1 || reopenedHills[1].level !== 2) {
+    throw new Error(`hill levels changed across reload: ${reopenedHills.map((hill) => hill.level).join(', ')}`);
+  }
+  logStep('keep the nested hills identical with derived levels', 'pass', 'levels 1, 2');
 
   details.textContent = JSON.stringify(
     {

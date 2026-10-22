@@ -185,6 +185,10 @@ input[aria-invalid="true"], textarea[aria-invalid="true"] { border-color: #b76e5
 .terrain-ground { cursor: pointer; }
 .terrain-ground.selected { stroke-width: 3; }
 .terrain-ground.conflict { stroke: #b76e5a; stroke-width: 3; }
+.terrain-elevation { cursor: pointer; }
+.terrain-elevation.selected { stroke-width: 3; }
+.terrain-elevation.conflict { stroke: #b76e5a; stroke-width: 3; }
+.terrain-subhead { font-size: 14px; margin: 18px 0 10px; font-weight: 550; }
 .terrain-vertex { cursor: grab; }
 .terrain-edge-handle { cursor: pointer; }
 .terrain-refused { pointer-events: none; }
