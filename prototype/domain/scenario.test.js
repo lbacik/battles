@@ -81,6 +81,26 @@ describe('createScenario', () => {
     assert.match(validateScenario(scenario).join(' '), /distinct colours/);
   });
 
+  it('rejects sides with duplicate names', () => {
+    const scenario = createScenario({ title: 'Mantinea' });
+    scenario.sides[1].name = scenario.sides[0].name;
+    assert.match(validateScenario(scenario).join(' '), /already used/);
+  });
+
+  it('wraps facings into a 0-360 compass bearing when rounding', () => {
+    const scenario = createScenario({ title: 'Mantinea' });
+    const probe = {
+      ...scenario,
+      units: [
+        { ...probeUnit(), facing: 720 },
+        { ...probeUnit(), id: generateId(), name: 'Second taxis', facing: -45 },
+      ],
+    };
+    const rounded = roundScenarioToTenth(probe);
+    assert.equal(rounded.units[0].facing, 0);
+    assert.equal(rounded.units[1].facing, 315);
+  });
+
   it('references the polis-classical ruleset', () => {
     const scenario = createScenario({ title: 'Mantinea' });
     assert.deepEqual(scenario.ruleset, { id: RULESET_ID, version: RULESET_VERSION });

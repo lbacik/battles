@@ -134,7 +134,14 @@ export function roundScenarioToTenth(document) {
       unit.position = roundPoint(unit.position);
     }
     if (Number.isFinite(unit.facing)) {
-      unit.facing = round1(unit.facing);
+      // A facing is a compass bearing in degrees: wrap it into [0, 360)
+      // so every stored value is one. Rounding can still produce 360.0,
+      // which is the same bearing as 0.
+      const wrapped = ((unit.facing % 360) + 360) % 360;
+      unit.facing = round1(wrapped);
+      if (unit.facing >= 360) {
+        unit.facing = 0;
+      }
     }
   }
   for (const feature of copy.terrainFeatures || []) {
@@ -465,6 +472,7 @@ export function validateScenario(document) {
     errors.push('scenario must have exactly two sides');
   } else {
     checkIds(sides, 'sides', errors);
+    checkNamesUnique(sides, 'sides', errors);
     sides.forEach((side, index) => {
       if (!side || !isNonEmptyString(side.name)) {
         errors.push(`sides[${index}].name is required`);
