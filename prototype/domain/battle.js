@@ -22,7 +22,8 @@
 // generator state, the starting side drawn from the seed, the controller of
 // each side, and round 1. The battle reuses the scenario's id as its battle
 // id, opens on turn 1 with the starting side active in the `orders` phase,
-// and stays `ongoing` until a side concedes. Every unit starts Steady. The
+// and stays `ongoing` until a side concedes, an army breaks, or the round
+// limit ends it (see `./battle-end.js`). Every unit starts Steady. The
 // scenario's own ruleset reference is never changed.
 //
 // The seeded random generator belongs to the engine: `createRng` builds it
@@ -53,6 +54,15 @@ export const TURN_PHASE_ORDERS = 'orders';
 
 export const BATTLE_STATUS_ONGOING = 'ongoing';
 export const BATTLE_STATUS_CONCEDED = 'conceded';
+// An army break ends the battle at once (see `./battle-end.js`): the other
+// side wins, or neither does when both sides break together. A finished battle
+// carries `winner` (null for a draw) and a `result` record with the reason,
+// both lost shares, the margin where relevant, and both sides' losses.
+export const BATTLE_STATUS_BROKEN = 'broken';
+// The round limit ends the battle after the last round (see
+// `./battle-end.js`): the side with the lower lost share wins when the
+// difference exceeds the margin, otherwise the battle is a draw.
+export const BATTLE_STATUS_ROUND_LIMIT = 'round-limit';
 
 export const STEADY_COHESION = 'Steady';
 export const COHESION_STATES = Object.freeze(['Steady', 'Disordered', 'Routed']);

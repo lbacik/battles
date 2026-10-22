@@ -69,12 +69,21 @@ import {
   unitCohesionValue,
 } from './cohesion.js';
 import {
-  BATTLE_STATUS_CONCEDED,
   BATTLE_STATUS_ONGOING,
   RANDOM_DRAW_EVENT,
   TURN_PHASE_ORDERS,
   createRng,
 } from './battle.js';
+import {
+  END_REASON_BREAK,
+  END_REASON_CONCEDE,
+  END_REASON_ROUND_LIMIT,
+  applyBattleEnd,
+  battleEndParamsOf,
+  checkArmyBreak,
+  decideRoundLimit,
+  isRoundLimitReached,
+} from './battle-end.js';
 
 // The format version carried by every contract envelope: the submission,
 // the player view, the turn decision, and the available actions. Bump it
@@ -155,6 +164,9 @@ export const REFUSAL_STALE_TURN = 'stale_turn';
 export const REFUSAL_NOT_ACTIVE_SIDE = 'not_active_side';
 export const REFUSAL_UNKNOWN_BATTLE = 'unknown_battle';
 export const REFUSAL_ORDERS_REJECTED = 'orders_rejected';
+// A finished battle refuses every further decision: no order validates and no
+// turn resolves once the status has left `ongoing`.
+export const REFUSAL_BATTLE_FINISHED = 'battle_finished';
 
 // Numeric cohesion behind the three states. The battle stores both the numeric
 // `cohesionValue` (0 to the troop-type maximum) and the derived state string;
@@ -302,6 +314,8 @@ export function buildPlayerView(battle) {
     activeSide: battle.activeSide,
     phase: battle.phase,
     status: battle.status,
+    winner: battle.winner ?? null,
+    result: cloneValue(battle.result ?? null),
     ruleset: { ...battle.ruleset },
     parameters: cloneValue(battle.parameters),
     catalogue: cloneValue(TROOP_TYPE_CATALOGUE),
@@ -609,6 +623,12 @@ function reject(orderIndex, unitId, code, details, message) {
 // Pure: neither the battle nor the submission is changed.
 export function validateTurn(battle, submission) {
   assertBattle(battle);
+  if (battle.status !== BATTLE_STATUS_ONGOING) {
+    return wholeRefusal(
+      REFUSAL_BATTLE_FINISHED,
+      `The battle is over (status "${battle.status}"): no further orders are accepted.`,
+    );
+  }
   if (!isRecord(submission)) {
     return wholeRefusal('invalid-submission', 'A submission must be an object.');
   }
@@ -1037,13 +1057,16 @@ export function validateTurn(battle, submission) {
 // orders (see `./shoot.js`), the Combat phase fights every engaged pair (see
 // `./combat.js`), and the Cohesion phase wears close-spacing units on bad
 // ground, removes units worn below their share, and flees the side's Routed
-// units again (see `./cohesion.js`). Resolution then passes the turn and
+// units again (see `./cohesion.js`). After the Cohesion phase the army break
+// is checked, then the round limit (see `./battle-end.js`): either ends the
+// battle at once with a recorded result instead of passing the turn.
+// Resolution otherwise passes the turn and
 // counts rounds as pairs of turns. A turn decision is either a commit or a
 // concede.
 
 export class TurnRejectedError extends Error {
   constructor(result) {
-    super(`Commit refused: ${result.message} (${result.code}).`);
+    super(`Decision refused: ${result.message} (${result.code}).`);
     this.name = 'TurnRejectedError';
     this.code = result.code;
     this.result = result;
@@ -1054,11 +1077,14 @@ function nextEvent(battle, fields) {
   return { seq: battle.events.length, ...fields };
 }
 
-// Resolve a committed turn decision against the battle state. Commit
-// re-validates every order against the authoritative state and is all or
-// nothing: any rejection throws a `TurnRejectedError` and no battle is
-// produced. Concede ends the battle with the other side the winner. Pure:
-// the input battle and the decision are never changed.
+// Resolve a turn decision against the battle state. Commit re-validates every
+// order against the authoritative state and is all or nothing: any rejection
+// throws a `TurnRejectedError` and no battle is produced. Concede ends the
+// battle with the other side the winner, but only during the conceding side's
+// own turn. A commit that breaks an army or completes the limit round ends the
+// battle at once with the recorded result instead of passing the turn. Any
+// decision on a finished battle is refused. Pure: the input battle and the
+// decision are never changed.
 export function resolveTurn(battle, decision) {
   assertBattle(battle);
   if (!isRecord(decision)) {
@@ -1066,11 +1092,22 @@ export function resolveTurn(battle, decision) {
   }
   const next = cloneValue(battle);
   if (decision.type === 'concede') {
+    if (battle.status !== BATTLE_STATUS_ONGOING) {
+      throw new TurnRejectedError({
+        ok: false,
+        code: REFUSAL_BATTLE_FINISHED,
+        message: `The battle is over (status "${battle.status}"): no further decisions are accepted.`,
+      });
+    }
     const side = typeof decision.side === 'string' ? decision.side : battle.activeSide;
+    if (side !== battle.activeSide) {
+      throw new TurnRejectedError({
+        ok: false,
+        code: REFUSAL_NOT_ACTIVE_SIDE,
+        message: `Side "${side}" is not the active side ("${battle.activeSide}").`,
+      });
+    }
     const winner = otherSide(battle, side);
-    next.status = BATTLE_STATUS_CONCEDED;
-    next.phase = 'ended';
-    next.winner = winner;
     next.events.push(
       nextEvent(next, {
         type: 'turn-conceded',
@@ -1079,6 +1116,9 @@ export function resolveTurn(battle, decision) {
         winner,
       }),
     );
+    // The concede is recorded with its own event first; `applyBattleEnd`
+    // records the result and the uniform `battle-ended` event.
+    applyBattleEnd(next, { reason: END_REASON_CONCEDE, winner });
     return next;
   }
   if (decision.type !== 'commit') {
@@ -1374,6 +1414,23 @@ export function resolveTurn(battle, decision) {
         ordersApplied: result.acceptedOrders.length,
       }),
     );
+  }
+  // The Cohesion phase carries the end-condition check (decision #6 item 4):
+  // an army break ends the battle at once, and the round limit decides it
+  // after the last turn of the limit round. A finished battle keeps its turn
+  // counters and records no `turn-resolved`.
+  const breakCheck = checkArmyBreak(next);
+  if (breakCheck.broken) {
+    const winner = breakCheck.brokenSides.length === 1
+      ? otherSide(battle, breakCheck.brokenSides[0])
+      : null;
+    applyBattleEnd(next, { reason: END_REASON_BREAK, winner });
+    return next;
+  }
+  if (isRoundLimitReached(battle.turnNumber, battleEndParamsOf(next.parameters))) {
+    const decided = decideRoundLimit(next);
+    applyBattleEnd(next, { reason: END_REASON_ROUND_LIMIT, winner: decided.winner });
+    return next;
   }
   const nextTurnNumber = battle.turnNumber + 1;
   const nextSide = otherSide(battle, battle.activeSide);
