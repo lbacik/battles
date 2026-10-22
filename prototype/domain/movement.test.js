@@ -788,6 +788,28 @@ describe('terrain effects on movement (decision #6 items 14-15)', () => {
     assert.match(rejection.message, /forbidden ground/);
   });
 
+  it('never lets a road rescue a footprint on water', () => {
+    const battle = terrainBattle([
+      groundRect('lake-a', 'water', 400, 540, 600, 620),
+      roadAlongX500(),
+    ]);
+    hopliteOf(battle).files = TERRAIN.columnMaxFiles;
+    const rejection = rejectedVerdict(moveSouth(battle));
+    assert.equal(rejection.code, 'forbidden_ground');
+    assert.equal(rejection.details.groundCover, 'water');
+    const unit = hopliteOf(battle);
+    const corners = [
+      { x: unit.position.x - 8, y: unit.position.y },
+      { x: unit.position.x + 8, y: unit.position.y },
+      { x: unit.position.x + 8, y: unit.position.y + 16 },
+      { x: unit.position.x - 8, y: unit.position.y + 16 },
+    ];
+    assert.equal(
+      terrainFactorAt(corners, TERRAIN.columnMaxFiles, battle.scenario.terrainFeatures, MOVEMENT).factor,
+      Number.POSITIVE_INFINITY,
+    );
+  });
+
   it('ignores water far from the swept footprint', () => {
     const battle = terrainBattle([groundRect('lake-a', 'water', 100, 100, 200, 200)]);
     const verdict = acceptedVerdict(moveSouth(battle));

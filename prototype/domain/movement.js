@@ -283,7 +283,8 @@ export function riversTouching(corners, terrainFeatures) {
 
 // The movement cost factor for a footprint: the worst-cover factor, or the
 // road factor when the unit is in column and the footprint touches a road
-// (the road can only help, never hurt). Water has no factor: it forbids.
+// (the road can only help, never hurt, and never applies on water).
+// Water has no factor: it forbids.
 export function terrainFactorAt(corners, files, terrainFeatures, params) {
   const terrain = terrainOf(params);
   const cover = groundCoverAt(corners, terrainFeatures);
@@ -296,7 +297,8 @@ export function terrainFactorAt(corners, files, terrainFeatures, params) {
     factor = Number.POSITIVE_INFINITY;
   }
   if (
-    Number.isInteger(files)
+    cover !== 'water'
+    && Number.isInteger(files)
     && files >= 1
     && files <= terrain.columnMaxFiles
     && footprintOnRoad(corners, terrainFeatures)
@@ -309,7 +311,7 @@ export function terrainFactorAt(corners, files, terrainFeatures, params) {
 
 // Movement allowance in metres for the unit's troop type on open ground,
 // divided by the factor at the unit's current footprint when terrain is
-// supplied. Unknown troop types have no allowance. The river fee is per leg
+// supplied. Unknown troop types have no allowance. The river fee is per move
 // and cannot be expressed as an allowance, so it is excluded here; water
 // leaves no allowance at all. Never throws.
 //
