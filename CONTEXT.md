@@ -76,6 +76,10 @@ _Avoid_: Morale (for the per-unit value), fatigue
 An instruction a player gives one of their side's units for the current turn, such as move, charge, or hold. The ruleset accepts or rejects it; a player never resolves it.
 _Avoid_: Command, action (for the instruction itself)
 
+**Rejection**:
+The ruleset's refusal of an order, naming the order, a reason, and what would have to change for the order to be accepted. A rejected order is never shortened or partly carried out.
+_Avoid_: Error, truncation
+
 **Turn**:
 The part of a battle in which one side gives its orders and has them resolved. The sides take turns alternately.
 _Avoid_: Round (for one side's part), move
@@ -97,5 +101,9 @@ Checking, by the ruleset, whether a structurally valid scenario can start a batt
 _Avoid_: Structural validation, editor validation
 
 **Player**:
-The participant making decisions for a side in a battle. A player may be human or, in the future, controlled by an LLM.
+The participant making decisions for a side in a battle. A player may be human, automated, or, in the future, controlled by an LLM; every kind of player sees the same player view and gives orders under the same rules.
 _Avoid_: Side, army
+
+**Player view**:
+Everything a player may know about a battle when deciding: the whole current situation, the ruleset and its parameter values, and what has happened so far. It is the same for both sides; only the battle's future chance outcomes are withheld.
+_Avoid_: Game state (for what the player sees), fog of war
