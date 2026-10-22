@@ -350,3 +350,157 @@ export function flightOutcomeFor(unit, threat, battle, params = null) {
   }
   return { outcome: 'moved', destination, reason: 'fled-clear' };
 }
+
+// Resolve the Cohesion phase for `activeSide` (defaulting to the battle's
+// active side) against the mutable battle. Terrain strain and repeated rout
+// flights apply to that side's units; the below-strength removal applies to
+// every active unit so combat losses on either side clear at once. Mutates the
+// units (numeric cohesion and its state, routed flights, destroyed/fled
+// removals) and the events. No draws. Every state change is recorded.
+export function resolveCohesionPhase(battle, activeSide = null) {
+  if (!battle || typeof battle !== 'object' || Array.isArray(battle)) {
+    throw new Error('Cohesion needs a battle state object.');
+  }
+  if (!Array.isArray(battle.units) || !Array.isArray(battle.events)) {
+    throw new Error('Cohesion needs a battle with units and events.');
+  }
+  const side = activeSide ?? battle.activeSide;
+  const cohesion = cohesionParamsOf(battle.parameters);
+  const features = battle.scenario?.terrainFeatures || [];
+  const pushEvent = (fields) => {
+    battle.events.push({ seq: battle.events.length, ...fields });
+  };
+
+  // Close-spacing units on rough ground, forest, or settlement lose cohesion.
+  for (const unit of battle.units) {
+    if (!unit || typeof unit !== 'object' || unit.side !== side) {
+      continue;
+    }
+    if (!isActiveUnit(unit)) {
+      continue;
+    }
+    if (unitCohesionState(unit, cohesion) === 'Routed') {
+      continue;
+    }
+    if (spacingClass(unit?.troopType, unit?.lateralInterval) !== 'close') {
+      continue;
+    }
+    let corners = null;
+    try {
+      corners = footprintAt(unit, { ...unit.position }, unit.facing).corners;
+    } catch {
+      continue;
+    }
+    const cover = groundCoverAt(corners, features);
+    if (cover !== 'rough' && cover !== 'forest' && cover !== 'settlement') {
+      continue;
+    }
+    const valueBefore = unitCohesionValue(unit, cohesion);
+    const stateBefore = unitCohesionState(unit, cohesion);
+    const valueAfter = Math.max(0, valueBefore - cohesion.terrainLoss);
+    unit.cohesionValue = valueAfter;
+    syncCohesion(unit, cohesion);
+    const stateAfter = unitCohesionState(unit, cohesion);
+    if (stateAfter !== stateBefore || valueAfter !== valueBefore) {
+      pushEvent({
+        type: 'unit-cohesion',
+        turnNumber: battle.turnNumber,
+        side: unit.side ?? null,
+        unitId: unit.id,
+        cohesionBefore: stateBefore,
+        cohesionAfter: stateAfter,
+        valueBefore,
+        valueAfter: unit.cohesionValue,
+        cause: 'terrain',
+        cover,
+      });
+    }
+  }
+
+  // Units worn below their share of starting soldiers are removed. There is
+  // no panic contagion: neighbours pay nothing for the loss.
+  for (const unit of battle.units) {
+    if (!unit || typeof unit !== 'object' || !isActiveUnit(unit)) {
+      continue;
+    }
+    const starting = Number.isFinite(unit.startingSoldiers)
+      ? unit.startingSoldiers
+      : unit.soldiers;
+    const soldiers = Number.isFinite(unit.soldiers) ? unit.soldiers : 0;
+    if (!(starting > 0) || !(cohesion.destructionShare > 0)) {
+      continue;
+    }
+    if (!(soldiers < cohesion.destructionShare * starting)) {
+      continue;
+    }
+    unit.status = 'destroyed';
+    breakEngagements(battle, unit.id);
+    pushEvent({
+      type: 'unit-destroyed',
+      turnNumber: battle.turnNumber,
+      side: unit.side ?? null,
+      unitId: unit.id,
+      reason: 'below-strength',
+      soldiers,
+      startingSoldiers: starting,
+      share: cohesion.destructionShare,
+    });
+  }
+
+  // Every Routed unit of the side flees again, directly away from its nearest
+  // active enemy by the flight distance. A flight whose resting footprint
+  // leaves the battlefield removes the unit as fled (counted as lost); a
+  // flight blocked by another unit or by water destroys it; otherwise the unit
+  // moves and stays Routed.
+  for (const unit of battle.units) {
+    if (!unit || typeof unit !== 'object' || unit.side !== side) {
+      continue;
+    }
+    if (!isActiveUnit(unit)) {
+      continue;
+    }
+    if (unitCohesionState(unit, cohesion) !== 'Routed') {
+      continue;
+    }
+    breakEngagements(battle, unit.id);
+    const { enemy } = nearestEnemyOf(battle, unit);
+    const threat = enemy && isFinitePoint(enemy.position) ? { ...enemy.position } : null;
+    const outcome = flightOutcomeFor(unit, threat, battle, battle.parameters);
+    if (outcome.outcome === 'fled') {
+      unit.status = 'fled';
+      breakEngagements(battle, unit.id);
+      pushEvent({
+        type: 'unit-fled',
+        turnNumber: battle.turnNumber,
+        side: unit.side ?? null,
+        unitId: unit.id,
+        cause: 'cohesion-phase',
+        position: { ...unit.position },
+      });
+    } else if (outcome.outcome === 'destroyed') {
+      unit.status = 'destroyed';
+      breakEngagements(battle, unit.id);
+      pushEvent({
+        type: 'unit-destroyed',
+        turnNumber: battle.turnNumber,
+        side: unit.side ?? null,
+        unitId: unit.id,
+        reason: 'flight-blocked',
+        cause: 'cohesion-phase',
+        blockedBy: outcome.blockedBy ?? null,
+        at: outcome.destination,
+      });
+    } else if (outcome.destination) {
+      unit.position = { ...outcome.destination };
+      pushEvent({
+        type: 'unit-routed',
+        turnNumber: battle.turnNumber,
+        side: unit.side ?? null,
+        unitId: unit.id,
+        cause: 'cohesion-phase',
+        position: { ...unit.position },
+        flightM: cohesion.flightM,
+      });
+    }
+  }
+}

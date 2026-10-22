@@ -515,20 +515,20 @@ describe('resolveCombatPhase', () => {
     assert.ok(filesSum <= self.files + 1, `files split by contact length (fought ${filesSum})`);
   });
 
-  it('steps cohesion down through the strain thresholds, never up', () => {
+  it('steps numeric cohesion down through the thresholds, never up', () => {
     const { battle, charger, target } = arrangedFrontal();
     battle.parameters.combat = {
       ...combatParamsOf({}),
       lethality: 1,
-      cohesionPerCasualty: 1,
+      cohesionPerCasualty: 0.2,
       loserFactor: 1,
       flankStrain: 0,
       rearStrain: 0,
-      disorderedAt: 5,
-      routedAt: 100,
+      depthReduction: 0,
     };
     // The charger draws high and inflicts heavy losses; the target draws
-    // nothing, takes the full blow, and loses more cohesion.
+    // nothing, takes the full blow (~48 strength x ~0.95 draw x 0.2 strain),
+    // and falls from 12 into the Disordered band below 4.
     battle.rngState = rngStateForDraws([{ lo: 0.9, hi: 1 }, { lo: 0, hi: 0.001 }]).state;
     resolveCombatPhase(battle);
     const moved = battle.units.find((unit) => unit.id === charger.id);
@@ -536,6 +536,7 @@ describe('resolveCombatPhase', () => {
     const fought = battle.events.find((event) => event.type === 'units-fought');
     assert.ok(fought.fights.find((fight) => fight.unitId === engaged.id).lossesTaken >= 5);
     assert.equal(engaged.cohesion, 'Disordered', 'heavy losses disorder');
+    assert.ok(engaged.cohesionValue < 4 && engaged.cohesionValue > 0, 'numeric value lands in the Disordered band');
     assert.equal(moved.cohesion, 'Steady', 'light losses keep the winner steady');
     assert.ok((engaged.cohesionStrain ?? 0) > (moved.cohesionStrain ?? 0));
   });

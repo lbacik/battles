@@ -39,8 +39,11 @@
 //   contact. Depth (ranks beyond the first, up to a cap, for troop types with
 //   the depth trait) multiplies the strain down and never increases losses
 //   inflicted. A unit in several fights adds its strains up; the total is kept
-//   on `unit.cohesionStrain` and steps the state down (never up) at the
-//   Disordered and Routed thresholds.
+//   on `unit.cohesionStrain` and steps the numeric cohesion value down (never
+//   up — only Rally restores it) through the Steady/Disordered/Routed
+//   thresholds (see `./cohesion.js`). Routing, flights, and removals belong to
+//   the Cohesion slice: reaching 0 routs at once, losing a flank or rear fight
+//   tests rout by chance, and a Routed unit that is attacked is destroyed.
 // - Losses come off the rear: soldiers drop while files stay, so ranks shrink
 //   while the front edge (the position front midpoint) and the frontage stay.
 //   When soldiers fall below files, files become equal to soldiers and the

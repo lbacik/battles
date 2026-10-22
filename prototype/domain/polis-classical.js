@@ -145,9 +145,11 @@ export const RULESET_PARAMETERS = Object.freeze({
   // inflicted fewer losses, plus `flankStrain` or `rearStrain` for the flanked
   // side; ranks beyond the first, up to `depthCap`, multiply the strain down
   // by `depthReduction` each for troop types with the depth trait. Strain
-  // accumulates on the unit and steps Steady to Disordered at
-  // `disorderedAt`, and to Routed at `routedAt`. Initial values for this
-  // slice.
+  // accumulates on the unit and steps its numeric cohesion value down through
+  // the Steady/Disordered/Routed thresholds (see `./cohesion.js`); the
+  // `disorderedAt`/`routedAt` entries below are the retired Engine I strain
+  // thresholds, kept only so older snapshots still parse. Initial values for
+  // this slice.
   combat: Object.freeze({
     lethality: 0.06,
     chargeBonus: 1.5,

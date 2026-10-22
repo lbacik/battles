@@ -33,9 +33,11 @@
 // orders and has them resolved, then the other side does the same, and a
 // pair of turns forms a round. Resolution runs the Movement, Shooting,
 // Combat, and Cohesion phases — the Movement phase executes the accepted
-// moves in order, the Combat phase fights every engaged pair (see
-// `./combat.js`), while Shooting and Cohesion stay empty until their slices
-// land — then passes the turn and counts rounds as pairs of turns.
+// moves, charges, reforms, withdraws, and rallies in order, the Combat phase
+// fights every engaged pair (see `./combat.js`), the Cohesion phase wears
+// close-spacing units on bad ground, removes spent units, and flees Routed
+// units again (see `./cohesion.js`), while Shooting stays empty until its
+// slice lands — then passes the turn and counts rounds as pairs of turns.
 
 import { deriveFootprint } from './geometry.js';
 import { RULESET_PARAMETERS, TROOP_TYPE_CATALOGUE } from './polis-classical.js';
@@ -59,6 +61,8 @@ import {
   distanceBetween,
   isActiveUnit,
   nearestEnemyOf,
+  resolveCohesionPhase,
+  syncCohesion,
   unitCohesionState,
   unitCohesionValue,
 } from './cohesion.js';
@@ -796,6 +800,11 @@ export function validateTurn(battle, submission) {
     if (kind === ORDER_KIND_CHARGE) {
       const targetId = isRecord(order) ? order.targetId : undefined;
       const target = typeof targetId === 'string' ? byId.get(targetId) : undefined;
+      if (target && !isActiveUnit(target)) {
+        return reject(orderIndex, unit.id, REJECTION_INVALID_CHARGE,
+          { unitId: unit.id, targetId: target.id, reason: 'target-inactive', status: target.status ?? null },
+          `Order ${orderIndex}: unit "${unit.id}" cannot charge "${target.id}" (the target has left the field).`);
+      }
       const planned = validateChargeOnField({
         unit: effectiveUnit(unit.id),
         from: simulated.get(unit.id),
@@ -935,13 +944,16 @@ export function validateTurn(battle, submission) {
 // --- Resolution -------------------------------------------------------------
 // Resolution is a pure function from the battle state and a committed
 // decision to a new state and events. The Movement phase executes the
-// accepted moves, charges, reforms, and withdraws in the given order at their
-// validated previews; a withdraw also breaks every contact it held and then
-// tests cohesion by chance on the engine generator (failure costs a cohesion
-// step, recorded with the draw). The Combat phase then fights every engaged
-// pair (see `./combat.js`). Shooting and Cohesion stay empty until their
-// slices land. Resolution then passes the turn and counts rounds as pairs of
-// turns. A turn decision is either a commit or a concede.
+// accepted moves, charges, reforms, withdraws, and rallies in the given order
+// at their validated previews; a withdraw also breaks every contact it held
+// and then tests cohesion by chance on the engine generator (failure steps the
+// numeric value down, recorded with the draw), while a rally never moves the
+// unit. The Combat phase then fights every engaged pair (see `./combat.js`),
+// and the Cohesion phase wears close-spacing units on bad ground, removes
+// units worn below their share, and flees the side's Routed units again (see
+// `./cohesion.js`). Shooting stays empty until its slice lands. Resolution
+// then passes the turn and counts rounds as pairs of turns. A turn decision
+// is either a commit or a concede.
 
 export class TurnRejectedError extends Error {
   constructor(result) {
@@ -998,16 +1010,87 @@ export function resolveTurn(battle, decision) {
   // units (a target charged twice keeps its first contact). Each reform
   // changes the formation in place; each withdraw steps back, breaks every
   // contact it held, and then tests cohesion by chance on the engine
-  // generator (the enemy neither pursues nor gets a free attack). A charge
-  // marks the charger for the first-fight bonus, consumed by the Combat phase
-  // of this same turn (see `./combat.js`).
+  // generator (the enemy neither pursues nor gets a free attack); failure steps
+  // the numeric value down to the next state. A rally never moves the unit: a
+  // Disordered unit regains cohesion up to its maximum, while a Routed unit
+  // draws against the rally chance and returns as Disordered at the rally
+  // value. A charge marks the charger for the first-fight bonus, consumed by
+  // the Combat phase of this same turn (see `./combat.js`).
   const rng = createRng(next.rngState);
+  const rallyParams = cohesionParamsOf(next.parameters);
   for (const verdict of result.verdicts) {
     if (!verdict.accepted || !verdict.preview) {
       continue;
     }
     const order = decision.submission.orders[verdict.orderIndex];
     if (!isRecord(order)) {
+      continue;
+    }
+    if (order.kind === ORDER_KIND_RALLY && verdict.rally) {
+      const target = next.units.find((unit) => unit.id === verdict.unitId);
+      const valueBefore = unitCohesionValue(target, rallyParams);
+      const stateBefore = unitCohesionState(target, rallyParams);
+      if (stateBefore === 'Disordered') {
+        target.cohesionValue = valueBefore + rallyParams.rallyRegain;
+        syncCohesion(target, rallyParams);
+        next.events.push(
+          nextEvent(next, {
+            type: 'unit-rallied',
+            turnNumber: battle.turnNumber,
+            side: battle.activeSide,
+            unitId: verdict.unitId,
+            orderIndex: verdict.orderIndex,
+            cohesionBefore: stateBefore,
+            cohesionAfter: unitCohesionState(target, rallyParams),
+            valueBefore,
+            valueAfter: target.cohesionValue,
+            result: 'rallied',
+          }),
+        );
+      } else if (stateBefore === 'Routed') {
+        const value = rng.next();
+        next.rngState = rng.state;
+        const passed = value < rallyParams.rallyChance;
+        next.events.push(
+          nextEvent(next, {
+            type: RANDOM_DRAW_EVENT,
+            purpose: 'rally',
+            turnNumber: battle.turnNumber,
+            side: battle.activeSide,
+            unitId: verdict.unitId,
+            orderIndex: verdict.orderIndex,
+            value,
+            result: passed ? 'passed' : 'failed',
+            cohesionBefore: stateBefore,
+            cohesionAfter: passed ? 'Disordered' : stateBefore,
+          }),
+        );
+        if (passed) {
+          target.cohesionValue = rallyParams.rallyTo;
+          syncCohesion(target, rallyParams);
+          // A rallied unit returns as Disordered even when the tuned rally
+          // value sits outside the Disordered band.
+          if (unitCohesionState(target, rallyParams) !== 'Disordered') {
+            const top = Math.floor(rallyParams.disorderedBelow - 1);
+            target.cohesionValue = Number.isFinite(top) && top >= 1 ? top : 1;
+            syncCohesion(target, rallyParams);
+          }
+          next.events.push(
+            nextEvent(next, {
+              type: 'unit-rallied',
+              turnNumber: battle.turnNumber,
+              side: battle.activeSide,
+              unitId: verdict.unitId,
+              orderIndex: verdict.orderIndex,
+              cohesionBefore: stateBefore,
+              cohesionAfter: unitCohesionState(target, rallyParams),
+              valueBefore,
+              valueAfter: target.cohesionValue,
+              result: 'rallied',
+            }),
+          );
+        }
+      }
       continue;
     }
     if (order.kind === ORDER_KIND_REFORM && verdict.reform) {
@@ -1060,9 +1143,15 @@ export function resolveTurn(battle, decision) {
       const value = rng.next();
       next.rngState = rng.state;
       const passed = value < cohesionPassChance;
-      const before = target.cohesion;
-      const after = passed ? before : stepDownCohesion(before);
-      target.cohesion = after;
+      const cohesion = cohesionParamsOf(next.parameters);
+      const stateBefore = unitCohesionState(target, cohesion);
+      const numericBefore = unitCohesionValue(target, cohesion);
+      if (!passed) {
+        target.cohesionValue = stepDownCohesionValue(target, cohesion);
+        syncCohesion(target, cohesion);
+      }
+      const stateAfter = unitCohesionState(target, cohesion);
+      const numericAfter = unitCohesionValue(target, cohesion);
       next.events.push(
         nextEvent(next, {
           type: RANDOM_DRAW_EVENT,
@@ -1073,10 +1162,28 @@ export function resolveTurn(battle, decision) {
           orderIndex: verdict.orderIndex,
           value,
           result: passed ? 'passed' : 'failed',
-          cohesionBefore: before,
-          cohesionAfter: after,
+          cohesionBefore: stateBefore,
+          cohesionAfter: stateAfter,
+          valueBefore: numericBefore,
+          valueAfter: numericAfter,
         }),
       );
+      if (!passed) {
+        next.events.push(
+          nextEvent(next, {
+            type: 'unit-cohesion',
+            turnNumber: battle.turnNumber,
+            side: battle.activeSide,
+            unitId: verdict.unitId,
+            orderIndex: verdict.orderIndex,
+            cohesionBefore: stateBefore,
+            cohesionAfter: stateAfter,
+            valueBefore: numericBefore,
+            valueAfter: numericAfter,
+            cause: 'withdraw',
+          }),
+        );
+      }
       continue;
     }
     if (order.kind !== ORDER_KIND_MOVE) {
@@ -1149,8 +1256,12 @@ export function resolveTurn(battle, decision) {
     );
   }
   // The Combat phase fights every engaged pair on the engine generator,
-  // recording one draw per side per fight (see `./combat.js`).
+  // recording one draw per side per fight (see `./combat.js`). The Cohesion
+  // phase then wears close-spacing units on bad ground, removes units worn
+  // below their share, and flees the side's Routed units again (see
+  // `./cohesion.js`).
   resolveCombatPhase(next);
+  resolveCohesionPhase(next, battle.activeSide);
   for (const phase of TURN_PHASES.slice(2)) {
     next.events.push(
       nextEvent(next, {
