@@ -843,10 +843,7 @@ function battleMapSvg(document, mapView) {
   // highlighted on the map at once with the new state: losses, cohesion
   // changes, routs, and fled or destroyed units (see `./domain/battle-log.js`).
   const lastResolved = state.battle ? lastResolvedTurnNumber(state.battle) : null;
-  const changedByUnit = new Map(
-    (lastResolved === null ? [] : changedUnitsForTurn(state.battle, lastResolved))
-      .map((entry) => [entry.unitId, entry.reasons]),
-  );
+  const changedByUnit = changedByUnitMap(state.battle, lastResolved);
   const selectedCharge = new Map();
   const selectedShoot = new Set();
   if (drafting && state.selectedUnitId) {
@@ -1151,10 +1148,7 @@ function orderOfBattleView(document) {
   const conflicts = conflictUnitIds();
   const drafting = battle ? canDraftOrders() : false;
   const lastResolved = battle ? lastResolvedTurnNumber(battle) : null;
-  const changedByUnit = new Map(
-    (battle && lastResolved !== null ? changedUnitsForTurn(battle, lastResolved) : [])
-      .map((entry) => [entry.unitId, entry.reasons]),
-  );
+  const changedByUnit = changedByUnitMap(battle, lastResolved);
   return `<div class="panel"><span class="eyebrow">FORCES IN THE FIELD</span><h2>Order of battle</h2>
     ${(document.sides || [])
       .map((side) => {
@@ -1385,6 +1379,22 @@ function drawLine(battle, event) {
   return `<li class="chance">${esc(describeBattleEvent(event, battle))}</li>`;
 }
 
+// One result list: the item lines, or a single empty line when there is
+// nothing to report. Every section of the turn result shares this shape.
+function resultItems(lines, emptyText) {
+  return lines.length > 0 ? lines.join('') : `<li class="empty-result">${esc(emptyText)}</li>`;
+}
+
+// The changed units of a turn as a unit-id → reasons map for the map and the
+// order of battle highlights. A null turn means no resolved turn yet: nothing
+// is highlighted.
+function changedByUnitMap(battle, turnNumber) {
+  if (!battle || turnNumber === null || turnNumber === undefined) return new Map();
+  return new Map(
+    changedUnitsForTurn(battle, turnNumber).map((entry) => [entry.unitId, entry.reasons]),
+  );
+}
+
 // The result of the turn just resolved: contacts, losses, cohesion changes,
 // and routs/removals, each with its chance outcome, plus the runner's fallback
 // events for non-human players (salvaged orders, holds on timeout). When no
@@ -1403,24 +1413,39 @@ function turnResultView() {
   const lossUnits = summary.losses.map((loss) => loss.unitId);
   const lossDraws = drawsFor(['shooting-loss', 'combat-loss'], lossUnits);
   const cohesionUnits = summary.cohesion.map((entry) => entry.unitId);
-  const cohesionDraws = drawsFor(['rally', 'withdraw-cohesion', 'rout-test'], cohesionUnits);
-  const orderLines = summary.orders.length > 0
-    ? summary.orders.map((event) => `<li>${esc(describeBattleEvent(event, battle))}</li>`).join('')
-    : '<li class="empty-result">No orders: every unit held.</li>';
-  const contactLines = summary.contacts.length > 0
-    ? summary.contacts.map((event) => `<li>${esc(describeBattleEvent(event, battle))}</li>`).join('')
-    : '<li class="empty-result">No new contacts.</li>';
-  const lossLines = summary.losses.length > 0
-    ? summary.losses.map((loss) => lossLine(document, battle, loss)).join('')
-      + lossDraws.map((event) => drawLine(battle, event)).join('')
-    : '<li class="empty-result">No losses.</li>';
-  const cohesionLines = summary.cohesion.length > 0
-    ? summary.cohesion.map((event) => `<li>${esc(describeBattleEvent(event, battle))}</li>`).join('')
-      + cohesionDraws.map((event) => drawLine(battle, event)).join('')
-    : '<li class="empty-result">No cohesion changes.</li>';
-  const routLines = summary.routs.length > 0
-    ? summary.routs.map((event) => `<li>${esc(describeBattleEvent(event, battle))}</li>`).join('')
-    : '<li class="empty-result">No routs, flights, or destroyed units.</li>';
+  const cohesionDraws = drawsFor(['rally', 'withdraw-cohesion'], cohesionUnits);
+  const routUnits = summary.routs.map((entry) => entry.unitId);
+  // Each rout shows its chance outcome: the rout-test draw that decided it.
+  const routDraws = drawsFor(['rout-test'], routUnits);
+  const orderLines = resultItems(
+    summary.orders.map((event) => `<li>${esc(describeBattleEvent(event, battle))}</li>`),
+    'No orders: every unit held.',
+  );
+  const contactLines = resultItems(
+    summary.contacts.map((event) => `<li>${esc(describeBattleEvent(event, battle))}</li>`),
+    'No new contacts.',
+  );
+  const lossLines = resultItems(
+    [
+      ...summary.losses.map((loss) => lossLine(document, battle, loss)),
+      ...lossDraws.map((event) => drawLine(battle, event)),
+    ],
+    'No losses.',
+  );
+  const cohesionLines = resultItems(
+    [
+      ...summary.cohesion.map((event) => `<li>${esc(describeBattleEvent(event, battle))}</li>`),
+      ...cohesionDraws.map((event) => drawLine(battle, event)),
+    ],
+    'No cohesion changes.',
+  );
+  const routLines = resultItems(
+    [
+      ...summary.routs.map((event) => `<li>${esc(describeBattleEvent(event, battle))}</li>`),
+      ...routDraws.map((event) => drawLine(battle, event)),
+    ],
+    'No routs, flights, or destroyed units.',
+  );
   const fallbackLines = summary.fallbacks.length > 0
     ? `<dt>Substitutions</dt><dd><ul class="result-list">${summary.fallbacks.map((event) => `<li>${esc(describeBattleEvent(event, battle))}</li>`).join('')}</ul></dd>`
     : '';

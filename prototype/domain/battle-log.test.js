@@ -162,11 +162,47 @@ describe('summarizeTurn and changedUnitsForTurn', () => {
     assert.ok(groups.some((group) => group.turnNumber === 1));
   });
 
+  it('returns null before any turn resolves', () => {
+    const battle = startHumanBattle();
+    assert.equal(lastResolvedTurnNumber(battle), null);
+  });
+
+  it('keeps the concession in the summary of a conceded turn', () => {
+    const battle = startHumanBattle();
+    const conceded = JSON.parse(JSON.stringify(battle));
+    conceded.events.push({
+      seq: conceded.events.length,
+      type: 'turn-conceded',
+      turnNumber: 1,
+      side: 'side-a',
+    });
+    const summary = summarizeTurn(conceded, 1);
+    assert.equal(summary.ended?.type, 'turn-conceded');
+    assert.match(describeBattleEvent(summary.ended, conceded), /conceded/);
+    assert.equal(lastResolvedTurnNumber(conceded), 1);
+  });
+
+  it('rebuilds the identical log after a save/resume round-trip', () => {
+    let battle = startHumanBattle();
+    battle = resolveTurn(battle, { type: 'commit', submission: submissionFor(battle, []) });
+    const before = groupLogEvents(battle).map((group) => ({
+      ...group,
+      events: group.events.map((event) => describeBattleEvent(event, battle)),
+    }));
+    // Resume stores the whole battle (events included) and the log derives
+    // purely from those events, so a round-trip restores the complete log.
+    const resumed = JSON.parse(JSON.stringify(battle));
+    const after = groupLogEvents(resumed).map((group) => ({
+      ...group,
+      events: group.events.map((event) => describeBattleEvent(event, resumed)),
+    }));
+    assert.deepEqual(after, before);
+  });
   it('flags losses, cohesion changes, routs, and removals after a fight', () => {
     const battle = startHumanBattle();
-    const shoved = JSON.parse(JSON.stringify(battle));
-    shoved.events.push({
-      seq: shoved.events.length,
+    const battleWithFightEvents = JSON.parse(JSON.stringify(battle));
+    battleWithFightEvents.events.push({
+      seq: battleWithFightEvents.events.length,
       type: 'units-fought',
       turnNumber: 1,
       side: 'side-a',
@@ -179,8 +215,8 @@ describe('summarizeTurn and changedUnitsForTurn', () => {
       ],
       soldiers: { 'u-a': { before: 100, after: 98 }, 'u-b': { before: 100, after: 94 } },
     });
-    shoved.events.push({
-      seq: shoved.events.length,
+    battleWithFightEvents.events.push({
+      seq: battleWithFightEvents.events.length,
       type: 'unit-cohesion',
       turnNumber: 1,
       side: 'side-b',
@@ -190,8 +226,8 @@ describe('summarizeTurn and changedUnitsForTurn', () => {
       valueBefore: 8,
       valueAfter: 3,
     });
-    shoved.events.push({
-      seq: shoved.events.length,
+    battleWithFightEvents.events.push({
+      seq: battleWithFightEvents.events.length,
       type: 'unit-routed',
       turnNumber: 1,
       side: 'side-b',
@@ -199,15 +235,34 @@ describe('summarizeTurn and changedUnitsForTurn', () => {
       cause: 'flank-test',
       position: { x: 1, y: 1 },
     });
-    const summary = summarizeTurn(shoved, 1);
+    battleWithFightEvents.events.push({
+      seq: battleWithFightEvents.events.length,
+      type: 'unit-fled',
+      turnNumber: 1,
+      side: 'side-b',
+      unitId: 'u-c',
+    });
+    battleWithFightEvents.events.push({
+      seq: battleWithFightEvents.events.length,
+      type: 'unit-destroyed',
+      turnNumber: 1,
+      side: 'side-b',
+      unitId: 'u-d',
+      reason: 'below-strength',
+      soldiers: 4,
+      startingSoldiers: 100,
+    });
+    const summary = summarizeTurn(battleWithFightEvents, 1);
     assert.equal(summary.losses.length, 2);
     assert.equal(summary.cohesion.length, 1);
-    assert.equal(summary.routs.length, 1);
-    const changed = changedUnitsForTurn(shoved, 1);
+    assert.equal(summary.routs.length, 3);
+    const changed = changedUnitsForTurn(battleWithFightEvents, 1);
     const flagged = new Map(changed.map((entry) => [entry.unitId, entry.reasons]));
     assert.ok(flagged.get('u-b').includes('losses'));
     assert.ok(flagged.get('u-b').includes('cohesion'));
     assert.ok(flagged.get('u-b').includes('routed'));
+    assert.ok(flagged.get('u-c').includes('fled'));
+    assert.ok(flagged.get('u-d').includes('destroyed'));
   });
 
   it('places shooting, combat, and cohesion events in their phases', () => {

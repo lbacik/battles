@@ -414,6 +414,7 @@ export function summarizeTurn(battle, turnNumber) {
         summary.fallbacks.push(event);
         break;
       case 'battle-ended':
+      case 'turn-conceded':
         summary.ended = event;
         break;
       default:
