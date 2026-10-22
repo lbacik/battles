@@ -168,6 +168,24 @@ export const RULESET_PARAMETERS = Object.freeze({
     disorderedAt: 2.0,
     routedAt: 4.0,
   }),
+  // Shooting at enemy units (decision #6 items 11, 19; see `./shoot.js`).
+  // Losses are the shooters × a seeded draw × `lethality`, multiplied down
+  // once per modifier: `openSpacingFactor` while the target stands in open
+  // spacing, the `coverFactor` of the worst ground cover under the target
+  // (forest or settlement; any other cover shoots at full effect), and
+  // `disorderedFactor` while the shooter is Disordered or Routed. Cohesion
+  // strain is casualties × `cohesionPerCasualty` and steps Steady to
+  // Disordered at `disorderedAt`, and to Routed at `routedAt`, exactly as in
+  // combat. Initial values for this slice.
+  shooting: Object.freeze({
+    lethality: 0.02,
+    openSpacingFactor: 0.6,
+    coverFactor: Object.freeze({ forest: 0.5, settlement: 0.6 }),
+    disorderedFactor: 0.7,
+    cohesionPerCasualty: 0.2,
+    disorderedAt: 2.0,
+    routedAt: 4.0,
+  }),
 });
 
 export const TROOP_TYPE_KEYS = Object.freeze([

@@ -4,7 +4,7 @@
 // The manoeuvre slice of the framework-free engine package: two Passive
 // players can play a battle turn after turn through the shared player
 // contract and a runner (see `./players.js`), with Hold, Move, Charge,
-// Reform, and Withdraw orders. An accepted Move carries a deterministic
+// Reform, Withdraw, Shoot, and Rally orders. An accepted Move carries a deterministic
 // preview of the unit's footprint after the Movement phase, an accepted
 // Charge carries the flush contact preview plus the contact record, an
 // accepted Reform carries the new-formation footprint preview, an accepted
@@ -33,14 +33,15 @@
 // orders and has them resolved, then the other side does the same, and a
 // pair of turns forms a round. Resolution runs the Movement, Shooting,
 // Combat, and Cohesion phases — the Movement phase executes the accepted
-// moves, charges, reforms, withdraws, and rallies in order, the Combat phase
-// fights every engaged pair (see `./combat.js`), the Cohesion phase wears
-// close-spacing units on bad ground, removes spent units, and flees Routed
-// units again (see `./cohesion.js`), while Shooting stays empty until its
-// slice lands — then passes the turn and counts rounds as pairs of turns.
+// moves, charges, reforms, withdraws, and rallies in order, the Shooting
+// phase resolves the accepted Shoot orders (see `./shoot.js`), the Combat
+// phase fights every engaged pair (see `./combat.js`), and the Cohesion phase
+// wears close-spacing units on bad ground, removes spent units, and flees
+// Routed units again (see `./cohesion.js`) — then passes the turn and counts
+// rounds as pairs of turns.
 
 import { deriveFootprint } from './geometry.js';
-import { RULESET_PARAMETERS, TROOP_TYPE_CATALOGUE } from './polis-classical.js';
+import { RULESET_PARAMETERS, TROOP_TYPE_CATALOGUE, getTroopType } from './polis-classical.js';
 import {
   chargeCandidatesFor,
   fightingFiles,
@@ -54,6 +55,7 @@ import {
   movementAllowanceM,
   validateMoveOnField,
 } from './movement.js';
+import { resolveShootingPhase, shootCandidatesFor, validateShootOnField } from './shoot.js';
 import { validateReformOnField } from './reform.js';
 import { validateWithdrawOnField, withdrawParamsOf } from './withdraw.js';
 import {
@@ -82,16 +84,16 @@ export const SUBMISSION_FORMAT_VERSION = TURN_CONTRACT_VERSION;
 export const PLAYER_VIEW_FORMAT_VERSION = TURN_CONTRACT_VERSION;
 export const AVAILABLE_ACTIONS_FORMAT_VERSION = TURN_CONTRACT_VERSION;
 
-// Order kinds. Hold, Move, Charge, Reform, Withdraw, and Rally are permitted
-// in this slice; Shoot is the known kind the engine reports as unavailable
-// until its slice lands (Withdraw and Rally still gate permissions: an
+// Order kinds. Hold, Move, Charge, Reform, Withdraw, Shoot, and Rally are
+// permitted in this slice (Withdraw and Rally still gate permissions: an
 // engaged unit may only Hold or Withdraw, a routed unit may only Rally, and a
-// disordered unit cannot charge).
+// disordered unit cannot charge; only missile troops may Shoot).
 export const ORDER_KIND_HOLD = 'Hold';
 export const ORDER_KIND_MOVE = 'Move';
 export const ORDER_KIND_CHARGE = 'Charge';
 export const ORDER_KIND_REFORM = 'Reform';
 export const ORDER_KIND_WITHDRAW = 'Withdraw';
+export const ORDER_KIND_SHOOT = 'Shoot';
 export const ORDER_KIND_RALLY = 'Rally';
 export const ORDER_KINDS = Object.freeze([
   ORDER_KIND_HOLD,
@@ -99,6 +101,7 @@ export const ORDER_KINDS = Object.freeze([
   ORDER_KIND_CHARGE,
   ORDER_KIND_REFORM,
   ORDER_KIND_WITHDRAW,
+  ORDER_KIND_SHOOT,
   ORDER_KIND_RALLY,
 ]);
 export const KNOWN_ORDER_KINDS = Object.freeze([
@@ -139,6 +142,12 @@ export const REJECTION_INVALID_FORMATION = 'invalid_formation';
 // Withdraw rejection codes (see `./withdraw.js`). `order_not_permitted`
 // gates Withdraw for units that are not engaged (as well as routed units).
 export const REJECTION_INVALID_WITHDRAW = 'invalid_withdraw';
+// Shoot rejection codes (see `./shoot.js`). `order_not_permitted` gates
+// Shoot for engaged and routed units (as for the other orders) and for troop
+// types without missiles.
+export const REJECTION_INVALID_SHOOT = 'invalid_shoot';
+export const REJECTION_OUT_OF_RANGE = 'out_of_range';
+export const REJECTION_NO_LINE_OF_FIRE = 'no_line_of_fire';
 
 // Whole-submission refusal codes: a stale turn number or a side that is not
 // active refuses the submission before any order is examined.
@@ -306,13 +315,14 @@ export function buildPlayerView(battle) {
 // and the movement allowance in metres at the unit's current terrain (the
 // open-ground allowance divided by the worst-cover factor there; the flat
 // river fee is per leg and never part of the allowance). Hold, Move, Charge,
-// Reform, and Withdraw are permitted in this slice; the Shoot candidates stay
-// empty until the Shoot slice lands. Permission follows the battle state: a
+// Reform, Withdraw, Shoot, and Rally are permitted in this slice; only
+// missile troops shoot. Permission follows the battle state: a
 // routed unit may only Rally, an engaged unit may only Hold or Withdraw, and
 // a disordered unit cannot charge.
 
 const UNAVAILABLE_REASONS = Object.freeze({
-  Shoot: 'Shoot is not available in this slice: only Hold, Move, Charge, Reform, Withdraw, and Rally are permitted.',
+  // Every known order kind is permitted in this slice, so no kind carries an
+  // unavailable reason. Kept for the shape `actionsForUnit` reads.
 });
 
 function movementParamsOf(battle) {
@@ -324,13 +334,26 @@ function isEngaged(unit) {
     && typeof unit.engaged.unitId === 'string';
 }
 
+// True when the unit's troop type carries a missile range and may shoot.
+function hasMissiles(unit) {
+  const range = getTroopType(unit?.troopType)?.missileRange;
+  return Number.isFinite(range) && range > 0;
+}
+
+// The reason Shoot is unavailable to a unit whose troop type has no missile
+// range.
+function noMissilesReason(unit) {
+  return `Troop type "${unit?.troopType}" has no missile range: Shoot is not permitted.`;
+}
+
 // Compute the permitted order kinds for a unit at the start of the turn: a
 // removed unit (destroyed or fled) may give no order, a routed unit may only
 // Rally, an engaged unit may only Hold or Withdraw, a disordered unit cannot
-// charge but may Rally, and a steady unit may not Rally. Returns
-// `{ permitted, gated }` where `gated` lists `{ kind, reason }` for the kinds
-// refused by permission (as opposed to kinds unavailable until their slice
-// lands).
+// charge but may Rally, a steady unit may not Rally, and only missile troops
+// may Shoot (a Disordered missile unit shoots with a penalty at resolution).
+// Returns `{ permitted, gated }` where `gated` lists `{ kind, reason }` for
+// the kinds refused by permission (as opposed to kinds unavailable until
+// their slice lands).
 function permissionFor(unit, battle = null) {
   if (!isActiveUnit(unit)) {
     return {
@@ -345,6 +368,7 @@ function permissionFor(unit, battle = null) {
   }
   const cohesion = battle ? cohesionParamsOf(battle.parameters) : cohesionParamsOf({});
   const state = unitCohesionState(unit, cohesion);
+  const missiles = hasMissiles(unit);
   if (state === 'Routed') {
     return {
       permitted: [{ kind: ORDER_KIND_RALLY }],
@@ -372,8 +396,12 @@ function permissionFor(unit, battle = null) {
         { kind: ORDER_KIND_MOVE },
         { kind: ORDER_KIND_REFORM },
         { kind: ORDER_KIND_RALLY },
+        ...(missiles ? [{ kind: ORDER_KIND_SHOOT }] : []),
       ],
-      gated: [{ kind: ORDER_KIND_CHARGE, reason: 'Disordered units cannot charge.' }],
+      gated: [
+        { kind: ORDER_KIND_CHARGE, reason: 'Disordered units cannot charge.' },
+        ...(missiles ? [] : [{ kind: ORDER_KIND_SHOOT, reason: noMissilesReason(unit) }]),
+      ],
     };
   }
   return {
@@ -382,8 +410,12 @@ function permissionFor(unit, battle = null) {
       { kind: ORDER_KIND_MOVE },
       { kind: ORDER_KIND_CHARGE },
       { kind: ORDER_KIND_REFORM },
+      ...(missiles ? [{ kind: ORDER_KIND_SHOOT }] : []),
     ],
-    gated: [{ kind: ORDER_KIND_RALLY, reason: 'Steady units have no need to rally.' }],
+    gated: [
+      { kind: ORDER_KIND_RALLY, reason: 'Steady units have no need to rally.' },
+      ...(missiles ? [] : [{ kind: ORDER_KIND_SHOOT, reason: noMissilesReason(unit) }]),
+    ],
   };
 }
 
@@ -406,6 +438,7 @@ function actionsForUnit(unit, battle, params, terrainFeatures = []) {
     })),
   ];
   const canCharge = permitted.some((item) => item.kind === ORDER_KIND_CHARGE);
+  const canShoot = permitted.some((item) => item.kind === ORDER_KIND_SHOOT);
   const arc = Number.isFinite(params?.forwardArcDeg) ? params.forwardArcDeg : FORWARD_ARC_DEG;
   const enemies = canCharge
     ? battle.units
@@ -424,7 +457,16 @@ function actionsForUnit(unit, battle, params, terrainFeatures = []) {
         arc,
       )
       : [],
-    shootCandidates: [],
+    shootCandidates: canShoot
+      ? shootCandidatesFor(
+        unit,
+        { position: { ...unit.position }, facing: unit.facing },
+        battle.units.filter((other) => other.side !== unit.side),
+        battle.units.filter((other) => other.id !== unit.id),
+        terrainFeatures,
+        battle.parameters,
+      )
+      : [],
     movementAllowanceM: movementAllowanceM(unit, params, terrainFeatures),
   };
 }
@@ -762,6 +804,15 @@ export function validateTurn(battle, submission) {
           rally: { state },
         };
       }
+    // Only missile troops may shoot. Engaged and routed units never reach
+    // this gate (their only permitted kinds exclude Shoot above); any other
+    // unit whose troop type has no missile range is refused with the orders
+    // it may give instead.
+    if (kind === ORDER_KIND_SHOOT && !hasMissiles(unit)) {
+      const shootPermitted = permissionFor(unit, battle).permitted.map((item) => item.kind);
+      return reject(orderIndex, unit.id, REJECTION_ORDER_NOT_PERMITTED,
+        { unitId: unit.id, reason: 'no-missiles', permitted: shootPermitted },
+        `Order ${orderIndex}: unit "${unit.id}" (troop type "${unit.troopType}") has no missiles and may not Shoot.`);
     }
     if (kind === ORDER_KIND_HOLD) {
       return {
@@ -920,6 +971,39 @@ export function validateTurn(battle, submission) {
         withdraw: { distanceM: planned.distanceM, brokeContactWith: [...planned.brokeContactWith] },
       };
     }
+    if (kind === ORDER_KIND_SHOOT) {
+      const targetId = isRecord(order) ? order.targetId : undefined;
+      const target = typeof targetId === 'string' ? byId.get(targetId) : undefined;
+      const planned = validateShootOnField({
+        unit: effectiveUnit(unit.id),
+        from: simulated.get(unit.id),
+        target: target ? effectiveUnit(target.id) : undefined,
+        targetPose: target ? simulated.get(target.id) : undefined,
+        targetEngaged: target ? engaged.has(target.id) : false,
+        others: battle.units
+          .filter((entry) => entry.id !== unit.id)
+          .map((entry) => ({
+            ...effectiveUnit(entry.id),
+            position: { ...simulated.get(entry.id).position },
+            facing: simulated.get(entry.id).facing,
+          })),
+        terrainFeatures: battle.scenario?.terrainFeatures || [],
+        parameters: battle.parameters,
+        orderIndex,
+      });
+      if (!planned.ok) {
+        return reject(orderIndex, unit.id, planned.code, planned.details, planned.message);
+      }
+      // A Shoot never moves: the simulated pose is left unchanged, so the
+      // shooter ends the turn where its earlier validation left it.
+      return {
+        orderIndex,
+        unitId: unit.id,
+        accepted: true,
+        preview: planned.preview,
+        shoot: { ...planned.shoot },
+      };
+    }
     return reject(orderIndex, unit.id, REJECTION_UNSUPPORTED_ORDER_KIND,
       { unitId: unit.id, kind },
       `Order ${orderIndex}: order kind "${String(kind)}" is not ` +
@@ -947,13 +1031,14 @@ export function validateTurn(battle, submission) {
 // accepted moves, charges, reforms, withdraws, and rallies in the given order
 // at their validated previews; a withdraw also breaks every contact it held
 // and then tests cohesion by chance on the engine generator (failure steps the
-// numeric value down, recorded with the draw), while a rally never moves the
-// unit. The Combat phase then fights every engaged pair (see `./combat.js`),
-// and the Cohesion phase wears close-spacing units on bad ground, removes
-// units worn below their share, and flees the side's Routed units again (see
-// `./cohesion.js`). Shooting stays empty until its slice lands. Resolution
-// then passes the turn and counts rounds as pairs of turns. A turn decision
-// is either a commit or a concede.
+// numeric value down to the next state, recorded with the draw), while a rally
+// never moves the unit. The Shooting phase then resolves the accepted Shoot
+// orders (see `./shoot.js`), the Combat phase fights every engaged pair (see
+// `./combat.js`), and the Cohesion phase wears close-spacing units on bad
+// ground, removes units worn below their share, and flees the side's Routed
+// units again (see `./cohesion.js`). Resolution then passes the turn and
+// counts rounds as pairs of turns. A turn decision is either a commit or a
+// concede.
 
 export class TurnRejectedError extends Error {
   constructor(result) {
@@ -1015,7 +1100,9 @@ export function resolveTurn(battle, decision) {
   // Disordered unit regains cohesion up to its maximum, while a Routed unit
   // draws against the rally chance and returns as Disordered at the rally
   // value. A charge marks the charger for the first-fight bonus, consumed by
-  // the Combat phase of this same turn (see `./combat.js`).
+  // the Combat phase of this same turn (see `./combat.js`). A Shoot changes
+  // nothing yet: its losses resolve in the Shooting phase below (see
+  // `./shoot.js`).
   const rng = createRng(next.rngState);
   const rallyParams = cohesionParamsOf(next.parameters);
   for (const verdict of result.verdicts) {
@@ -1255,6 +1342,20 @@ export function resolveTurn(battle, decision) {
       }),
     );
   }
+  // The Shooting phase resolves the active side's accepted Shoot orders in
+  // the given order on the engine generator, recording one draw per shot
+  // (see `./shoot.js`).
+  const shootOrders = [];
+  for (const verdict of result.verdicts) {
+    if (!verdict.accepted) {
+      continue;
+    }
+    const order = decision.submission.orders[verdict.orderIndex];
+    if (isRecord(order) && order.kind === ORDER_KIND_SHOOT && typeof order.targetId === 'string') {
+      shootOrders.push({ unitId: verdict.unitId, targetId: order.targetId });
+    }
+  }
+  resolveShootingPhase(next, shootOrders);
   // The Combat phase fights every engaged pair on the engine generator,
   // recording one draw per side per fight (see `./combat.js`). The Cohesion
   // phase then wears close-spacing units on bad ground, removes units worn

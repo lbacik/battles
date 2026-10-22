@@ -127,6 +127,7 @@ export function createPassivePlayer() {
 // - a Move aims at a random point inside the unit's movement allowance (the
 //   same allowance the available actions show), keeping the facing;
 // - a Charge names a random charge candidate with no approach legs;
+// - a Shoot names a random shoot candidate;
 // - a Reform draws files and spacings inside the troop type's permitted range;
 // - a Withdraw (or Hold, or Rally where permitted) carries no parameters.
 //
@@ -236,6 +237,14 @@ function proposeOrder(kind, entry, view, byId, rng) {
       edge: candidate.edge,
       approach: [],
     };
+  }
+  if (kind === 'Shoot') {
+    const candidates = entry.shootCandidates || [];
+    if (candidates.length === 0) {
+      return { unitId, kind: 'Hold' };
+    }
+    const candidate = candidates[Math.floor(rng.next() * candidates.length)];
+    return { unitId, kind: 'Shoot', targetId: candidate.targetId };
   }
   if (kind === 'Reform') {
     const seen = byId.get(unitId);
