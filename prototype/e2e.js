@@ -1383,6 +1383,290 @@ async function phaseBattleMoveDrafting() {
     'pass',
     `now turn ${committed.turnNumber}`,
   );
+  await phaseBattleFullOrdersDrafting();
+}
+
+// Full-orders drafting through the engine: the same `validateTurn` calls the
+// battle screen makes on every draft change. On open ground the active side
+// drafts a Move, a Charge (direct and with an approach leg), and a Shoot, all
+// accepted with their previews; a Reform accepted with its new-formation
+// footprint; a Rally accepted for a Disordered unit; then every kind's
+// rejection with the highlight its map marker reads; then the step-4 core —
+// a Move, a Charge, and a deliberately colliding third order, the collision
+// rejected inline with its highlight, the draft reordered so the culprit
+// flips, the colliding order removed, and the surviving Move plus Charge
+// committed — and finally a Withdraw for the engaged target on the next turn.
+async function phaseBattleFullOrdersDrafting() {
+  logStep('battle drafting (full orders): inspector lists every kind with candidates', 'running');
+  const document = createScenario({ title: 'Full orders probe' });
+  const [first, second] = document.sides;
+  let counter = 1;
+  const probeId = () => `00000000-0000-4000-8000-${String(counter++).padStart(12, '0')}`;
+  const mk = (name, side, troopType, soldiers, files, li, rd, x, y, facing) => ({
+    id: probeId(), name, side, troopType, soldiers, files,
+    lateralInterval: li, rankDepth: rd, position: { x, y }, facing,
+  });
+  const mover1 = mk('Full mover one', first.id, 'hoplite', 100, 10, 1, 1, 400, 600, 180);
+  const mover2 = mk('Full mover two', first.id, 'hoplite', 100, 10, 1, 1, 440, 600, 180);
+  const charger = mk('Full charger', first.id, 'hoplite', 100, 10, 1, 1, 600, 600, 0);
+  const archer = mk('Full archer', first.id, 'archer', 100, 14, 1.5, 1.5, 800, 600, 0);
+  const reformer = mk('Full reformer', first.id, 'hoplite', 100, 10, 1, 1, 1000, 600, 0);
+  const target = mk('Full target', second.id, 'hoplite', 100, 10, 1, 1, 600, 680, 180);
+  const victim = mk('Full victim', second.id, 'hoplite', 100, 10, 1, 1, 800, 700, 180);
+  const extra = mk('Full extra', second.id, 'hoplite', 100, 10, 1, 1, 400, 300, 0);
+  document.units.push(mover1, mover2, charger, archer, reformer, target, victim, extra);
+  if ((document.terrainFeatures || []).length !== 0) {
+    throw new Error('the full-orders probe must stay on open ground');
+  }
+  if (validateScenario(document).length > 0) {
+    throw new Error(`full-orders probe is invalid: ${validateScenario(document).join('; ')}`);
+  }
+  if (validatePlayability(document).length > 0) {
+    throw new Error(
+      `full-orders probe is unplayable: ${validatePlayability(document).map((problem) => problem.message).join('; ')}`,
+    );
+  }
+  const controllers = { [first.id]: 'human', [second.id]: 'passive' };
+  const battle = startBattle(document, { seed: 7, controllers });
+  if (battle.activeSide !== first.id) {
+    throw new Error(`seed 7 must start the first side, got "${battle.activeSide}"`);
+  }
+  const actions = availableActions(battle, battle.activeSide);
+  const entryOf = (unit) => {
+    const entry = actions.units.find((item) => item.unitId === unit.id);
+    if (!entry) throw new Error(`availableActions is missing unit "${unit.id}"`);
+    return entry;
+  };
+  for (const unit of [mover1, mover2, charger, archer, reformer]) {
+    const entry = entryOf(unit);
+    if (!entry.permitted.some((item) => item.kind === 'Move')) {
+      throw new Error(`Move is not permitted for "${unit.name}"`);
+    }
+  }
+  if (entryOf(archer).movementAllowanceM !== 110) {
+    throw new Error(`expected a 110 m archer allowance, got ${entryOf(archer).movementAllowanceM}`);
+  }
+  const chargeHint = entryOf(charger).chargeCandidates.find((hint) => hint.targetId === target.id);
+  if (!chargeHint || chargeHint.edge !== 'front') {
+    throw new Error(`expected a front charge hint at the target, got: ${JSON.stringify(chargeHint)}`);
+  }
+  const shootHint = entryOf(archer).shootCandidates.find((hint) => hint.targetId === victim.id);
+  if (!shootHint) {
+    throw new Error('expected a shoot hint at the victim');
+  }
+  if (!entryOf(reformer).permitted.some((item) => item.kind === 'Reform')) {
+    throw new Error('Reform is not permitted for the reformer');
+  }
+  logStep(
+    'battle drafting (full orders): inspector lists every kind with candidates',
+    'pass',
+    'Move/Charge/Shoot/Reform · 90/110 m',
+  );
+  const sub = (orders) => ({
+    formatVersion: SUBMISSION_FORMAT_VERSION,
+    battleId: battle.id,
+    turnNumber: battle.turnNumber,
+    side: battle.activeSide,
+    orders,
+  });
+
+  logStep('battle drafting (full orders): a Charge validates with a contact preview', 'running');
+  const direct = validateTurn(battle, sub([{ unitId: charger.id, kind: 'Charge', targetId: target.id, edge: 'front', approach: [] }]));
+  if (!direct.ok || !direct.verdicts[0]?.accepted) {
+    throw new Error(`the direct Charge was refused: ${direct.message}`);
+  }
+  if (direct.verdicts[0].charge?.aspect !== 'front' || !Array.isArray(direct.verdicts[0].preview?.corners)) {
+    throw new Error(`the accepted Charge carries no contact preview: ${JSON.stringify(direct.verdicts[0].charge)}`);
+  }
+  const approached = validateTurn(battle, sub([{ unitId: charger.id, kind: 'Charge', targetId: target.id, edge: 'front', approach: [{ to: { x: 600, y: 620 } }] }]));
+  if (!approached.ok || !approached.verdicts[0]?.accepted) {
+    throw new Error(`the Charge with an approach leg was refused: ${approached.message}`);
+  }
+  logStep(
+    'battle drafting (full orders): a Charge validates with a contact preview',
+    'pass',
+    `front contact, ${direct.verdicts[0].charge.frontageM} m`,
+  );
+
+  logStep('battle drafting (full orders): a Shoot validates with its shot', 'running');
+  const shot = validateTurn(battle, sub([{ unitId: archer.id, kind: 'Shoot', targetId: victim.id }]));
+  if (!shot.ok || !shot.verdicts[0]?.accepted) {
+    throw new Error(`the Shoot was refused: ${shot.message}`);
+  }
+  if (shot.verdicts[0].shoot?.distanceM !== 100) {
+    throw new Error(`the accepted Shoot carries the wrong distance: ${JSON.stringify(shot.verdicts[0].shoot)}`);
+  }
+  logStep('battle drafting (full orders): a Shoot validates with its shot', 'pass', '100 m');
+
+  logStep('battle drafting (full orders): a Reform validates with the new footprint', 'running');
+  const reformed = validateTurn(battle, sub([{ unitId: reformer.id, kind: 'Reform', files: 8 }]));
+  if (!reformed.ok || !reformed.verdicts[0]?.accepted) {
+    throw new Error(`the Reform was refused: ${reformed.message}`);
+  }
+  if (reformed.verdicts[0].reform?.files !== 8 || !Array.isArray(reformed.verdicts[0].preview?.corners)) {
+    throw new Error(`the accepted Reform carries no footprint preview: ${JSON.stringify(reformed.verdicts[0].reform)}`);
+  }
+  logStep('battle drafting (full orders): a Reform validates with the new footprint', 'pass', '8 files');
+
+  logStep('battle drafting (full orders): a Rally validates for a Disordered unit', 'running');
+  const disordered = JSON.parse(JSON.stringify(battle));
+  disordered.units.find((unit) => unit.id === mover1.id).cohesion = 'Disordered';
+  const rallied = validateTurn(disordered, sub([{ unitId: mover1.id, kind: 'Rally' }]));
+  if (!rallied.ok || !rallied.verdicts[0]?.accepted) {
+    throw new Error(`the Disordered Rally was refused: ${rallied.message}`);
+  }
+  if (rallied.verdicts[0].rally?.state !== 'Disordered') {
+    throw new Error(`the accepted Rally carries no rally record: ${JSON.stringify(rallied.verdicts[0].rally)}`);
+  }
+  logStep('battle drafting (full orders): a Rally validates for a Disordered unit', 'pass', 'rallies from Disordered');
+
+  logStep('battle drafting (full orders): every kind is rejected with its highlight', 'running');
+  const rejectionCases = [
+    {
+      order: { unitId: charger.id, kind: 'Charge', targetId: target.id, edge: 'bogus', approach: [] },
+      code: 'invalid_charge',
+      highlight: (details) => details?.reason === 'bad-edge',
+    },
+    {
+      order: { unitId: archer.id, kind: 'Shoot', targetId: extra.id },
+      code: 'out_of_range',
+      highlight: (details) => Number.isFinite(details?.distanceM) && Number.isFinite(details?.shortfallM),
+    },
+    {
+      order: { unitId: archer.id, kind: 'Shoot', targetId: mover1.id },
+      code: 'invalid_shoot',
+      highlight: (details) => details?.reason === 'not-enemy',
+    },
+    {
+      order: { unitId: reformer.id, kind: 'Reform', files: 0 },
+      code: 'invalid_formation',
+      highlight: (details) => details?.reason === 'bad-files',
+    },
+    {
+      order: { unitId: reformer.id, kind: 'Reform', files: 8, lateralInterval: 99 },
+      code: 'invalid_formation',
+      highlight: (details) => details?.reason === 'spacing-out-of-range',
+    },
+    {
+      order: { unitId: mover1.id, kind: 'Withdraw' },
+      code: 'order_not_permitted',
+      highlight: (details) => details?.reason === 'not-engaged',
+    },
+    {
+      order: { unitId: mover1.id, kind: 'Rally' },
+      code: 'order_not_permitted',
+      highlight: (details) => details?.reason === 'not-disordered',
+    },
+  ];
+  for (const { order, code, highlight } of rejectionCases) {
+    const checked = validateTurn(battle, sub([order]));
+    if (checked.ok) {
+      throw new Error(`a ${order.kind} that must fail was accepted`);
+    }
+    const rejection = checked.verdicts[0]?.rejection;
+    if (rejection?.code !== code) {
+      throw new Error(`expected ${code} for ${order.kind}, got "${rejection?.code}"`);
+    }
+    if (!highlight(rejection.details)) {
+      throw new Error(`the ${code} rejection carries no highlight: ${JSON.stringify(rejection.details)}`);
+    }
+  }
+  logStep(
+    'battle drafting (full orders): every kind is rejected with its highlight',
+    'pass',
+    `${rejectionCases.length} rejections`,
+  );
+
+  // Step 4 of the local battle gate (#39): a Move, a Charge, and a deliberately
+  // colliding order; the collision is rejected inline with its highlight, the
+  // draft is reordered so the culprit flips, and the surviving orders commit.
+  logStep('battle drafting (full orders): Move, Charge, and a colliding order', 'running');
+  const dest = { x: 400, y: 560 };
+  const triple = validateTurn(battle, sub([
+    { unitId: mover1.id, kind: 'Move', legs: [{ to: dest }] },
+    { unitId: charger.id, kind: 'Charge', targetId: target.id, edge: 'front', approach: [] },
+    { unitId: mover2.id, kind: 'Move', legs: [{ to: dest }] },
+  ]));
+  if (triple.ok) {
+    throw new Error('a Move, a Charge, and a colliding Move were all accepted');
+  }
+  if (triple.verdicts[0]?.accepted !== true || triple.verdicts[1]?.accepted !== true) {
+    throw new Error('the Move and the Charge should stay accepted while the third order collides');
+  }
+  const collision = triple.verdicts[2]?.rejection;
+  if (collision?.code !== 'collision') {
+    throw new Error(`expected a collision rejection, got "${collision?.code}"`);
+  }
+  if (collision.details?.withUnitId !== mover1.id) {
+    throw new Error(`the collision names the wrong unit: ${JSON.stringify(collision.details)}`);
+  }
+  if (!Number.isFinite(collision.details?.at?.x) || !Number.isFinite(collision.details?.at?.y)) {
+    throw new Error(`the collision carries no highlight point: ${JSON.stringify(collision.details)}`);
+  }
+  logStep(
+    'battle drafting (full orders): Move, Charge, and a colliding order',
+    'pass',
+    collision.message,
+  );
+
+  logStep('battle drafting (full orders): reordering flips the culprit', 'running');
+  const swapped = validateTurn(battle, sub([
+    { unitId: mover2.id, kind: 'Move', legs: [{ to: dest }] },
+    { unitId: charger.id, kind: 'Charge', targetId: target.id, edge: 'front', approach: [] },
+    { unitId: mover1.id, kind: 'Move', legs: [{ to: dest }] },
+  ]));
+  if (swapped.ok || swapped.verdicts[2]?.rejection?.code !== 'collision') {
+    throw new Error('the reordered draft should still reject the third order with a collision');
+  }
+  if (swapped.verdicts[2].rejection.details?.withUnitId !== mover2.id) {
+    throw new Error(`reordering did not flip the culprit: ${JSON.stringify(swapped.verdicts[2].rejection.details)}`);
+  }
+  logStep('battle drafting (full orders): reordering flips the culprit', 'pass', 'culprit flipped');
+
+  logStep('battle drafting (full orders): commit the Move and the Charge', 'running');
+  const committed = resolveTurn(battle, {
+    type: 'commit',
+    submission: sub([
+      { unitId: mover1.id, kind: 'Move', legs: [{ to: dest }] },
+      { unitId: charger.id, kind: 'Charge', targetId: target.id, edge: 'front', approach: [] },
+    ]),
+  });
+  if (committed.turnNumber !== battle.turnNumber + 1) {
+    throw new Error(`expected turn ${battle.turnNumber + 1} after commit, got turn ${committed.turnNumber}`);
+  }
+  const landed = committed.units.find((unit) => unit.id === charger.id);
+  if (landed.position.x !== 600 || landed.position.y !== 680 || !landed.engaged) {
+    throw new Error(`the committed Charge did not land in contact: ${JSON.stringify(landed.position)}`);
+  }
+  logStep('battle drafting (full orders): commit the Move and the Charge', 'pass', `now turn ${committed.turnNumber}`);
+
+  logStep('battle drafting (full orders): the engaged target withdraws next turn', 'running');
+  const nextSub = (orders) => ({
+    formatVersion: SUBMISSION_FORMAT_VERSION,
+    battleId: committed.id,
+    turnNumber: committed.turnNumber,
+    side: committed.activeSide,
+    orders,
+  });
+  const withdrawal = validateTurn(committed, nextSub([{ unitId: target.id, kind: 'Withdraw' }]));
+  if (!withdrawal.ok || !withdrawal.verdicts[0]?.accepted) {
+    throw new Error(`the Withdraw was refused: ${withdrawal.message}`);
+  }
+  if (!Number.isFinite(withdrawal.verdicts[0].withdraw?.distanceM)
+    || !Array.isArray(withdrawal.verdicts[0].preview?.corners)) {
+    throw new Error(`the accepted Withdraw carries no step-back preview: ${JSON.stringify(withdrawal.verdicts[0].withdraw)}`);
+  }
+  const withdrawn = resolveTurn(committed, {
+    type: 'commit',
+    submission: nextSub([{ unitId: target.id, kind: 'Withdraw' }]),
+  });
+  if (withdrawn.turnNumber !== committed.turnNumber + 1) {
+    throw new Error('the Withdraw commit did not advance the turn');
+  }
+  if (withdrawn.units.find((unit) => unit.id === target.id)?.engaged) {
+    throw new Error('the withdrawn unit is still engaged');
+  }
+  logStep('battle drafting (full orders): the engaged target withdraws next turn', 'pass', `now turn ${withdrawn.turnNumber}`);
 }
 
 // Resolve one Human vs Passive turn for the persistence probe: a human side
