@@ -659,12 +659,132 @@ async function phaseBattleTurns() {
   );
 }
 
+// Resolve one Human vs Passive turn for the persistence probe: a human side
+// commits an empty turn through the engine, an automated side resolves through
+// the runner. Shared by the pre- and post-reload phases so both sides of the
+// reload exercise the same commit path.
+async function resolveOneProbeTurn(battle, sides, context) {
+  const active = battle.activeSide;
+  if (battle.controllers[active] === 'human') {
+    const submission = {
+      formatVersion: SUBMISSION_FORMAT_VERSION,
+      battleId: battle.id,
+      turnNumber: battle.turnNumber,
+      side: active,
+      orders: [],
+    };
+    const checked = validateTurn(battle, submission);
+    if (!checked.ok) {
+      throw new Error(`the ${context} human commit was refused: ${checked.message}`);
+    }
+    const decision = { type: 'commit', submission };
+    return { battle: resolveTurn(battle, decision), decision };
+  }
+  const players = {};
+  for (const side of sides) {
+    players[side.id] = createPassivePlayer();
+  }
+  const step = await runTurn(battle, players);
+  return { battle: step.battle, decision: step.decision };
+}
+
+// Battle persistence across a real reload: start a Human vs Passive battle from
+// the reopened scenario, resolve one turn, save it to the separate battles
+// collection, stash the stored record, and reload. After the reload a fresh
+// store instance loads the battle and must see the identical state; resolving
+// another turn proves the resumed battle still plays. The battle keeps its own
+// scenario snapshot, so later scenario edits never change it.
+async function phaseBattlePersistence(scenario) {
+  logStep('battle persistence: start a battle and resolve one turn', 'running');
+  const battleStore = new IndexedDBBattleStore({ dbName: BATTLE_DB_NAME });
+  await battleStore.clear();
+  const battleScenario = cloneScenario(scenario);
+  const [first, second] = battleScenario.sides;
+  let counter = 1;
+  const probeId = () => `00000000-0000-4000-8000-${String(counter++).padStart(12, '0')}`;
+  battleScenario.units.push(
+    {
+      id: probeId(),
+      name: 'Persist taxis',
+      side: first.id,
+      troopType: 'hoplite',
+      soldiers: 100,
+      files: 10,
+      lateralInterval: 1,
+      rankDepth: 1,
+      position: { x: 500, y: 600 },
+      facing: 180,
+    },
+    {
+      id: probeId(),
+      name: 'Persist mora',
+      side: second.id,
+      troopType: 'hoplite',
+      soldiers: 100,
+      files: 10,
+      lateralInterval: 1,
+      rankDepth: 1,
+      position: { x: 500, y: 300 },
+      facing: 0,
+    },
+  );
+  if (validateScenario(battleScenario).length > 0) {
+    throw new Error(`persistence battle scenario is invalid: ${validateScenario(battleScenario).join('; ')}`);
+  }
+  const controllers = { [first.id]: 'human', [second.id]: 'passive' };
+  const started = startBattle(battleScenario, { seed: 20260714, controllers, battleId: 'e2e-battle-probe' });
+  const resolved = await resolveOneProbeTurn(started, battleScenario.sides, 'persistence');
+  const battle = resolved.battle;
+  const decisions = [resolved.decision];
+  await battleStore.save(battle, decisions);
+  const snapshot = await battleStore.load(battle.id);
+  if (!snapshot) throw new Error('the saved battle cannot be loaded back');
+  logStep(
+    'battle persistence: start a battle and resolve one turn',
+    'pass',
+    `turn ${battle.turnNumber} saved (rev. 1)`,
+  );
+  sessionStorage.setItem(PHASE_KEY, JSON.stringify({ phase: 'battle-resume', battleId: battle.id, snapshot }));
+  logStep('battle persistence: reload mid-battle', 'running', 'reloading…');
+  battleStore.close();
+  location.reload();
+}
+
+async function phaseBattleResume(phase) {
+  const battleStore = new IndexedDBBattleStore({ dbName: BATTLE_DB_NAME });
+  logStep('battle persistence: reload mid-battle', 'pass', 'done');
+  logStep('battle resume: load the identical battle after reload', 'running');
+  const reloaded = await battleStore.load(phase.battleId);
+  if (!reloaded) throw new Error('the saved battle is missing after reload');
+  assertSameBattle(phase.snapshot, reloaded);
+  logStep('battle resume: load the identical battle after reload', 'pass', `turn ${reloaded.battle.turnNumber}`);
+  logStep('battle resume: resolve another turn from the resumed state', 'running');
+  const decisions = [...reloaded.decisions];
+  const resolved = await resolveOneProbeTurn(reloaded.battle, reloaded.battle.scenario.sides, 'resumed');
+  const battle = resolved.battle;
+  decisions.push(resolved.decision);
+  if (battle.turnNumber !== reloaded.battle.turnNumber + 1) {
+    throw new Error('the resumed battle did not advance one turn');
+  }
+  await battleStore.save(battle, decisions);
+  const reread = await battleStore.load(phase.battleId);
+  assertSameBattle({ battle, decisions }, reread);
+  battleStore.close();
+  logStep('battle resume: resolve another turn from the resumed state', 'pass', `now turn ${battle.turnNumber}`);
+  sessionStorage.removeItem(PHASE_KEY);
+}
+
 async function run() {
   steps.innerHTML = '';
   verdict.textContent = '';
   verdict.className = '';
   details.textContent = '';
   try {
+    const prePhase = readPhase();
+    if (prePhase?.phase === 'battle-resume') {
+      await phaseBattleResume(prePhase);
+      return;
+    }
     await phaseUnitPlacement();
     const phase = readPhase();
     if (phase?.phase === 'reopen') {
@@ -680,7 +800,7 @@ async function run() {
 document.querySelector('#run').addEventListener('click', run);
 
 // Continue automatically after the mid-run reload, or when autostarted.
-if (readPhase()?.phase === 'reopen') {
+if (readPhase()?.phase === 'battle-resume' || readPhase()?.phase === 'reopen') {
   run();
 } else if (new URLSearchParams(location.search).get(AUTOSTART_PARAM) === '1') {
   run();

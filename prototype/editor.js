@@ -1328,7 +1328,7 @@ function battlesLibraryView() {
       <div><div class="title">${esc(entry.title)}</div>
       <div class="meta">${detail} · updated ${esc(entry.updatedAt)}</div></div>
       <div class="actions">
-        <a class="btn-primary" data-testid="resume-${esc(entry.id)}" href="battle.html?battle=${encodeURIComponent(entry.id)}">Resume</a>
+        <a class="btn-primary" data-testid="resume-${esc(entry.id)}" href="battle.html?battle=${encodeURIComponent(entry.id)}">${finished ? 'View' : 'Resume'}</a>
         <button class="btn-quiet btn-danger" data-action="delete-battle" data-id="${esc(entry.id)}">Delete</button>
       </div>
     </li>`;

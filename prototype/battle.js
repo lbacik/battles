@@ -334,10 +334,12 @@ function battlesListView() {
     .map((entry) => {
       const finished = entry.status !== 'ongoing';
       const detail = `turn ${entry.turnNumber ?? '—'} · ${esc(entry.status)}${finished ? ' · read-only' : ''}`;
+      const action = finished ? 'View' : 'Resume';
       return `<li>
         <span><strong>${esc(entry.title)}</strong><br><span class="side-id">${detail}</span></span>
         <span class="handoff-actions">
-          <a class="btn-secondary" data-testid="resume-${esc(entry.id)}" href="battle.html?battle=${encodeURIComponent(entry.id)}">Resume</a>
+          <a class="btn-secondary" data-testid="resume-${esc(entry.id)}" href="battle.html?battle=${encodeURIComponent(entry.id)}">${action}</a>
+          <button class="btn-quiet" data-testid="delete-${esc(entry.id)}" data-action="delete-battle" data-id="${esc(entry.id)}">Delete</button>
         </span>
       </li>`;
     })
@@ -879,6 +881,20 @@ document.addEventListener('click', async (event) => {
   }
   if (action === 'confirm-commit') {
     await commitHumanTurn();
+    return;
+  }
+  if (action === 'delete-battle') {
+    const id = element.dataset.id;
+    if (!id) return;
+    if (!window.confirm('Delete this battle? Finished and in-progress battles delete the same way.')) return;
+    try {
+      await state.battleStore.remove(id);
+      await refreshBattles();
+      render();
+      toast('Battle deleted.');
+    } catch (error) {
+      toast(`Could not delete the battle: ${error.message}`);
+    }
     return;
   }
   if (action === 'resolve-automated') {
