@@ -71,6 +71,7 @@ import {
   spacingClass,
 } from './domain/polis-classical.js';
 import { IndexedDBScenarioStore, ensurePersistentStorage } from './library/idb.js';
+import { IndexedDBBattleStore } from './library/battles-idb.js';
 
 const NARROW_NOTICE_WIDTH = 1280;
 
@@ -79,7 +80,9 @@ const NARROW_NOTICE_WIDTH = 1280;
 // document and never mark the scenario as unsaved.
 const state = {
   store: new IndexedDBScenarioStore(),
+  battleStore: new IndexedDBBattleStore(),
   library: [],
+  battles: [],
   view: 'library',
   document: null,
   // The last saved version of the open scenario: the unsaved-changes
@@ -1307,7 +1310,33 @@ function libraryView() {
     </form>
     ${state.library.length ? `<ul class="scenario-list">${items}</ul>` : '<div class="empty-library">No scenarios yet. Give the new scenario a title above to create the first one, or import an exported JSON file.</div>'}
     <p class="storage-note">${state.persistent === false ? 'Browser persistent storage was refused: scenarios may be evicted, so export is the only backup. ' : ''}Library lives in IndexedDB on this device; clearing site data removes it.</p>
+    ${battlesLibraryView()}
   </div>`;
+}
+
+function battlesLibraryView() {
+  const battles = Array.isArray(state.battles) ? state.battles : [];
+  if (battles.length === 0) {
+    return `<h1>Battles</h1>
+    <p class="lede">No battles yet. Open a scenario and choose Start battle; every committed turn is saved here and survives reloads.</p>`;
+  }
+  const rows = battles
+    .map((entry) => {
+      const finished = entry.status !== 'ongoing';
+      const detail = `turn ${entry.turnNumber ?? '—'} · round ${entry.round ?? '—'} · ${esc(entry.status)}${finished ? ' · read-only' : ''} · rev. ${entry.revision}`;
+      return `<li class="library-entry">
+      <div><div class="title">${esc(entry.title)}</div>
+      <div class="meta">${detail} · updated ${esc(entry.updatedAt)}</div></div>
+      <div class="actions">
+        <a class="btn-primary" data-testid="resume-${esc(entry.id)}" href="battle.html?battle=${encodeURIComponent(entry.id)}">Resume</a>
+        <button class="btn-quiet btn-danger" data-action="delete-battle" data-id="${esc(entry.id)}">Delete</button>
+      </div>
+    </li>`;
+    })
+    .join('');
+  return `<h1>Battles</h1>
+    <p class="lede">Battles survive reloads: every committed turn is saved with the scenario snapshot, the ruleset, the seed, the controllers, and the committed decisions. Finished battles stay read-only.</p>
+    <ul class="scenario-list" data-testid="battles-list">${rows}</ul>`;
 }
 
 function orderOfBattleView(document) {
@@ -2138,6 +2167,11 @@ function render(refocusSelector) {
 // --- Actions --------------------------------------------------------------
 async function refreshLibrary() {
   state.library = await state.store.list();
+  try {
+    state.battles = await state.battleStore.list();
+  } catch {
+    state.battles = [];
+  }
 }
 
 async function openScenario(id) {
@@ -2982,6 +3016,13 @@ document.addEventListener('click', async (event) => {
     await refreshLibrary();
     render();
     toast('Scenario deleted.');
+  }
+  if (action === 'delete-battle') {
+    if (!window.confirm('Delete this battle? Finished and in-progress battles delete the same way.')) return;
+    await state.battleStore.remove(id);
+    await refreshLibrary();
+    render();
+    toast('Battle deleted.');
   }
 });
 

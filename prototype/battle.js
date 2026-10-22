@@ -28,6 +28,8 @@ import {
   validateTurn,
 } from './domain/turn.js';
 import { createPlayerForController, runTurn } from './domain/players.js';
+import { isBattleFinished } from './domain/battles.js';
+import { generateId } from './domain/scenario.js';
 import {
   RULESET_ID,
   RULESET_VERSION,
@@ -46,6 +48,7 @@ import {
   zoomViewAroundCursor,
 } from './domain/scenario.js';
 import { IndexedDBScenarioStore } from './library/idb.js';
+import { IndexedDBBattleStore } from './library/battles-idb.js';
 
 // Controllers offered per side. Random and Passive are labelled as test
 // players; the engine accepts `human`, `random`, `passive`, and `automated`.
@@ -57,10 +60,13 @@ const CONTROLLER_OPTIONS = [
 
 const state = {
   store: new IndexedDBScenarioStore(),
+  battleStore: new IndexedDBBattleStore(),
   scenarioId: null,
+  battleResumeId: null,
   seedOverride: null,
   scenario: null,
   loadError: '',
+  battleLoadError: '',
   // Setup-screen controller choice per side id.
   controllers: {},
   // Playability refusal: every problem from `validatePlayability`.
@@ -68,6 +74,13 @@ const state = {
   // The live battle once Begin succeeds. The seed is drawn at Begin and is
   // never rendered.
   battle: null,
+  // The durable battle id (the Battles list keys battles by this id) and the
+  // committed turn decisions that produced the stored battle state. Every
+  // committed turn appends its decision and re-saves both together.
+  battleId: null,
+  decisions: [],
+  // Battles already stored on this device, for the setup-screen resume list.
+  battles: [],
   announcement: '',
   // After each resolution the next side waits for the device handoff: the
   // "<Side> — begin your turn" press unlocks drafting (human) or resolves
@@ -306,14 +319,49 @@ function battleMapSvg(document, mapView) {
 
 // --- Views -------------------------------------------------------------------
 
+// Battles already stored on this device: reloading the page mid-battle and
+// choosing a battle here resumes the identical state. Finished battles stay
+// on the list as read-only and can be deleted from the library.
+function battlesListView() {
+  const battles = Array.isArray(state.battles) ? state.battles : [];
+  if (battles.length === 0) {
+    return `<section class="setup-card" data-testid="battles-list">
+      <h2>Battles</h2>
+      <p class="setup-meta">No battles yet. Begin a battle above and every committed turn is saved here.</p>
+    </section>`;
+  }
+  const items = battles
+    .map((entry) => {
+      const finished = entry.status !== 'ongoing';
+      const detail = `turn ${entry.turnNumber ?? '—'} · ${esc(entry.status)}${finished ? ' · read-only' : ''}`;
+      return `<li>
+        <span><strong>${esc(entry.title)}</strong><br><span class="side-id">${detail}</span></span>
+        <span class="handoff-actions">
+          <a class="btn-secondary" data-testid="resume-${esc(entry.id)}" href="battle.html?battle=${encodeURIComponent(entry.id)}">Resume</a>
+        </span>
+      </li>`;
+    })
+    .join('');
+  return `<section class="setup-card" data-testid="battles-list">
+    <h2>Battles</h2>
+    <p class="setup-meta">Battles survive reloads: every committed turn is saved. Finished battles stay read-only.</p>
+    <ul class="problem-list">${items}</ul>
+  </section>`;
+}
+
 function setupView() {
   const scenario = state.scenario;
   if (!scenario) {
+    const resumeError = state.battleLoadError
+      ? `<div class="refusal" data-testid="battle-load-error"><p>${esc(state.battleLoadError)}</p></div>`
+      : '';
     return `<div class="setup">
       <span class="eyebrow">PÓLIS · BATTLE SETUP</span>
-      <h1>Scenario not found</h1>
-      <p class="lede">${esc(state.loadError || 'The requested scenario could not be loaded.')}</p>
+      <h1>${state.battleResumeId ? 'Battle not found' : 'Scenario not found'}</h1>
+      <p class="lede">${esc(state.battleLoadError || state.loadError || 'The requested scenario could not be loaded.')}</p>
+      ${resumeError}
       <div class="setup-actions"><a class="btn-secondary" href="editor.html">← Library</a></div>
+      ${battlesListView()}
     </div>`;
   }
   const sideRows = (scenario.sides || [])
@@ -360,6 +408,7 @@ function setupView() {
       </div>
     </div>
     ${refusal}
+    ${battlesListView()}
   </div>`;
 }
 
@@ -387,6 +436,26 @@ function orderOfBattleView(document) {
 function turnPanelView() {
   const battle = state.battle;
   const document = state.scenario;
+  const finished = isBattleFinished(battle);
+  const events = (battle.events || []).slice(-8).reverse();
+  const logList = `<hr class="panel-divider">
+    <span class="eyebrow">BATTLE LOG</span>
+    <ol class="log-list" data-testid="battle-log">
+      ${events.map((event) => `<li>${esc(event.type)} · turn ${esc(event.turnNumber ?? '—')} · ${esc(event.side ?? event.result ?? '')}</li>`).join('')}
+    </ol>`;
+  // Finished battles stay on the list as read-only: no orders, no commits,
+  // only the outcome and the log. Deletion happens from the library.
+  if (finished) {
+    const winner = battle.winner ? sideName(document, battle.winner) : null;
+    return `<div class="panel" data-testid="turn-panel">
+    <span class="eyebrow">BATTLE OVER</span><h2>${esc(battle.status)}</h2>
+    <div class="kv"><dt>Status</dt><dd data-testid="battle-status">${esc(battle.status)}${winner ? ` · winner ${esc(winner)}` : ''}</dd></div>
+    <div class="handoff" data-testid="battle-finished">
+      <p>This battle is finished and read-only. It stays on the Battles list; delete it from the library.</p>
+    </div>
+    ${logList}
+  </div>`;
+  }
   const activeSide = battle.activeSide;
   const controller = controllerOf(battle, activeSide);
   const automated = isAutomatedController(controller);
@@ -439,18 +508,13 @@ function turnPanelView() {
     </div>
     ${interactive ? '' : '<p class="field-error">Only the Orders phase is interactive.</p>'}`;
   }
-  const events = (battle.events || []).slice(-8).reverse();
   return `<div class="panel" data-testid="turn-panel">
     <span class="eyebrow">TURN ${battle.turnNumber}</span><h2>${esc(sideName(document, activeSide))}</h2>
     <div class="kv"><dt>Controller</dt><dd>${esc(controller)}${automated ? ' (test player)' : ''}</dd></div>
     <div class="kv"><dt>Phase</dt><dd data-testid="phase">${esc(battle.phase)}</dd></div>
     ${ordersSummary}
     ${actionBox}
-    <hr class="panel-divider">
-    <span class="eyebrow">BATTLE LOG</span>
-    <ol class="log-list" data-testid="battle-log">
-      ${events.map((event) => `<li>${esc(event.type)} · turn ${esc(event.turnNumber ?? '—')} · ${esc(event.side ?? event.result ?? '')}</li>`).join('')}
-    </ol>
+    ${logList}
   </div>`;
 }
 
@@ -508,12 +572,39 @@ function render() {
   }
 }
 
+// --- Battle persistence --------------------------------------------------------
+// Every committed turn is saved to the separate battles collection with the
+// scenario snapshot, the ruleset identifier, version, and parameter snapshot,
+// the seed, the controller of each side, and the committed turn decisions.
+// Reloading mid-battle and choosing the battle from the Battles list resumes
+// the identical state; editing the scenario never changes a started battle
+// because the battle keeps its own snapshot.
+async function saveBattle() {
+  if (!state.battle) return null;
+  try {
+    const metadata = await state.battleStore.save(state.battle, state.decisions);
+    state.battles = await state.battleStore.list();
+    return metadata;
+  } catch (error) {
+    toast(`Could not save the battle: ${error.message}`);
+    return null;
+  }
+}
+
+async function refreshBattles() {
+  try {
+    state.battles = await state.battleStore.list();
+  } catch {
+    state.battles = [];
+  }
+}
+
 // --- Setup: Begin ------------------------------------------------------------
 // Begin runs playability validation first. A refusal lists every problem
 // (each names the unit and the reason, from the engine) and offers "Open in
 // editor"; no battle is created. On success the seed is drawn and never shown,
 // and the starting side is announced at once.
-function beginBattle(seedOverride = null) {
+async function beginBattle(seedOverride = null) {
   const scenario = state.scenario;
   if (!scenario) return;
   state.problems = [];
@@ -537,8 +628,12 @@ function beginBattle(seedOverride = null) {
   for (const side of scenario.sides || []) {
     controllers[side.id] = state.controllers[side.id] || 'human';
   }
+  // The Battles list keys battles by a durable id distinct from the scenario
+  // id, so two battles from one scenario never overwrite each other. The
+  // battle keeps the scenario id inside its snapshot.
+  const battleId = generateId();
   try {
-    state.battle = startBattle(scenario, { seed, controllers });
+    state.battle = startBattle(scenario, { seed, controllers, battleId });
   } catch (error) {
     if (error instanceof BattleStartError) {
       state.problems = error.problems;
@@ -548,6 +643,8 @@ function beginBattle(seedOverride = null) {
     }
     throw error;
   }
+  state.battleId = battleId;
+  state.decisions = [];
   state.problems = [];
   state.awaitingHandoff = false;
   state.handoffSide = null;
@@ -562,6 +659,8 @@ function beginBattle(seedOverride = null) {
   setStatus(`Battle started · ${starter} to move.`);
   render();
   toast(`${starter} begins.`);
+  await saveBattle();
+  render();
   void maybeResolveAutomated();
 }
 
@@ -582,6 +681,7 @@ function playersFor(battle) {
 async function maybeResolveAutomated() {
   const battle = state.battle;
   if (!battle || state.awaitingHandoff || state.resolving) return;
+  if (isBattleFinished(battle)) return;
   if (!isAutomatedController(controllerOf(battle, battle.activeSide))) return;
   const token = state.resolveToken + 1;
   state.resolveToken = token;
@@ -600,11 +700,14 @@ async function maybeResolveAutomated() {
     });
     if (state.resolveToken !== token) return;
     state.battle = step.battle;
+    state.decisions = [...state.decisions, step.decision];
     state.resolving = false;
     state.awaitingHandoff = true;
     state.handoffSide = step.battle.activeSide;
     state.announcement = '';
     setStatus(`Turn resolved · ${sideName(state.scenario, step.battle.activeSide)} to move.`);
+    render();
+    await saveBattle();
     render();
   } catch (error) {
     if (state.resolveToken !== token) return;
@@ -614,9 +717,10 @@ async function maybeResolveAutomated() {
   }
 }
 
-function commitHumanTurn() {
+async function commitHumanTurn() {
   const battle = state.battle;
   if (!battle || state.awaitingHandoff) return;
+  if (isBattleFinished(battle)) return;
   // The empty submission is validated by the engine before it is committed;
   // the UI adds no legality of its own.
   const submission = {
@@ -633,8 +737,10 @@ function commitHumanTurn() {
     render();
     return;
   }
-  const next = resolveTurn(battle, { type: 'commit', submission });
+  const decision = { type: 'commit', submission };
+  const next = resolveTurn(battle, decision);
   state.battle = next;
+  state.decisions = [...state.decisions, decision];
   state.confirming = false;
   state.awaitingHandoff = true;
   state.handoffSide = next.activeSide;
@@ -642,6 +748,8 @@ function commitHumanTurn() {
   setStatus(`Turn resolved · ${sideName(state.scenario, next.activeSide)} to move.`);
   render();
   toast(`Turn ${battle.turnNumber} resolved.`);
+  await saveBattle();
+  render();
 }
 
 // --- Read-only map navigation ------------------------------------------------
@@ -756,7 +864,7 @@ document.addEventListener('click', async (event) => {
   if (!element || element.disabled) return;
   const { action } = element.dataset;
   if (action === 'begin') {
-    beginBattle();
+    await beginBattle();
     return;
   }
   if (action === 'commit-empty') {
@@ -770,7 +878,7 @@ document.addEventListener('click', async (event) => {
     return;
   }
   if (action === 'confirm-commit') {
-    commitHumanTurn();
+    await commitHumanTurn();
     return;
   }
   if (action === 'resolve-automated') {
@@ -838,9 +946,49 @@ window.addEventListener('resize', () => {
 async function init() {
   const params = new URLSearchParams(location.search);
   state.scenarioId = params.get('id');
+  state.battleResumeId = params.get('battle');
   state.seedOverride = parseSeedParam(params.get('seed'));
+  await refreshBattles();
+  // Resuming a stored battle: reloading the page mid-battle and choosing it
+  // from the Battles list resumes the identical state. The battle keeps its
+  // own scenario snapshot, so later scenario edits never change it.
+  if (state.battleResumeId) {
+    try {
+      const record = await state.battleStore.load(state.battleResumeId);
+      if (!record) {
+        state.battleLoadError = 'Battle not found. It may have been deleted.';
+        render();
+        return;
+      }
+      state.battle = record.battle;
+      state.battleId = record.battle.id;
+      state.decisions = Array.isArray(record.decisions) ? record.decisions : [];
+      state.scenario = record.battle.scenario;
+      state.controllers = { ...record.battle.controllers };
+      state.problems = [];
+      state.awaitingHandoff = false;
+      state.handoffSide = null;
+      state.confirming = false;
+      state.mapView = {
+        ...fitMapView(state.scenario.battlefield),
+        showGrid: true,
+        viewportW: 800,
+      };
+      state.announcement = '';
+      setStatus(
+        isBattleFinished(state.battle)
+          ? `Battle ${state.battle.status} · read-only.`
+          : `Battle resumed · ${sideName(state.scenario, state.battle.activeSide)} to move (turn ${state.battle.turnNumber}).`,
+      );
+    } catch (error) {
+      state.battleLoadError = `Could not load the battle: ${error.message}`;
+    }
+    render();
+    console.info('[PÓLIS battle]', { battle: state.battleResumeId });
+    return;
+  }
   if (!state.scenarioId) {
-    state.loadError = 'No scenario was requested (missing ?id=). Start a battle from the library or the editor.';
+    state.loadError = 'No scenario was requested (missing ?id=). Start a battle from the library or the editor, or resume one below.';
     render();
     return;
   }
@@ -874,6 +1022,9 @@ window.__battle = {
     return state;
   },
   beginWithSeed(seed) {
-    beginBattle(seed);
+    return beginBattle(seed);
+  },
+  saveBattle() {
+    return saveBattle();
   },
 };

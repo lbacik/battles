@@ -43,8 +43,10 @@ import {
 } from './domain/turn.js';
 import { createPassivePlayer, runTurn } from './domain/players.js';
 import { IndexedDBScenarioStore } from './library/idb.js';
+import { IndexedDBBattleStore } from './library/battles-idb.js';
 
 const DB_NAME = 'polis-scenarios-e2e';
+const BATTLE_DB_NAME = 'polis-battles-e2e';
 const PHASE_KEY = 'polis-tracer-e2e';
 const AUTOSTART_PARAM = 'autostart';
 
@@ -101,6 +103,25 @@ function assertSameDocument(expected, actual) {
     const right = JSON.stringify(actual[field]);
     if (left !== right) {
       throw new Error(`field "${field}" differs after reload: ${left} vs ${right}`);
+    }
+  }
+}
+
+// Battles survive reloads: the stored battle state and its committed turn
+// decisions resume identically. State is also isolated from later scenario
+// edits because the battle keeps its own scenario snapshot.
+function assertSameBattle(expected, actual) {
+  for (const field of ['battle', 'decisions']) {
+    const left = JSON.stringify(expected[field]);
+    const right = JSON.stringify(actual[field]);
+    if (left !== right) {
+      throw new Error(`battle ${field} differs after reload`);
+    }
+  }
+  const battle = actual.battle;
+  for (const field of ['scenario', 'ruleset', 'parameters', 'seed', 'controllers']) {
+    if (JSON.stringify(battle[field]) === undefined) {
+      throw new Error(`resumed battle is missing "${field}"`);
     }
   }
 }
@@ -451,19 +472,8 @@ async function phaseReopen(phase) {
 
   await phaseBattleTurns();
 
-  details.textContent = JSON.stringify(
-    {
-      document: reopened,
-      metadata: { id: entry.id, title: entry.title, revision: entry.revision },
-    },
-    null,
-    2,
-  );
-  verdict.textContent = 'PASS';
-  verdict.className = 'pass';
-  sessionStorage.removeItem(PHASE_KEY);
   store.close();
-  console.info('[e2e] PASS');
+  await phaseBattlePersistence(reopened, entry);
 }
 
 // Persistence acceptance step 6 (#5): a file carrying a unit whose
