@@ -352,6 +352,19 @@ describe('Engine I rejection codes with the expected details', () => {
     assert.deepEqual(rejection.details, { unitId: HOPLITE_A, reason: 'unknown-troop-type' });
   });
 
+  it('invalid_withdraw reaches the contract when a contact names no enemy to break', () => {
+    // The contract gates Withdraw for units that are not engaged, so a real
+    // game never reaches the module's `invalid_withdraw`: only a degenerate
+    // contact (one with no enemy to break from) falls through to it.
+    const battle = freshBattle();
+    const own = battle.units.filter((unit) => unit.side === battle.activeSide);
+    const unit = own[0];
+    unit.engaged = { unitId: own[1].id, edge: 'front', aspect: 'front', frontageM: 8, files: 8 };
+    const rejection = rejectedVerdict(validateOne(battle, { unitId: unit.id, kind: 'Withdraw' }));
+    assert.equal(rejection.code, 'invalid_withdraw');
+    assert.deepEqual(rejection.details, { unitId: unit.id, reason: 'not-engaged' });
+  });
+
   it('invalid_withdraw names a missing engagement and a missing pose', () => {
     const battle = freshBattle();
     const unit = battle.units.find((entry) => entry.id === HOPLITE_A);
@@ -520,6 +533,16 @@ describe('runner fallbacks', () => {
       step.battle.events.some((event) => event.type === 'player-attempt-refused' && event.code === 'orders_rejected'),
       'the refused attempt is recorded in the battle events',
     );
+    const order = step.battle.events.map((event) => event.type);
+    assert.ok(
+      order.indexOf('player-attempt-refused') < order.indexOf('turn-resolved'),
+      'the refusal sorts before the resolution in causal order',
+    );
+    assert.deepEqual(
+      step.battle.events.map((event) => event.seq),
+      step.battle.events.map((_, index) => index),
+      'event sequence numbers stay consecutive',
+    );
     assert.equal(step.battle.turnNumber, battle.turnNumber + 1);
   });
 
@@ -686,6 +709,12 @@ describe('Engine I gate: Random vs Random fuzzing', () => {
 
   function checkInvariants(before, step) {
     const after = step.battle;
+    // The event log stays in causal order with consecutive sequence numbers.
+    assert.deepEqual(
+      after.events.map((event) => event.seq),
+      after.events.map((_, index) => index),
+      `event sequence stays consecutive on turn ${before.turnNumber}`,
+    );
     // No partial commit: the resolved decision validates against the
     // pre-turn battle, and the resolved turn applies exactly its orders.
     assert.equal(validateTurn(before, step.decision.submission).ok, true, 'the committed decision is whole');
@@ -709,7 +738,9 @@ describe('Engine I gate: Random vs Random fuzzing', () => {
         );
       }
     }
-    // No unit outside the battlefield, and no footprint touching water.
+    // No unit outside the battlefield (Engine I removes nothing from the
+    // field, so the "unless it fled" exception is vacuous here), and no
+    // footprint touching water.
     const { width, height } = after.scenario.battlefield;
     const waters = watersOf(after);
     for (const unit of units) {
@@ -727,9 +758,20 @@ describe('Engine I gate: Random vs Random fuzzing', () => {
     }
   }
 
+  // One Random player per side from one game seed: the side index offsets
+  // the player seeds so the two sides draw differently while the game stays
+  // reproducible from its seed.
+  function randomPlayers(scenario, seed) {
+    return Object.fromEntries(
+      scenario.sides.map((side, index) => [side.id, createRandomPlayer({ seed: seed * 1000 + index + 1 })]),
+    );
+  }
+
   // Reference scenarios for the fuzzing gate: the two playable references,
-  // plus a meadow variant with a water pond far from both units so the
-  // forbidden-ground sweep runs every turn without refusing battle start.
+  // plus a meadow variant with a water pond far from both units. Neither
+  // reference holds water, so without the pond the "no footprint touching
+  // water" invariant would pass vacuously; the pond exercises the
+  // forbidden-ground sweep every turn without refusing battle start.
   function fuzzScenarios() {
     const plain = loadScenario('acceptance-plain.json');
     const meadow = loadScenario('playable-meadow.json');
@@ -754,9 +796,7 @@ describe('Engine I gate: Random vs Random fuzzing', () => {
       for (const seed of seeds) {
         const controllers = Object.fromEntries(scenario.sides.map((side) => [side.id, 'random']));
         let battle = startBattle(JSON.parse(JSON.stringify(scenario)), { seed, controllers });
-        const players = Object.fromEntries(
-          scenario.sides.map((side, index) => [side.id, createRandomPlayer({ seed: seed * 1000 + index + 1 })]),
-        );
+        const players = randomPlayers(scenario, seed);
         for (let turn = 0; turn < turns; turn += 1) {
           const before = battle;
           const step = await runTurn(battle, players, { timeoutMs: 0 });
@@ -775,9 +815,7 @@ describe('Engine I gate: Random vs Random fuzzing', () => {
       const scenario = loadScenario('acceptance-plain.json');
       const controllers = Object.fromEntries(scenario.sides.map((side) => [side.id, 'random']));
       let battle = startBattle(JSON.parse(JSON.stringify(scenario)), { seed, controllers });
-      const players = Object.fromEntries(
-        scenario.sides.map((side, index) => [side.id, createRandomPlayer({ seed: seed * 1000 + index + 1 })]),
-      );
+      const players = randomPlayers(scenario, seed);
       for (let turn = 0; turn < 4; turn += 1) {
         battle = (await runTurn(battle, players, { timeoutMs: 0 })).battle;
       }

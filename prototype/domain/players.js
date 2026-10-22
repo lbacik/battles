@@ -144,14 +144,14 @@ function randomSeed32() {
   return Math.floor(Math.random() * 4294967296);
 }
 
-// Create the Random player. Accepts `{ seed }`, a bare seed value, or nothing
-// (a fresh random seed). The seed is normalised exactly like a battle seed, so
-// any integer or non-empty string works. The player records it as `seed`.
+// Create the Random player from `{ seed }`, or from nothing (a fresh random
+// seed). The seed is normalised exactly like a battle seed, so any integer or
+// non-empty string works. The player records it as `seed`.
 export function createRandomPlayer(options = {}) {
-  const raw = typeof options === 'object' && options !== null && !Array.isArray(options)
-    ? options.seed
-    : options;
-  const seed = normalizeSeed(raw === undefined ? randomSeed32() : raw);
+  if (options === null || typeof options !== 'object' || Array.isArray(options)) {
+    throw new Error('The Random player takes { seed } (or nothing for a fresh random seed).');
+  }
+  const seed = normalizeSeed(options.seed === undefined ? randomSeed32() : options.seed);
   const rng = createRng(seed);
   return {
     kind: 'random',
@@ -347,7 +347,8 @@ async function decideWithTimeout(player, input, timeoutMs) {
 // or an envelope-level refusal with nothing to salvage falls back to every
 // unit holding. The runner never concedes: only an explicit concede decision
 // from the player concedes, and every fallback commits orders. Substitutions,
-// refused attempts, and fallbacks are appended to the new battle's events.
+// refused attempts, and fallbacks are recorded in the new battle's events
+// ahead of the resolution events, so the log stays in causal order.
 // Never changes the input battle.
 export async function runTurn(battle, players, options = {}) {
   if (!battle || typeof battle !== 'object') {
@@ -417,7 +418,6 @@ export async function runTurn(battle, players, options = {}) {
     previousResult = result;
     lastSubmission = answer.submission;
     attemptEvents.push({
-      seq: null,
       type: 'player-attempt-refused',
       turnNumber: battle.turnNumber,
       side,
@@ -473,25 +473,30 @@ export async function runTurn(battle, players, options = {}) {
   }
 
   const next = resolveTurn(battle, decision);
-  for (const entry of attemptEvents) {
-    next.events.push({ ...entry, seq: next.events.length });
-  }
-  for (const entry of substitutions) {
-    next.events.push({
-      seq: next.events.length,
+  // The runner's own events happened while the turn was decided, so they sort
+  // before the resolution events: splice them in where resolution began and
+  // renumber the log back into causal order.
+  const runnerEvents = [
+    ...attemptEvents,
+    ...substitutions.map((entry) => ({
       type: 'order-substituted',
       turnNumber: battle.turnNumber,
       side,
       ...entry,
-    });
-  }
-  if (fallback) {
-    next.events.push({
-      seq: next.events.length,
-      type: 'player-fallback',
-      turnNumber: battle.turnNumber,
-      side,
-      reason: fallback,
+    })),
+    ...(fallback
+      ? [{
+        type: 'player-fallback',
+        turnNumber: battle.turnNumber,
+        side,
+        reason: fallback,
+      }]
+      : []),
+  ];
+  if (runnerEvents.length > 0) {
+    next.events.splice(battle.events.length, 0, ...runnerEvents);
+    next.events.forEach((event, index) => {
+      event.seq = index;
     });
   }
   return {
