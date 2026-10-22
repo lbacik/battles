@@ -39,7 +39,12 @@ function freshBattle(seed = 2026) {
     [stored.sides[0].id]: 'passive',
     [stored.sides[1].id]: 'passive',
   };
-  return startBattle(stored, { seed, controllers });
+  const battle = startBattle(stored, { seed, controllers });
+  // The movement fixtures below arrange footprints on the Athens half of the
+  // reference scenario; pin the seed's starting side instead of failing
+  // mysteriously if the draw ever changes.
+  assert.equal(battle.activeSide, 'athens');
+  return battle;
 }
 
 function submissionFor(battle, orders) {
@@ -339,7 +344,7 @@ describe('swept-footprint checks', () => {
     assert.deepEqual(rejection.details, {
       unitId: unit.id,
       withUnitId: blocker.id,
-      at: { x: 500, y: 600 },
+      at: { x: 500, y: 565 },
     });
     assert.ok(rejection.message.includes(blocker.id));
   });
@@ -367,10 +372,7 @@ describe('swept-footprint checks', () => {
       validateTurn(battle, submissionFor(battle, [moveOrder(unit.id, [{ to: { x: 500, y: 950 } }])])),
     );
     assert.equal(rejection.code, 'battlefield_edge');
-    assert.equal(rejection.details.unitId, unit.id);
-    const { at } = rejection.details;
-    assert.ok(Number.isFinite(at.x) && Number.isFinite(at.y), 'the exit point is a finite point');
-    assert.ok(at.y > 900, 'the exit point lies beyond the northern edge');
+    assert.deepEqual(rejection.details, { unitId: unit.id, at: { x: 492, y: 901 } });
     assert.ok(typeof rejection.message === 'string' && rejection.message.length > 0);
   });
 
@@ -382,7 +384,7 @@ describe('swept-footprint checks', () => {
       validateTurn(battle, submissionFor(battle, [moveOrder(unit.id, [{ face: 270 }])])),
     );
     assert.equal(rejection.code, 'battlefield_edge');
-    assert.ok(rejection.details.at.x > 1400, 'the swinging corner crosses the eastern edge');
+    assert.deepEqual(rejection.details, { unitId: unit.id, at: { x: 1400.1, y: 614.7 } });
   });
 
   it('rejects ending in contact with an enemy but overlaps as collision', () => {
@@ -396,7 +398,7 @@ describe('swept-footprint checks', () => {
     );
     assert.equal(touch.code, 'contact_with_enemy');
     assert.deepEqual(touch.details, { unitId: unit.id, withUnitId: enemy.id });
-    // Ten metres further the footprints overlap: collision.
+    // Ten metres further the footprints overlap: collision at the first touch.
     const overlap = rejectedVerdict(
       validateTurn(battle, submissionFor(battle, [moveOrder(unit.id, [{ to: { x: 500, y: 510 } }])])),
     );
@@ -404,8 +406,39 @@ describe('swept-footprint checks', () => {
     assert.deepEqual(overlap.details, {
       unitId: unit.id,
       withUnitId: enemy.id,
-      at: { x: 500, y: 600 },
+      at: { x: 500, y: 520 },
     });
+  });
+
+  it('lets a unit deployed touching a friend march away', () => {
+    const battle = freshBattle();
+    const unit = hopliteOf(battle);
+    const friend = ownUnits(battle).find((entry) => entry.troopType === 'peltast');
+    // Peltast front edge on the hoplite rear edge: legal setup adjacency.
+    place(battle, friend.id, { x: 500, y: 616 }, 180);
+    const result = validateTurn(
+      battle,
+      submissionFor(battle, [moveOrder(unit.id, [{ to: { x: 500, y: 560 } }])]),
+    );
+    assert.deepEqual(acceptedVerdict(result).movement, { availableM: 90, requiredM: 40 });
+  });
+
+  it('rejects sliding along an adjacent friend as collision', () => {
+    const battle = freshBattle();
+    const unit = hopliteOf(battle);
+    const friend = ownUnits(battle).find((entry) => entry.troopType === 'peltast');
+    // Peltast western edge on the hoplite eastern edge: shoulder-to-shoulder.
+    place(battle, friend.id, { x: 517, y: 600 }, 180);
+    place(battle, unit.id, { x: 500, y: 600 }, 90);
+    const rejection = rejectedVerdict(
+      validateTurn(
+        battle,
+        submissionFor(battle, [moveOrder(unit.id, [{ face: 90, to: { x: 560, y: 600 } }])]),
+      ),
+    );
+    assert.equal(rejection.code, 'collision');
+    assert.equal(rejection.details.withUnitId, friend.id);
+    assert.deepEqual(rejection.details.at, { x: 508, y: 600 });
   });
 
   it('rejects ending shoulder-to-shoulder with a friend as collision', () => {

@@ -19,33 +19,44 @@
 // - Every leg is billed against a single movement allowance in metres; a move
 //   that does not fit is rejected, never truncated.
 //
-// Checks, in order (the first failure wins, so each rejection is unambiguous):
+// Checks, in order (the first failure wins, so each rejection is unambiguous).
+// The spec lists collision first, but the resting touch with an enemy would
+// be unreachable under a literal collision-first sweep — the sweep covers the
+// resting footprint too — so the resting place is classified after the path:
 //
 // 1. `invalid_move`: the legs are not 1-3 `{face?, to?}` legs with finite
-//    numbers, or a leg carries neither a rotation nor a destination.
+//    numbers, or a leg carries neither a rotation nor a destination. Legs
+//    are snapped to the stored 0.1 m / 0.1 degree precision up front.
 // 2. `battlefield_edge`: a swept corner leaves the battlefield. `details.at`
 //    is the first footprint corner found outside, in metres.
-// 3. `out_of_reach`: the billed distance exceeds the allowance. `details`
-//    carries `availableM`, `requiredM`, and the `shortfallM`.
-// 4. `contact_with_enemy`: the final footprint merely touches (boundary
+// 3. `collision`: the swept footprint touches another unit. Transit poses
+//    (rotation intermediates, march intermediates every 1 m) and hull
+//    overlaps collide outright; a hull that merely touches is attributed
+//    first — pre-existing adjacency from the starting pose, or the resting
+//    pose, is not a transit collision. `details` names the unit
+//    (`withUnitId`) and the mover's front-midpoint position where the touch
+//    first occurs (`at`): the sample pose for a transit touch, the resting
+//    position for a resting touch. The starting pose itself never collides,
+//    so a unit deployed touching a friend stays free to march away.
+// 4. `out_of_reach`: the billed distance exceeds the allowance. `details`
+//    carries `availableM`, `requiredM`, and the `shortfallM`, all billed to
+//    0.1 m — the shown `requiredM` is what is compared, so the details always
+//    explain the verdict.
+// 5. `contact_with_enemy`: the resting footprint merely touches (boundary
 //    contact without positive-area overlap) an enemy footprint. `details`
 //    names the enemy `withUnitId`. Ending adjacent is a matter for Charge,
-//    so Move refuses it.
-// 5. `collision`: the swept footprint — every rotation sample and every
-//    translation hull, including the final resting footprint — touches any
-//    other unit. `details` names the unit (`withUnitId`) and the mover's
-//    front-midpoint position at the start of the leg on which the touch first
-//    occurs (`at`). A final footprint that overlaps (rather than touches) an
-//    enemy lands here; a final footprint that touches a friend lands here
-//    too, because the swept footprint must not touch other units.
+//    so Move refuses it; a resting overlap, or a resting touch with a
+//    friend, already collided at step 3.
 //
 // An accepted plan returns a deterministic preview: the footprint after the
 // Movement phase with positions rounded to 0.1 m and the facing normalised to
-// [0, 360). Resolution commits exactly the rounded preview, so validation and
-// resolution can never disagree.
+// [0, 360). Validation simulates on snapped poses and commits exactly the
+// preview, so re-validating a verdict can never disagree with it.
 
 import {
+  EPS,
   deriveFootprint,
+  isFinitePoint,
   polygonsOverlapPositiveArea,
   ringsTouch,
   round1,
@@ -60,11 +71,12 @@ export const MAX_MOVE_LEGS = 3;
 export const FORWARD_ARC_DEG = 45;
 
 const DEG = Math.PI / 180;
-// Rotation sweep granularity: intermediate footprints every 5 degrees, so a
-// swinging corner cannot skip over a neighbouring footprint between samples.
-const SWEEP_STEP_DEG = 5;
-// Zero-length marches bill nothing and sweep nothing.
-const EPS = 1e-9;
+// Sweep granularity: intermediate rotation poses every 2 degrees and
+// intermediate march poses every 1 m, so a swinging corner or a passing edge
+// cannot skip over a neighbouring footprint between samples. Translation
+// hulls additionally back every leg with an exact overlap test.
+const SWEEP_STEP_DEG = 2;
+const TRANSIT_SAMPLE_M = 1;
 
 // Normalise a facing to [0, 360).
 export function normalizeFacing(degrees) {
@@ -156,19 +168,27 @@ export function convexHull(points) {
   return lower.concat(upper);
 }
 
-function isFinitePoint(point) {
-  return !!point
-    && typeof point === 'object'
-    && Number.isFinite(point.x)
-    && Number.isFinite(point.y);
-}
-
 function roundPoint(point) {
   return { x: round1(point.x), y: round1(point.y) };
 }
 
-// Normalise raw `legs` into `[{ face | null, to | null }]`, or return
-// `{ error: reason }` for the `invalid_move` rejection.
+// Deterministic Movement-phase footprint: the stored 0.1 m precision for the
+// position and corners, the facing normalised to [0, 360). Shared by Move
+// previews and Hold previews so both describe the same shape.
+export function footprintPreview(template, position, facing) {
+  const rounded = roundPoint(position);
+  const orientation = normalizeFacing(round1(facing));
+  return {
+    position: rounded,
+    facing: orientation,
+    corners: footprintAt(template, rounded, orientation).corners.map(roundPoint),
+  };
+}
+
+// Normalise raw `legs` into `[{ face | null, to | null }]`, snapped to the
+// stored 0.1 m / 0.1 degree precision, or return `{ error: reason }` for the
+// `invalid_move` rejection. Snapping up front keeps validation, the preview,
+// and resolution on exactly the same poses: what is checked is what commits.
 export function normalizeLegs(legs, maxLegs = MAX_MOVE_LEGS) {
   if (!Array.isArray(legs)) {
     return { error: 'legs-missing' };
@@ -189,14 +209,14 @@ export function normalizeLegs(legs, maxLegs = MAX_MOVE_LEGS) {
       if (!Number.isFinite(leg.face)) {
         return { error: 'bad-face' };
       }
-      face = normalizeFacing(leg.face);
+      face = normalizeFacing(round1(leg.face));
     }
     let to = null;
     if (leg.to !== undefined && leg.to !== null) {
       if (!isFinitePoint(leg.to)) {
         return { error: 'bad-to' };
       }
-      to = { x: leg.to.x, y: leg.to.y };
+      to = roundPoint(leg.to);
     }
     if (face === null && to === null) {
       return { error: 'empty-leg' };
@@ -241,14 +261,19 @@ export function validateMoveOnField({
     : 0.5;
   const arc = Number.isFinite(params?.forwardArcDeg) ? params.forwardArcDeg : FORWARD_ARC_DEG;
 
-  // Simulate the legs, recording the sweep in order: rotation samples and
-  // translation hulls, each with the mover's front-midpoint position (`at`)
-  // for the rejection details.
-  let position = { x: from.position.x, y: from.position.y };
-  let facing = normalizeFacing(from.facing);
+  // Simulate the legs on snapped poses (see `normalizeLegs`), recording the
+  // sweep in order: rotation samples and translation hulls with intermediate
+  // march samples, each with the mover's front-midpoint position (`at`) for
+  // the rejection details. The starting pose is validated history, so it
+  // takes part in no collision check: a unit deployed touching a friend stays
+  // free to march away.
+  let position = roundPoint(from.position);
+  let facing = normalizeFacing(round1(from.facing));
   let turnCost = 0;
   let moveCost = 0;
-  const sweep = [{ kind: 'sample', corners: footprintAt(unit, position, facing).corners, at: { ...position } }];
+  const startCorners = footprintAt(unit, position, facing).corners;
+  const samples = [];
+  const hulls = [];
   for (const leg of normalised.legs) {
     if (leg.face !== null) {
       const delta = signedAngleDiff(facing, leg.face);
@@ -257,8 +282,8 @@ export function validateMoveOnField({
         const steps = Math.max(1, Math.ceil(Math.abs(delta) / SWEEP_STEP_DEG));
         for (let step = 1; step <= steps; step += 1) {
           const intermediate = normalizeFacing(facing + (delta * step) / steps);
-          sweep.push({
-            kind: 'sample',
+          samples.push({
+            pose: { position: { ...position }, facing: intermediate },
             corners: footprintAt(unit, position, intermediate).corners,
             at: { ...position },
           });
@@ -275,18 +300,47 @@ export function validateMoveOnField({
         moveCost += rate > 0 ? distance / rate : Number.POSITIVE_INFINITY;
         const start = footprintAt(unit, position, facing).corners;
         const end = footprintAt(unit, leg.to, facing).corners;
-        sweep.push({
-          kind: 'hull',
+        hulls.push({
           corners: convexHull([...start, ...end]),
           at: { ...position },
         });
+        const strides = Math.max(1, Math.ceil(distance / TRANSIT_SAMPLE_M));
+        for (let stride = 1; stride < strides; stride += 1) {
+          const waypoint = roundPoint({
+            x: position.x + ((leg.to.x - position.x) * stride) / strides,
+            y: position.y + ((leg.to.y - position.y) * stride) / strides,
+          });
+          samples.push({
+            pose: { position: { ...waypoint }, facing },
+            corners: footprintAt(unit, waypoint, facing).corners,
+            at: { ...waypoint },
+          });
+        }
         position = { x: leg.to.x, y: leg.to.y };
-        sweep.push({ kind: 'sample', corners: end, at: { ...position } });
+        samples.push({
+          pose: { position: { ...position }, facing },
+          corners: end,
+          at: { ...position },
+        });
       }
     }
   }
+  const finalCorners = footprintAt(unit, position, facing).corners;
+  const samePose = (a, b) => a.position.x === b.position.x
+    && a.position.y === b.position.y
+    && a.facing === b.facing;
+  const finalPose = { position: { ...position }, facing };
+  // Transit poses: every sample except the starting pose (validated history)
+  // and the resting pose (classified by the final-state checks below).
+  const transit = samples.filter((entry) => !samePose(entry.pose, finalPose));
+  const lineup = others || [];
+  const touches = (corners, other) => ringsTouch(corners, other.corners);
+  const overlaps = (corners, other) => polygonsOverlapPositiveArea(corners, other.corners);
+  const finalTouches = (other) => touches(finalCorners, other);
+  const finalOverlaps = (other) => overlaps(finalCorners, other);
 
-  // 2. The swept footprint stays inside the battlefield.
+  // 2. The swept footprint stays inside the battlefield: every transit pose,
+  // every hull, and the resting footprint.
   const width = battlefield?.width;
   const height = battlefield?.height;
   const outside = (point) => !Number.isFinite(point?.x)
@@ -295,7 +349,7 @@ export function validateMoveOnField({
     || point.x > width + EPS
     || point.y < -EPS
     || point.y > height + EPS;
-  for (const entry of sweep) {
+  for (const entry of [...samples, ...hulls, { corners: finalCorners }]) {
     const exit = entry.corners.find(outside);
     if (exit) {
       return fail(
@@ -307,10 +361,48 @@ export function validateMoveOnField({
     }
   }
 
-  // 3. The billed distance fits the allowance.
+  // 3. The swept footprint touches no other unit. Transit poses and hull
+  // overlaps collide outright. A hull that merely touches is attributed
+  // before it collides: pre-existing adjacency from the starting pose, or
+  // the resting pose (classified by the final-state checks below), is not
+  // a transit collision.
+  const startAdjacent = new Set(
+    lineup
+      .filter((other) => touches(startCorners, other) && !overlaps(startCorners, other))
+      .map((other) => other.id),
+  );
+  const collide = (other, at, why) => fail(
+    'collision',
+    { unitId, withUnitId: other.id, at: roundPoint(at) },
+    `Order ${orderIndex}: unit "${unitId}" would collide with unit "${other.id}" ${why} ` +
+      `at (${round1(at.x)}, ${round1(at.y)}).`,
+  );
+  for (const entry of transit) {
+    for (const other of lineup) {
+      if (touches(entry.corners, other)) {
+        return collide(other, entry.at, 'on its path');
+      }
+    }
+  }
+  for (const entry of hulls) {
+    for (const other of lineup) {
+      if (overlaps(entry.corners, other)) {
+        return collide(other, entry.at, 'on its path');
+      }
+      if (touches(entry.corners, other)
+        && !startAdjacent.has(other.id)
+        && !(finalTouches(other) && !finalOverlaps(other))) {
+        return collide(other, entry.at, 'on its path');
+      }
+    }
+  }
+
+  // 4. The billed distance fits the allowance, billed to the stored 0.1 m:
+  // the shown `requiredM` is what is compared, so the details always explain
+  // the verdict.
   const requiredM = round1(turnCost + moveCost);
   const availableM = movementAllowanceM(unit, params);
-  if (requiredM > availableM + EPS) {
+  if (requiredM > availableM) {
     return fail(
       'out_of_reach',
       { unitId, availableM, requiredM, shortfallM: round1(requiredM - availableM) },
@@ -319,46 +411,30 @@ export function validateMoveOnField({
     );
   }
 
-  const finalCorners = footprintAt(unit, position, facing).corners;
-  const enemies = (others || []).filter((other) => other.side !== unit.side);
-
-  // 4. The final footprint never ends in contact with an enemy: boundary
+  // 5. The resting footprint never ends in contact with an enemy: boundary
   // contact without overlap is the charger's business, so Move refuses it.
-  // Overlap with an enemy falls through to the collision check below.
-  for (const enemy of enemies) {
-    if (ringsTouch(finalCorners, enemy.corners)
-      && !polygonsOverlapPositiveArea(finalCorners, enemy.corners)) {
-      return fail(
-        'contact_with_enemy',
-        { unitId, withUnitId: enemy.id },
-        `Order ${orderIndex}: unit "${unitId}" would end in contact with enemy unit "${enemy.id}".`,
-      );
+  // Overlap with anyone, or a mere touch with a friend, already collided
+  // above; the resting touch with an enemy is the one case the sweep
+  // attribution holds back for this check.
+  for (const other of lineup) {
+    if (overlaps(finalCorners, other)) {
+      return collide(other, position, 'at its resting place');
     }
-  }
-
-  // 5. The swept footprint touches no other unit.
-  for (const entry of sweep) {
-    for (const other of others || []) {
-      if (ringsTouch(entry.corners, other.corners)) {
+    if (touches(finalCorners, other)) {
+      if (other.side !== unit.side) {
         return fail(
-          'collision',
-          { unitId, withUnitId: other.id, at: roundPoint(entry.at) },
-          `Order ${orderIndex}: unit "${unitId}" would collide with unit "${other.id}" ` +
-            `at (${round1(entry.at.x)}, ${round1(entry.at.y)}).`,
+          'contact_with_enemy',
+          { unitId, withUnitId: other.id },
+          `Order ${orderIndex}: unit "${unitId}" would end in contact with enemy unit "${other.id}".`,
         );
       }
+      return collide(other, position, 'at its resting place');
     }
   }
 
-  const endPosition = roundPoint(position);
-  const endFacing = normalizeFacing(round1(facing));
   return {
     ok: true,
-    preview: {
-      position: endPosition,
-      facing: endFacing,
-      corners: footprintAt(unit, endPosition, endFacing).corners.map(roundPoint),
-    },
+    preview: footprintPreview(unit, position, facing),
     requiredM,
     availableM,
   };

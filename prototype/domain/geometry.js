@@ -12,14 +12,14 @@ export const METRE_ROUNDING = 0.1;
 // to 0.1 m; this epsilon only absorbs floating-point noise, never design
 // tolerance (the 0.1 m footprint-overlap tolerance is applied explicitly
 // by shrinking footprints, not by widening this epsilon).
-const EPS = 1e-9;
+export const EPS = 1e-9;
 
 // Round a metre value to the stored precision of 0.1 m.
 export function round1(value) {
   return Math.round(value * 10) / 10;
 }
 
-function isFinitePoint(point) {
+export function isFinitePoint(point) {
   return (
     !!point &&
     typeof point === 'object' &&

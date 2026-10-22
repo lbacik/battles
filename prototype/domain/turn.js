@@ -7,7 +7,7 @@
 // accepted Move carries a deterministic preview of the unit's footprint after
 // the Movement phase, and resolution executes moves in the given order (see
 // `./movement.js` for the geometry). This module imports only the domain
-// model, the ruleset package, and the plane geometry helpers — no React, no
+// model, the ruleset package, and the movement geometry — no React, no
 // Next.js, no DOM, no Node APIs — so it runs unchanged in the browser, in
 // Node unit tests, and in any future shell.
 //
@@ -31,12 +31,12 @@
 // moves in order, the rest stay empty until their slices land — then passes
 // the turn and counts rounds as pairs of turns.
 
-import { deriveFootprint, round1 } from './geometry.js';
+import { deriveFootprint } from './geometry.js';
 import { RULESET_PARAMETERS, TROOP_TYPE_CATALOGUE } from './polis-classical.js';
 import {
   footprintAt,
+  footprintPreview,
   movementAllowanceM,
-  normalizeFacing,
   validateMoveOnField,
 } from './movement.js';
 import {
@@ -400,18 +400,10 @@ export function validateTurn(battle, submission) {
   );
   const params = movementParamsOf(battle);
   // Preview of a unit's footprint at its simulated pose: the deterministic
-  // Movement-phase footprint every accepted verdict carries.
+  // Movement-phase footprint every accepted verdict carries. Shared with the
+  // movement module so Hold and Move previews describe the same shape.
   function previewAt(unit, pose) {
-    const position = { x: round1(pose.position.x), y: round1(pose.position.y) };
-    const facing = normalizeFacing(round1(pose.facing));
-    return {
-      position,
-      facing,
-      corners: footprintAt(unit, position, facing).corners.map((corner) => ({
-        x: round1(corner.x),
-        y: round1(corner.y),
-      })),
-    };
+    return footprintPreview(unit, pose.position, pose.facing);
   }
   function othersAt(moverId) {
     return battle.units
