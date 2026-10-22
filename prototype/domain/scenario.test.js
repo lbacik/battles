@@ -17,6 +17,7 @@ import {
   ScenarioImportError,
   clampMapZoom,
   cloneScenario,
+  collectWarnings,
   createScenario,
   exportScenario,
   fitMapView,
@@ -31,6 +32,7 @@ import {
   niceScaleBarMetres,
   panMapViewByPixels,
   parseScenarioImport,
+  resizeBattlefield,
   roundScenarioToTenth,
   scenarioFileName,
   toScreenPoint,
@@ -615,6 +617,136 @@ describe('export and import', () => {
       }
     }
     assert.deepEqual(await store.list(), before);
+  });
+});
+
+describe('completeness warnings', () => {
+  it('warns for every side without units', () => {
+    const warnings = collectWarnings(freshDocument());
+    assert.equal(warnings.length, 2);
+    assert.ok(warnings.every((warning) => /has no units/.test(warning)));
+  });
+
+  it('names the side in the warning', () => {
+    const warnings = collectWarnings(freshDocument());
+    assert.ok(warnings.some((warning) => warning.includes('Athenians')));
+    assert.ok(warnings.some((warning) => warning.includes('Spartans')));
+  });
+
+  it('stays silent for sides that field units', () => {
+    const document = freshDocument();
+    document.units.push(probeUnit({ name: 'First', side: 'side-a' }));
+    document.units.push(probeUnit({ name: 'Second', side: 'side-b' }));
+    assert.deepEqual(collectWarnings(document), []);
+  });
+
+  it('warns only for the empty side', () => {
+    const document = freshDocument();
+    document.units.push(probeUnit({ side: 'side-a' }));
+    const warnings = collectWarnings(document);
+    assert.equal(warnings.length, 1);
+    assert.ok(warnings[0].includes('Spartans'));
+  });
+
+  it('never turns a valid scenario invalid: warnings do not block saving', () => {
+    const document = freshDocument();
+    assert.deepEqual(validateScenario(document), []);
+    assert.ok(collectWarnings(document).length > 0);
+    assert.ok(isValidScenario(document));
+  });
+});
+
+describe('resizeBattlefield', () => {
+  it('grows the battlefield without touching terrain', () => {
+    const document = freshDocument();
+    document.terrainFeatures.push({
+      id: 'forest',
+      kind: 'ground',
+      category: 'forest',
+      polygon: square(100, 100),
+    });
+    const resized = resizeBattlefield(document, 1400, 900);
+    assert.deepEqual(resized.battlefield, { width: 1400, height: 900 });
+    assert.deepEqual(resized.terrainFeatures[0].polygon, square(100, 100));
+    assert.deepEqual(validateScenario(resized), []);
+  });
+
+  it('clips overlapping terrain when shrinking', () => {
+    const document = freshDocument();
+    document.terrainFeatures.push({
+      id: 'forest',
+      kind: 'ground',
+      category: 'forest',
+      polygon: square(1000, 100, 300),
+    });
+    const resized = resizeBattlefield(document, 1200, 800);
+    assert.equal(resized.terrainFeatures.length, 1);
+    assert.ok(
+      resized.terrainFeatures[0].polygon.every((point) => point.x <= 1200 && point.y <= 800),
+    );
+    assert.deepEqual(validateScenario(resized), []);
+  });
+
+  it('drops terrain left fully outside the new bounds', () => {
+    const document = freshDocument();
+    document.terrainFeatures.push(
+      { id: 'near', kind: 'ground', category: 'forest', polygon: square(100, 100) },
+      { id: 'far', kind: 'ground', category: 'rough', polygon: square(1000, 100) },
+    );
+    const resized = resizeBattlefield(document, 500, 800);
+    assert.deepEqual(
+      resized.terrainFeatures.map((feature) => feature.id),
+      ['near'],
+    );
+    assert.deepEqual(validateScenario(resized), []);
+  });
+
+  it('clamps linear paths into the new bounds', () => {
+    const document = freshDocument();
+    document.terrainFeatures.push({
+      id: 'river',
+      kind: 'linear',
+      category: 'river',
+      path: [
+        { x: 100, y: 100 },
+        { x: 1500, y: 700 },
+      ],
+      width: 12,
+    });
+    const resized = resizeBattlefield(document, 1200, 800);
+    assert.equal(resized.terrainFeatures.length, 1);
+    assert.ok(
+      resized.terrainFeatures[0].path.every((point) => point.x <= 1200 && point.y <= 800),
+    );
+    assert.deepEqual(validateScenario(resized), []);
+  });
+
+  it('refuses to shrink past a unit and names it', () => {
+    const document = freshDocument();
+    document.units.push(probeUnit({ position: { x: 1150, y: 400 } }));
+    assert.deepEqual(validateScenario(document), []);
+    assert.throws(() => resizeBattlefield(document, 1000, 800), /Probe taxis/);
+  });
+
+  it('rejects non-positive and over-limit dimensions', () => {
+    assert.throws(() => resizeBattlefield(freshDocument(), 0, 800), /positive/);
+    assert.throws(() => resizeBattlefield(freshDocument(), 1200, -5), /positive/);
+    assert.throws(
+      () => resizeBattlefield(freshDocument(), MAX_BATTLEFIELD_WIDTH_M + 1, 800),
+      /application limit/,
+    );
+    assert.throws(
+      () => resizeBattlefield(freshDocument(), 1200, MAX_BATTLEFIELD_HEIGHT_M + 1),
+      /application limit/,
+    );
+  });
+
+  it('rounds dimensions to 0.1 m and never mutates its input', () => {
+    const document = freshDocument();
+    const before = cloneScenario(document);
+    const resized = resizeBattlefield(document, 1000.06, 799.94);
+    assert.deepEqual(resized.battlefield, { width: 1000.1, height: 799.9 });
+    assert.deepEqual(document, before);
   });
 });
 
