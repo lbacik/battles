@@ -296,7 +296,7 @@ describe('validation', () => {
     const own = battle.units.filter((unit) => unit.side === battle.activeSide);
     const result = validateTurn(
       battle,
-      submissionFor(battle, [{ unitId: own[0].id, kind: 'Rally' }]),
+      submissionFor(battle, [{ unitId: own[0].id, kind: 'Teleport' }]),
     );
     assert.equal(result.ok, false);
     assert.equal(result.verdicts[0].rejection.code, REJECTION_UNSUPPORTED_ORDER_KIND);

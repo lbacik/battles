@@ -804,6 +804,7 @@ export function validateTurn(battle, submission) {
           rally: { state },
         };
       }
+    }
     // Only missile troops may shoot. Engaged and routed units never reach
     // this gate (their only permitted kinds exclude Shoot above); any other
     // unit whose troop type has no missile range is refused with the orders

@@ -279,7 +279,7 @@ function proposeOrder(kind, entry, view, byId, rng) {
     };
     return { unitId, kind: 'Move', legs: [{ to }] };
   }
-  // Any other permitted kind (Rally in a later slice) carries no parameters
+  // Any other permitted kind (Hold, Withdraw, Rally) carries no parameters
   // the Random player knows: name the kind and let `validate` decide.
   return { unitId, kind };
 }
