@@ -384,9 +384,18 @@ function normalizeControllers(scenario, controllers) {
 // ruleset reference keeps whatever version it carried. Throws when the
 // scenario is structurally invalid, when a controller is missing or unknown,
 // or — with a `BattleStartError` carrying every problem — when the scenario
-// is unplayable.
+// is unplayable. The battle id defaults to the scenario id; pass
+// `options.battleId` for a distinct battle (the Battles list keys battles by
+// this id, so two battles from one scenario need two ids).
 export function startBattle(scenario, options = {}) {
-  const { seed, controllers } = options;
+  const { seed, controllers, battleId } = options;
+  let resolvedBattleId = scenario?.id;
+  if (battleId !== undefined) {
+    if (typeof battleId !== 'string' || battleId.trim() === '') {
+      throw new Error('A battle id must be a non-empty string.');
+    }
+    resolvedBattleId = battleId;
+  }
   const normalizedControllers = normalizeControllers(scenario, controllers);
   const structural = validateScenario(scenario);
   if (structural.length > 0) {
@@ -413,7 +422,7 @@ export function startBattle(scenario, options = {}) {
   ];
   return {
     kind: BATTLE_KIND,
-    id: scenario.id,
+    id: resolvedBattleId,
     scenario: cloneScenario(scenario),
     ruleset: { id: INSTALLED_RULESET_ID, version: INSTALLED_RULESET_VERSION },
     parameters: cloneValue(RULESET_PARAMETERS),
