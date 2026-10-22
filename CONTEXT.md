@@ -8,6 +8,30 @@ Preparing scenarios and playing battles governed by a shared ruleset.
 A prepared description of a battlefield, its sides, and their starting forces and positions, used to start a battle.
 _Avoid_: Battle, saved game
 
+**Battlefield**:
+The bounded rectangular ground on which a scenario is set, measured in real ground distance. Its size is chosen per scenario.
+_Avoid_: Board, map (the map is only its depiction)
+
+**Terrain feature**:
+A shaped piece of the battlefield that a ruleset may take into account: a ground cover area, an elevation level area, or a linear feature with a width (such as a river or road).
+_Avoid_: Tile, hex
+
+**Ground cover**:
+The category of surface at a place on the battlefield, such as open ground, forest, rough ground, water, or settlement. Each place has exactly one ground cover; elevation is independent of it.
+_Avoid_: Terrain type (when elevation is meant too)
+
+**Footprint**:
+The true-scale ground a body of troops occupies on the battlefield. What is drawn is what counts: the footprint is never enlarged for display.
+_Avoid_: Symbol, base, counter
+
+**Front**:
+The edge of a footprint that faces the enemy; it determines the facing, and with it the rear and flanks.
+_Avoid_: Heading (for the edge itself)
+
+**Elevation level**:
+A discrete step of height above the base ground, used to tell which position stands higher. Height is not modelled continuously.
+_Avoid_: Altitude, height in metres
+
 **Battle**:
 A particular playthrough of a scenario, whose current situation changes as players act under the ruleset.
 _Avoid_: Scenario
