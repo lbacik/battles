@@ -37,7 +37,6 @@ import { validateWithdrawOnField } from './withdraw.js';
 import {
   cohesionMaxFor,
   cohesionParamsOf,
-  cohesionStateForValue,
   unitCohesionValue,
 } from './cohesion.js';
 import { battleEndParamsOf } from './battle-end.js';
@@ -868,8 +867,12 @@ describe('Engine I gate: Random vs Random fuzzing', () => {
 describe('Engine II gate: fuzzing to an end, determinism, and golden tests', () => {
   // The Engine I invariants plus the Engine II ones: soldiers never increase
   // (losses are whole soldiers, and starting strengths never change), and
-  // every unit's numeric cohesion stays within its troop-type range with the
-  // stored states matching the derived one. A finished battle carries no
+  // every unit's numeric cohesion stays within its troop-type range. The
+  // stored cohesion strings are checked for coherence rather than equality
+  // with the value-derived state: shooting steps the stored strings from
+  // accumulated strain without touching the numeric value (see `./shoot.js`),
+  // so a shot-routed unit can legitimately store 'Routed' while its numeric
+  // value still maps to 'Disordered'. A finished battle carries no
   // `turn-resolved` for its last turn (the end lands at once), so that leg of
   // the Engine I checker is conditional (see the shared `checkInvariants`).
   function checkFuzzToEndInvariants(before, step) {
@@ -897,14 +900,20 @@ describe('Engine II gate: fuzzing to an end, determinism, and golden tests', () 
       );
       assert.equal(
         unit.cohesion,
-        cohesionStateForValue(value, cohesion),
-        `unit ${unit.id} stores the state its value maps to`,
-      );
-      assert.equal(
         unit.cohesionState,
-        cohesionStateForValue(value, cohesion),
         `unit ${unit.id} keeps both cohesion fields in sync`,
       );
+      assert.ok(
+        unit.cohesion === 'Steady' || unit.cohesion === 'Disordered' || unit.cohesion === 'Routed',
+        `unit ${unit.id} stores a known cohesion state (holds ${unit.cohesion})`,
+      );
+      if (value === 0) {
+        assert.equal(
+          unit.cohesion,
+          'Routed',
+          `unit ${unit.id} with spent cohesion reads Routed`,
+        );
+      }
       assert.ok(
         ['active', 'destroyed', 'fled'].includes(unit.status),
         `unit ${unit.id} carries a known status (${unit.status})`,
