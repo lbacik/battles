@@ -55,6 +55,7 @@ import {
   UNIT_PICK_TOLERANCE_PX,
 } from './domain/scenario.js';
 import { round1 } from './domain/geometry.js';
+import { CHARGE_EDGES, MAX_APPROACH_LEGS } from './domain/charge.js';
 import { IndexedDBScenarioStore } from './library/idb.js';
 import { IndexedDBBattleStore } from './library/battles-idb.js';
 
@@ -348,8 +349,10 @@ function unitDisplayName(unitId) {
   return unit?.name || unitId;
 }
 
-const CHARGE_EDGES = ['front', 'left', 'right', 'rear'];
-const MAX_APPROACH_LEGS = 2;
+// Charge edges and the approach-leg cap live in the engine
+// (`domain/charge.js`): the UI reuses the single source of truth rather than
+// redefining them, and every draft still goes through `revalidateDrafts()`
+// so the engine alone decides legality.
 
 // Spacing presets in metres for the Reform form, from the installed catalogue
 // (the scenario stores the metres, so later catalogue changes never reshape
