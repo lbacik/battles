@@ -869,9 +869,16 @@ function turnPanelView() {
   // only the outcome and the log. Deletion happens from the library.
   if (finished) {
     const winner = battle.winner ? sideName(document, battle.winner) : null;
+    const result = battle.result && typeof battle.result === 'object' ? battle.result : null;
+    const outcome = winner ? ` · winner ${esc(winner)}` : ' · draw';
+    // The engine records machine reasons; the panel shows words.
+    const reasonLabels = { break: 'Army break', 'round-limit': 'Round limit', concede: 'Concession' };
+    const reasonLabel = result && result.reason ? reasonLabels[result.reason] || result.reason : null;
+    const reason = reasonLabel ? `<div class="kv"><dt>Ended by</dt><dd>${esc(reasonLabel)}</dd></div>` : '';
     return `<div class="panel" data-testid="turn-panel">
     <span class="eyebrow">BATTLE OVER</span><h2>${esc(battle.status)}</h2>
-    <div class="kv"><dt>Status</dt><dd data-testid="battle-status">${esc(battle.status)}${winner ? ` · winner ${esc(winner)}` : ''}</dd></div>
+    <div class="kv"><dt>Status</dt><dd data-testid="battle-status">${esc(battle.status)}${outcome}</dd></div>
+    ${reason}
     <div class="handoff" data-testid="battle-finished">
       <p>This battle is finished and read-only. It stays on the Battles list; delete it from the library.</p>
     </div>
