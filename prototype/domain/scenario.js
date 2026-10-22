@@ -1196,6 +1196,159 @@ export function removeElevationFeature(document, id) {
   return copy;
 }
 
+// --- Linear features editing (Terrain mode) ---------------------------------
+// The editor draws rivers and roads as polylines with a width in metres
+// (decisions #2 item 7, #4 item 7) through these pure helpers, so the browser
+// editor, the browser end-to-end test, and Node unit tests share one rules
+// boundary:
+//
+// - drawn vertices are rounded to 0.1 m and clamped to the battlefield; the
+//   stored vertices are exactly the clamped boundary (#2 item 8, #4 item 7);
+// - polylines may cross ground cover areas, elevation levels, and each other:
+//   crossings are never refused — only degenerate input is;
+// - a width must be a positive number of metres (> 0), set in the inspector.
+
+function linearFeatureById(document, id) {
+  return (document.terrainFeatures || []).find(
+    (feature) => feature && feature.kind === 'linear' && feature.id === id,
+  );
+}
+
+function roundPath(points) {
+  return points.map((point) => ({ x: round1(point.x), y: round1(point.y) }));
+}
+
+// Check a candidate polyline without mutating anything. Returns
+// { ok: true, path } with the exact vertices to store, or
+// { ok: false, reason, path } describing the refusal. `path` is the highlight
+// the editor shows: the clamped candidate when it survives, else whatever
+// survived of the drawn shape.
+export function validateLinearCandidate(document, path, options = {}) {
+  const { ignoreId = null } = options;
+  void ignoreId;
+  const battlefield = document?.battlefield;
+  if (
+    !battlefield ||
+    !Number.isFinite(battlefield.width) ||
+    !Number.isFinite(battlefield.height)
+  ) {
+    return { ok: false, reason: 'the battlefield size is missing', path: [] };
+  }
+  if (!Array.isArray(path) || path.length < 2) {
+    return { ok: false, reason: 'a river or road needs at least 2 vertices', path: [] };
+  }
+  if (path.some((point) => !Number.isFinite(point?.x) || !Number.isFinite(point?.y))) {
+    return {
+      ok: false,
+      reason: 'a river or road must hold finite x and y metre coordinates',
+      path: [],
+    };
+  }
+  const drawn = dedupePoints(roundPath(path));
+  if (drawn.length < 2) {
+    return {
+      ok: false,
+      reason: 'a river or road needs at least 2 distinct vertices',
+      path: drawn,
+    };
+  }
+  const clamped = dedupePoints(
+    roundPath(clipPathToRect(drawn, battlefield.width, battlefield.height)),
+  );
+  if (clamped.length < 2) {
+    return { ok: false, reason: 'the line lies outside the battlefield', path: drawn };
+  }
+  return { ok: true, path: clamped };
+}
+
+function checkLinearWidth(width) {
+  if (!Number.isFinite(width) || width <= 0) {
+    throw new Error('Cannot save a river or road: width must be a positive number of metres.');
+  }
+}
+
+// Draw a new river or road: validates the candidate, clamps it to the
+// battlefield, and returns a new document with the feature appended. Throws a
+// human-readable error when the category or width is invalid or the candidate
+// is refused. Never mutates its input.
+export function addLinearFeature(document, { category, path, width } = {}) {
+  if (!document || typeof document !== 'object') {
+    throw new Error('Cannot add a river or road: the scenario must be an object.');
+  }
+  if (!LINEAR_FEATURE_CATEGORIES.includes(category)) {
+    throw new Error(
+      `Cannot add a river or road: category must be one of ${LINEAR_FEATURE_CATEGORIES.join(', ')}.`,
+    );
+  }
+  checkLinearWidth(width);
+  const candidate = validateLinearCandidate(document, path);
+  if (!candidate.ok) {
+    throw new Error(`Cannot add a river or road: ${candidate.reason}.`);
+  }
+  const copy = cloneScenario(document);
+  copy.terrainFeatures = Array.isArray(copy.terrainFeatures) ? copy.terrainFeatures : [];
+  copy.terrainFeatures.push({
+    id: generateId(),
+    kind: 'linear',
+    category,
+    path: candidate.path,
+    width: round1(width),
+  });
+  return roundScenarioToTenth(copy);
+}
+
+// Change the category, path, and/or width of one river or road. A path edit
+// is clamped to the battlefield; crossings are never refused. Throws when the
+// feature is missing, the category is unknown, the width is not positive, or
+// the candidate path is refused. Never mutates its input.
+export function updateLinearFeature(document, id, patch = {}) {
+  if (!document || typeof document !== 'object') {
+    throw new Error('Cannot edit a river or road: the scenario must be an object.');
+  }
+  const existing = linearFeatureById(document, id);
+  if (!existing) {
+    throw new Error('Cannot edit a river or road: no river or road with that id.');
+  }
+  const category = patch.category === undefined ? existing.category : patch.category;
+  if (!LINEAR_FEATURE_CATEGORIES.includes(category)) {
+    throw new Error(
+      `Cannot edit a river or road: category must be one of ${LINEAR_FEATURE_CATEGORIES.join(', ')}.`,
+    );
+  }
+  const width = patch.width === undefined ? existing.width : patch.width;
+  checkLinearWidth(width);
+  let path = existing.path;
+  if (patch.path !== undefined) {
+    const candidate = validateLinearCandidate(document, patch.path);
+    if (!candidate.ok) {
+      throw new Error(`Cannot edit a river or road: ${candidate.reason}.`);
+    }
+    path = candidate.path;
+  }
+  const copy = cloneScenario(document);
+  const index = copy.terrainFeatures.findIndex(
+    (feature) => feature && feature.kind === 'linear' && feature.id === id,
+  );
+  copy.terrainFeatures[index] = { ...copy.terrainFeatures[index], category, path, width };
+  return roundScenarioToTenth(copy);
+}
+
+// Delete a whole river or road. Throws when the feature is missing. Never
+// mutates its input.
+export function removeLinearFeature(document, id) {
+  if (!document || typeof document !== 'object') {
+    throw new Error('Cannot delete a river or road: the scenario must be an object.');
+  }
+  if (!linearFeatureById(document, id)) {
+    throw new Error('Cannot delete a river or road: no river or road with that id.');
+  }
+  const copy = cloneScenario(document);
+  copy.terrainFeatures = copy.terrainFeatures.filter(
+    (feature) => !(feature && feature.kind === 'linear' && feature.id === id),
+  );
+  return copy;
+}
+
 export function isUuid(value) {
   return typeof value === 'string' && UUID_PATTERN.test(value);
 }

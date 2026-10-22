@@ -19,6 +19,7 @@ import {
   UNIT_PICK_TOLERANCE_PX,
   addElevationFeature,
   addGroundCoverFeature,
+  addLinearFeature,
   clampMapZoom,
   classifyRulesetReference,
   cloneScenario,
@@ -54,6 +55,7 @@ import {
   rebindRulesetToCurrent,
   removeElevationFeature,
   removeGroundCoverFeature,
+  removeLinearFeature,
   resizeBattlefield,
   roundScenarioToTenth,
   rulesetCompatibilityNotice,
@@ -67,8 +69,10 @@ import {
   unitsBlockingResize,
   updateElevationFeature,
   updateGroundCoverFeature,
+  updateLinearFeature,
   validateElevationCandidate,
   validateGroundCoverCandidate,
+  validateLinearCandidate,
   validateScenario,
   zoomViewAroundCursor,
 } from './scenario.js';
@@ -1335,6 +1339,158 @@ describe('elevation editing', () => {
     document = addElevationFeature(document, { polygon: square(100, 100) });
     assert.equal(document.terrainFeatures.filter((feature) => feature.kind === 'elevation')[0].level, 1);
     assert.deepEqual(validateScenario(document), []);
+  });
+});
+
+describe('linear features (rivers and roads)', () => {
+  const riverPath = (dx = 0) => [
+    { x: 0 + dx, y: 690 },
+    { x: 165 + dx, y: 630 },
+    { x: 245 + dx, y: 670 },
+    { x: 410 + dx, y: 780 },
+  ];
+
+  it('knows the river and road categories', () => {
+    assert.deepEqual([...LINEAR_FEATURE_CATEGORIES], ['river', 'road']);
+  });
+
+  it('adds a river with a generated id and rounds vertices and width', () => {
+    const document = freshDocument();
+    const added = addLinearFeature(document, {
+      category: 'river',
+      path: [
+        { x: 100.04, y: 100.06 },
+        { x: 200.04, y: 100.06 },
+      ],
+      width: 12.06,
+    });
+    assert.equal(added.terrainFeatures.length, 1);
+    const [feature] = added.terrainFeatures;
+    assert.ok(isUuid(feature.id));
+    assert.equal(feature.kind, 'linear');
+    assert.equal(feature.category, 'river');
+    assert.deepEqual(feature.path, [
+      { x: 100, y: 100.1 },
+      { x: 200, y: 100.1 },
+    ]);
+    assert.equal(feature.width, 12.1);
+    assert.deepEqual(validateScenario(added), []);
+    assert.deepEqual(document.terrainFeatures, []);
+  });
+
+  it('clamps a partly-outside path to the battlefield', () => {
+    const candidate = validateLinearCandidate(freshDocument(), [
+      { x: -50, y: 100 },
+      { x: 200, y: 100 },
+      { x: 2000, y: 300 },
+    ]);
+    assert.equal(candidate.ok, true);
+    assert.ok(candidate.path.every((point) => point.x >= 0 && point.y >= 0));
+    assert.ok(candidate.path.some((point) => point.x === 0));
+    const added = addLinearFeature(freshDocument(), {
+      category: 'road',
+      path: [
+        { x: -50, y: 100 },
+        { x: 200, y: 100 },
+        { x: 2000, y: 300 },
+      ],
+      width: 6,
+    });
+    assert.deepEqual(added.terrainFeatures[0].path, candidate.path);
+    assert.deepEqual(validateScenario(added), []);
+  });
+
+  it('lets polylines cross ground cover, elevation, and each other', () => {
+    let document = addGroundCoverFeature(freshDocument(), {
+      category: 'forest',
+      polygon: square(100, 100),
+    });
+    document.terrainFeatures.push({
+      id: 'hill',
+      kind: 'elevation',
+      level: 1,
+      polygon: square(400, 100, 200),
+    });
+    document = addLinearFeature(document, { category: 'river', path: riverPath(), width: 18 });
+    document = addLinearFeature(document, {
+      category: 'road',
+      path: [
+        { x: 150, y: 0 },
+        { x: 250, y: 250 },
+        { x: 330, y: 500 },
+      ],
+      width: 6,
+    });
+    assert.deepEqual(validateScenario(document), []);
+  });
+
+  it('refuses a path left empty or degenerate by clipping', () => {
+    const outside = validateLinearCandidate(freshDocument(), [
+      { x: 5000, y: 5000 },
+      { x: 5100, y: 5100 },
+    ]);
+    assert.equal(outside.ok, false);
+    assert.match(outside.reason, /outside the battlefield/);
+    assert.throws(
+      () => addLinearFeature(freshDocument(), { category: 'river', path: [], width: 10 }),
+      /at least 2/,
+    );
+    assert.throws(
+      () =>
+        addLinearFeature(freshDocument(), {
+          category: 'river',
+          path: [
+            { x: 100, y: 100 },
+            { x: 100, y: 100 },
+          ],
+          width: 10,
+        }),
+      /distinct/,
+    );
+  });
+
+  it('refuses unknown categories and non-positive widths', () => {
+    assert.throws(
+      () => addLinearFeature(freshDocument(), { category: 'canal', path: riverPath(), width: 10 }),
+      /category must be one of/,
+    );
+    for (const width of [0, -4, Number.NaN]) {
+      assert.throws(
+        () => addLinearFeature(freshDocument(), { category: 'river', path: riverPath(), width }),
+        /positive/,
+      );
+    }
+  });
+
+  it('updates the category, path, and width of a road', () => {
+    let document = addLinearFeature(freshDocument(), {
+      category: 'road',
+      path: riverPath(),
+      width: 6,
+    });
+    const id = document.terrainFeatures[0].id;
+    document = updateLinearFeature(document, id, { category: 'river', width: 12 });
+    assert.equal(document.terrainFeatures[0].category, 'river');
+    assert.equal(document.terrainFeatures[0].width, 12);
+    document = updateLinearFeature(document, id, { path: riverPath(10) });
+    assert.deepEqual(document.terrainFeatures[0].path[0], { x: 10, y: 690 });
+    assert.deepEqual(validateScenario(document), []);
+    assert.throws(() => updateLinearFeature(document, id, { width: 0 }), /positive/);
+    assert.throws(() => updateLinearFeature(document, id, { category: 'lava' }), /category/);
+    assert.throws(() => updateLinearFeature(document, 'missing-id', {}), /no river or road/);
+  });
+
+  it('removes a whole river or road', () => {
+    let document = addLinearFeature(freshDocument(), {
+      category: 'river',
+      path: riverPath(),
+      width: 18,
+    });
+    const id = document.terrainFeatures[0].id;
+    document = removeLinearFeature(document, id);
+    assert.deepEqual(document.terrainFeatures, []);
+    assert.deepEqual(validateScenario(document), []);
+    assert.throws(() => removeLinearFeature(document, id), /no river or road/);
   });
 });
 
