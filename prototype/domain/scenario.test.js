@@ -75,6 +75,7 @@ import {
   validateGroundCoverCandidate,
   validateLinearCandidate,
   validateScenario,
+  valuesOffTenthGrid,
   zoomViewAroundCursor,
 } from './scenario.js';
 import { MemoryScenarioStore } from './store.js';
@@ -1597,5 +1598,103 @@ describe('ruleset reference compatibility (decision #5 items 10-12)', () => {
     const copy = importScenarioDocument(json);
     assert.equal(copy.units[0].troopType, 'cataphract');
     assert.deepEqual(validateScenario(copy), []);
+  });
+});
+
+describe('editor release gate: save, export, and import round-trips', () => {
+  it('keeps every value identical to 0.1 m across save, export, and import', async () => {
+    const store = new MemoryScenarioStore();
+    const authored = createScenario({
+      title: 'Acceptance plain',
+      description: 'Gate probe: every metre value identical to 0.1 m.',
+      battlefield: { width: 1400.04, height: 899.96 },
+      units: [
+        {
+          id: generateId(),
+          name: 'Probe taxis',
+          side: 'side-a',
+          troopType: 'hoplite',
+          soldiers: 100,
+          files: 10,
+          lateralInterval: 1.05,
+          rankDepth: 0.94,
+          position: { x: 600.04, y: 400.05 },
+          facing: 30.05,
+        },
+      ],
+      terrainFeatures: [
+        {
+          id: 'river',
+          kind: 'linear',
+          category: 'river',
+          path: [
+            { x: 0.04, y: 100 },
+            { x: 200.05, y: 300 },
+          ],
+          width: 12.06,
+        },
+      ],
+    });
+    // Stored documents round every metre value to 0.1 m.
+    assert.deepEqual(valuesOffTenthGrid(authored), []);
+    await store.save(authored);
+    const saved = await store.load(authored.id);
+    const { json } = exportScenario(saved);
+    const imported = importScenarioDocument(json);
+    // Import assigns a new identifier; every other value survives verbatim.
+    assert.notEqual(imported.id, saved.id);
+    assert.deepEqual(
+      { ...imported, id: saved.id, createdAt: saved.createdAt, updatedAt: saved.updatedAt },
+      { ...saved, id: saved.id },
+    );
+    assert.deepEqual(valuesOffTenthGrid(imported), []);
+  });
+
+  it('undoes and redoes terrain, unit, and property edits in one session', () => {
+    const original = freshDocument();
+    let current = cloneScenario(original);
+    let history = createHistory();
+
+    // 1. Property edit: retitle the scenario.
+    history = historyCommit(history, cloneScenario(current));
+    current = { ...current, title: 'Acceptance plain' };
+
+    // 2. Terrain edit: draw a ground cover area.
+    history = historyCommit(history, cloneScenario(current));
+    current = addGroundCoverFeature(current, { category: 'forest', polygon: square(100, 100) });
+
+    // 3. Unit edit: place a unit, then move it through a proposal.
+    history = historyCommit(history, cloneScenario(current));
+    const withUnit = cloneScenario(current);
+    withUnit.units.push(probeUnit({ position: { x: 600, y: 400 } }));
+    current = withUnit;
+    const moved = proposeUnitPatch(current, current.units[0].id, {
+      position: { x: 620, y: 400 },
+    });
+    assert.equal(moved.ok, true);
+    history = historyCommit(history, cloneScenario(current));
+    current = moved.document;
+
+    // Undo all four commits back to the original document.
+    for (let step = 0; step < 4; step += 1) {
+      const undone = historyUndo(history, cloneScenario(current));
+      assert.ok(undone, `expected undo step ${step + 1}`);
+      history = undone.history;
+      current = undone.document;
+    }
+    assert.deepEqual(current, original);
+    assert.equal(historyUndo(history, cloneScenario(current)), null);
+
+    // Redo all four commits forward again.
+    for (let step = 0; step < 4; step += 1) {
+      const redone = historyRedo(history, cloneScenario(current));
+      assert.ok(redone, `expected redo step ${step + 1}`);
+      history = redone.history;
+      current = redone.document;
+    }
+    assert.equal(current.title, 'Acceptance plain');
+    assert.equal(current.terrainFeatures.length, 1);
+    assert.deepEqual(current.units[0].position, { x: 620, y: 400 });
+    assert.deepEqual(validateScenario(current), []);
   });
 });
