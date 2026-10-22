@@ -21,6 +21,9 @@ import {
   findFreeUnitPosition,
   fitMapView,
   generateId,
+  historyCommit,
+  historyRedo,
+  historyUndo,
   importScenarioDocument,
   isProvisionalRuleset,
   mapViewBox,
@@ -193,8 +196,7 @@ function commitEdit(nextDocument, refocusSelector) {
     render();
     return;
   }
-  state.history.past.push(cloneScenario(state.document));
-  state.history.future = [];
+  state.history = historyCommit(state.history, cloneScenario(state.document));
   state.document = nextDocument;
   if (state.selectedUnitId && !nextDocument.units.some((unit) => unit?.id === state.selectedUnitId)) {
     state.selectedUnitId = null;
@@ -207,11 +209,15 @@ function commitEdit(nextDocument, refocusSelector) {
 }
 
 function undoEdit(refocusSelector) {
-  if (!state.document || state.history.past.length === 0) {
+  if (!state.document) {
     return;
   }
-  state.history.future.push(cloneScenario(state.document));
-  state.document = state.history.past.pop();
+  const stepped = historyUndo(state.history, cloneScenario(state.document));
+  if (!stepped) {
+    return;
+  }
+  state.history = stepped.history;
+  state.document = stepped.document;
   state.fieldErrors = {};
   state.unitConflictIds = [];
   if (state.selectedUnitId && !state.document.units.some((unit) => unit?.id === state.selectedUnitId)) {
@@ -226,11 +232,15 @@ function undoEdit(refocusSelector) {
 }
 
 function redoEdit(refocusSelector) {
-  if (!state.document || state.history.future.length === 0) {
+  if (!state.document) {
     return;
   }
-  state.history.past.push(cloneScenario(state.document));
-  state.document = state.history.future.pop();
+  const stepped = historyRedo(state.history, cloneScenario(state.document));
+  if (!stepped) {
+    return;
+  }
+  state.history = stepped.history;
+  state.document = stepped.document;
   state.fieldErrors = {};
   state.unitConflictIds = [];
   if (state.selectedUnitId && !state.document.units.some((unit) => unit?.id === state.selectedUnitId)) {
@@ -725,12 +735,7 @@ function commitUnitField(unitId, field, raw) {
       render();
       return;
     }
-    const proposal = proposeUnitPatch(state.document, unitId, { position });
-    if (!proposal.ok) {
-      failUnitCommit(`unit-position-${unitId}`, proposal.errors[0] || 'This position is not allowed.', proposal.conflictIds);
-      return;
-    }
-    commitEdit(proposal.document, `[data-unit-field="${field}"][data-id="${unitId}"]`);
+    commitGeometryProposal(unitId, { position }, { refocus: `[data-unit-field="${field}"][data-id="${unitId}"]` });
     return;
   }
   if (field === 'facing') {
@@ -744,12 +749,7 @@ function commitUnitField(unitId, field, raw) {
       render();
       return;
     }
-    const proposal = proposeUnitPatch(state.document, unitId, { facing: Number(raw) });
-    if (!proposal.ok) {
-      failUnitCommit(`unit-facing-${unitId}`, proposal.errors[0] || 'This facing is not allowed.', proposal.conflictIds);
-      return;
-    }
-    commitEdit(proposal.document, `[data-unit-field="${field}"][data-id="${unitId}"]`);
+    commitGeometryProposal(unitId, { facing: Number(raw) }, { refocus: `[data-unit-field="${field}"][data-id="${unitId}"]` });
     return;
   }
 }

@@ -1340,8 +1340,9 @@ export function defaultFacingForSide(document, sideId) {
 // drop or rotation never touches the document. These helpers are pure and
 // framework-free so the browser editor and the Node unit tests share them.
 
-// Screen-pixel tolerance for map selection, applied by the editor: the caller
-// converts it to metres (pixels x metres-per-pixel) for the hit test below.
+// Screen-pixel tolerance for battlefield selection, applied by the editor:
+// the caller converts it to metres (pixels x metres-per-pixel) for the hit
+// test below.
 export const UNIT_PICK_TOLERANCE_PX = 8;
 
 // Snap step for rotation-handle drags, in degrees.
@@ -1399,8 +1400,8 @@ export function footprintCorners(unit) {
   }
 }
 
-// True when a map point hits a unit's real footprint: inside it, on its
-// boundary, or within `toleranceM` of its edges (the editor passes the
+// True when a battlefield point hits a unit's real footprint: inside it, on
+// its boundary, or within `toleranceM` of its edges (the editor passes the
 // screen-pixel tolerance converted to metres). Never throws.
 export function footprintHitTest(unit, point, toleranceM = 0) {
   const corners = footprintCorners(unit);
@@ -1428,18 +1429,19 @@ export function footprintHitTest(unit, point, toleranceM = 0) {
   return false;
 }
 
-// The id of the topmost unit whose real footprint is hit by a map point, or
-// null. Units render in document order, so the last matching unit wins.
-// Never throws.
+// The id of the topmost unit whose real footprint is hit by a battlefield
+// point, or null. Units render in document order, so the last matching unit
+// wins; units without an identifier never match, so selection falls through
+// to the unit below. Never throws.
 export function pickUnitIdAtPoint(document, point, toleranceM = 0) {
   const units = Array.isArray(document?.units) ? document.units : [];
   for (let i = units.length - 1; i >= 0; i -= 1) {
     const unit = units[i];
-    if (!unit || typeof unit !== 'object') {
+    if (!unit || typeof unit !== 'object' || !unit.id) {
       continue;
     }
     if (footprintHitTest(unit, point, toleranceM)) {
-      return unit.id || null;
+      return unit.id;
     }
   }
   return null;
@@ -1541,6 +1543,55 @@ export function proposeUnitPatch(document, unitId, patch = {}) {
     document: null,
     errors: relevant,
     conflictIds: [...new Set(conflictIds.filter(Boolean))],
+  };
+}
+
+// --- Undo history (framework-free) ------------------------------------------
+// The editing session keeps whole-document snapshots: every committed change
+// (properties, terrain, units, placements, rotations) pushes the previous
+// document and clears the redo stack, so every tool that commits through
+// these helpers is undoable with no extra work. View navigation and selection
+// are never recorded. History is not saved with the scenario. Pure: snapshots
+// are treated as opaque values and never mutated.
+
+export function createHistory() {
+  return { past: [], future: [] };
+}
+
+// Record `snapshot` (the document before a committed change) and drop the
+// redo stack. Returns the next history value.
+export function historyCommit(history, snapshot) {
+  const past = Array.isArray(history?.past) ? history.past : [];
+  return { past: [...past, snapshot], future: [] };
+}
+
+// Step back to the most recent snapshot, holding `current` for redo. Returns
+// null when there is nothing to undo: { history, document } otherwise.
+export function historyUndo(history, current) {
+  const past = Array.isArray(history?.past) ? history.past : [];
+  const future = Array.isArray(history?.future) ? history.future : [];
+  if (past.length === 0) {
+    return null;
+  }
+  const previous = past.slice(0, -1);
+  return {
+    history: { past: previous, future: [...future, current] },
+    document: past[past.length - 1],
+  };
+}
+
+// Step forward to the most recently undone snapshot, holding `current` for
+// undo. Returns null when there is nothing to redo.
+export function historyRedo(history, current) {
+  const past = Array.isArray(history?.past) ? history.past : [];
+  const future = Array.isArray(history?.future) ? history.future : [];
+  if (future.length === 0) {
+    return null;
+  }
+  const remaining = future.slice(0, -1);
+  return {
+    history: { past: [...past, current], future: remaining },
+    document: future[future.length - 1],
   };
 }
 
