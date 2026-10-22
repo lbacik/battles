@@ -17,7 +17,7 @@ import {
 } from './turn.js';
 import { RULESET_PARAMETERS } from './polis-classical.js';
 import { normalizeReform } from './reform.js';
-import { withdrawDestination } from './withdraw.js';
+import { withdrawDestination, withdrawParamsOf } from './withdraw.js';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
 const scenarioDir = path.join(here, '..', 'scenarios');
@@ -487,6 +487,40 @@ describe('withdraw', () => {
       availableM: 10,
       requiredM: 40,
       shortfallM: 30,
+    });
+  });
+
+  it('honours custom withdraw parameters from the battle snapshot', () => {
+    const { battle, unit, enemy } = arrangedWithdraw();
+    battle.parameters.withdraw = { distanceM: 10, rateFactor: 1, cohesionPassChance: 1 };
+    const verdict = acceptedVerdict(
+      validateTurn(battle, submissionFor(battle, [{ unitId: unit.id, kind: 'Withdraw' }])),
+    );
+    assert.deepEqual(verdict.withdraw, { distanceM: 10, brokeContactWith: [enemy.id] });
+    assert.deepEqual(verdict.preview.position, { x: 500, y: 610 });
+    assert.deepEqual(verdict.movement, { availableM: 90, requiredM: 10 });
+    // The custom pass chance reaches resolution: 1 always passes.
+    const next = resolveTurn(
+      battle,
+      { type: 'commit', submission: submissionFor(battle, [{ unitId: unit.id, kind: 'Withdraw' }]) },
+    );
+    const moved = next.units.find((entry) => entry.id === unit.id);
+    assert.deepEqual(moved.position, { x: 500, y: 610 });
+    assert.equal(moved.cohesion, 'Steady');
+    const draw = next.events.find(
+      (entry) => entry.type === 'random-draw' && entry.purpose === 'withdraw-cohesion',
+    );
+    assert.equal(draw.result, 'passed');
+  });
+
+  it('reads withdraw parameters in either the outer or the inner shape', () => {
+    const custom = { distanceM: 10, rateFactor: 1, cohesionPassChance: 0.75 };
+    assert.deepEqual(withdrawParamsOf({ withdraw: custom }), custom);
+    assert.deepEqual(withdrawParamsOf(custom), custom);
+    assert.deepEqual(withdrawParamsOf(undefined), {
+      distanceM: 20,
+      rateFactor: 0.5,
+      cohesionPassChance: 0.5,
     });
   });
 

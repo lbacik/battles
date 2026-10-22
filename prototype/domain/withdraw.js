@@ -81,8 +81,13 @@ export const DEFAULT_WITHDRAW_DISTANCE_M = 20;
 export const DEFAULT_WITHDRAW_RATE_FACTOR = 0.5;
 export const DEFAULT_WITHDRAW_COHESION_PASS_CHANCE = 0.5;
 
+// Accepts either the outer parameters shape (`{ withdraw: {...} }`) or the
+// inner withdraw block itself (which is what the turn contract passes), so a
+// customised `distanceM`/`rateFactor`/`cohesionPassChance` is honoured
+// wherever it is configured. Anything else falls back to the defaults.
 export function withdrawParamsOf(params) {
-  const raw = params?.withdraw && typeof params.withdraw === 'object' ? params.withdraw : {};
+  const inner = params && typeof params === 'object' ? params : {};
+  const raw = inner.withdraw && typeof inner.withdraw === 'object' ? inner.withdraw : inner;
   const distanceM = Number.isFinite(raw.distanceM) && raw.distanceM > 0
     ? raw.distanceM
     : DEFAULT_WITHDRAW_DISTANCE_M;
