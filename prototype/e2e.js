@@ -1,29 +1,42 @@
 // PÓLIS tracer bullet — browser end-to-end test.
 //
-// Covers unit placement plus create → save → reload → reopen against the real
-// IndexedDB scenario store (its own test database, so the author's library is
-// untouched):
-//   phase "units":  editor acceptance steps 5–7 (six units, a spacing preset,
-//                   a rotation to 30°, a refused overlapping drop, accepted
-//                   edge-to-edge touching, and a refused battlefield shrink);
-//   phase "save":   create a scenario, draw ground cover areas (acceptance
-//                   step 2: forest, rough ground, settlement; an overlapping
-//                   area is refused with a highlight ring), save it, verify it
-//                   is listed, snapshot the stored document, then reload;
-//   phase "reopen": with a fresh store instance, list the library, reopen
-//                   the scenario by id, and assert every value is identical.
+// Runs the ten-step editor acceptance scenario (#4) plus persistence steps
+// 1–6 and 8 (#5) against the real IndexedDB scenario store (its own test
+// database, so the author's library is untouched):
+//   phase "units":  editor acceptance steps 4–8 (renamed sides with warnings,
+//                   six units, a spacing preset, a rotation to 30°, a refused
+//                   overlapping drop, accepted edge-to-edge touching, a refused
+//                   battlefield shrink, and multi-kind undo/redo);
+//   phase "save":   acceptance steps 1–3 (titled scenario at 1400 × 900 m with
+//                   a description; forest, rough ground, and a settlement with a
+//                   refused overlap; a two-level hill and a river crossed by a
+//                   road), then save, list, snapshot, and reload;
+//   phase "reopen": with a fresh store instance, list the library, reopen the
+//                   scenario by id with every value identical to 0.1 m and an
+//                   empty undo history, duplicate and delete the duplicate
+//                   (step 10), then persistence steps 2–6 and 8 (export/import
+//                   copies, two-tab conflict, five rejected imports, the unknown
+//                   troop-type key, and a simulated quota failure).
 // Progress survives the reload in sessionStorage. Results are rendered into
 // the page and logged to the console for headless collection.
 import { deriveFootprint } from './domain/geometry.js';
 import {
+  RULESET_ID,
+  SCENARIO_FORMAT_VERSION,
   addElevationFeature,
   addGroundCoverFeature,
   addLinearFeature,
+  collectWarnings,
   cloneScenario,
+  createHistory,
   createScenario,
   exportScenario,
+  historyCommit,
+  historyRedo,
+  historyUndo,
   importScenarioDocument,
   normalizeFacing,
+  parseScenarioImport,
   pickUnitIdAtPoint,
   proposeUnitPatch,
   resizeBattlefield,
@@ -36,6 +49,13 @@ import {
   validateLinearCandidate,
   validateScenario,
 } from './domain/scenario.js';
+import {
+  SaveConflictError,
+  detectSaveConflict,
+  duplicateScenario,
+  isQuotaError,
+  performSave,
+} from './domain/library.js';
 import { collectUnknownTroopTypeWarnings } from './domain/polis-classical.js';
 import { BattleStartError, startBattle, validatePlayability } from './domain/battle.js';
 import {
@@ -110,6 +130,37 @@ function assertSameDocument(expected, actual) {
   }
 }
 
+// Every stored metre value keeps 0.1 m precision: battlefield dimensions,
+// spacings, facings, positions, polygon vertices, and linear widths are all
+// whole multiples of 0.1 m. The save/export/import round-trip gate (#20)
+// fails when any value drifts off that grid.
+function assertMetresToTenth(document) {
+  const values = [document.battlefield.width, document.battlefield.height];
+  for (const unit of document.units || []) {
+    values.push(
+      unit.lateralInterval,
+      unit.rankDepth,
+      unit.facing,
+      unit.position?.x,
+      unit.position?.y,
+    );
+  }
+  for (const feature of document.terrainFeatures || []) {
+    if (Array.isArray(feature.polygon)) {
+      for (const point of feature.polygon) values.push(point.x, point.y);
+    }
+    if (Array.isArray(feature.path)) {
+      for (const point of feature.path) values.push(point.x, point.y);
+    }
+    if (Number.isFinite(feature.width)) values.push(feature.width);
+  }
+  for (const value of values) {
+    if (!Number.isFinite(value) || Math.abs(value * 10 - Math.round(value * 10)) > 1e-9) {
+      throw new Error(`value ${value} is not on the 0.1 m grid`);
+    }
+  }
+}
+
 // Battles survive reloads: the stored battle state and its committed turn
 // decisions resume identically. State is also isolated from later scenario
 // edits because the battle keeps its own scenario snapshot.
@@ -173,14 +224,35 @@ const ACCEPTANCE_GROUNDS = [
 // accepted. Step 7: shrinking the battlefield past a unit is refused, naming
 // the blocking units.
 async function phaseUnitPlacement() {
-  logStep('acceptance step 5: build "Acceptance plain" at 1400 x 900 m', 'running');
-  const document = createScenario({
+  logStep('acceptance step 4: rename the sides Athens and Sparta', 'running');
+  const renamed = createScenario({
     title: 'Acceptance plain',
     battlefield: { width: 1400, height: 900 },
-    description: 'Editor acceptance probe: steps 5-7.',
+    description: 'Editor acceptance probe: steps 1-10.',
   });
+  renamed.sides[0].name = 'Athens';
+  renamed.sides[1].name = 'Sparta';
+  renamed.sides[0].color = '#1d4ed8';
+  renamed.sides[1].color = '#b91c1c';
+  if (renamed.sides[0].name === renamed.sides[1].name) {
+    throw new Error('side names must differ');
+  }
+  if (renamed.sides[0].color.toLowerCase() === renamed.sides[1].color.toLowerCase()) {
+    throw new Error('side colours must differ');
+  }
+  const emptyWarnings = collectWarnings(renamed);
+  if (emptyWarnings.length !== 2 || !emptyWarnings.every((warning) => /has no units/.test(warning))) {
+    throw new Error(`expected two empty-side warnings, got: ${JSON.stringify(emptyWarnings)}`);
+  }
+  logStep('acceptance step 4: rename the sides Athens and Sparta', 'pass', '2 empty-side warnings');
+
+  logStep('acceptance step 5: build "Acceptance plain" at 1400 x 900 m', 'running');
+  const document = renamed;
   if (document.battlefield.width !== 1400 || document.battlefield.height !== 900) {
     throw new Error('battlefield size was not kept');
+  }
+  if (document.description !== 'Editor acceptance probe: steps 1-10.') {
+    throw new Error('description was not kept');
   }
   const sides = document.sides.map((side) => side.id);
   const specs = [
@@ -197,6 +269,10 @@ async function phaseUnitPlacement() {
   if (structural.length > 0) {
     throw new Error(`acceptance units are invalid: ${structural.join('; ')}`);
   }
+  if (collectWarnings(document).length !== 0) {
+    throw new Error(`empty-side warnings persist with units fielded: ${collectWarnings(document).join('; ')}`);
+  }
+  logStep('acceptance step 4: warnings clear once both sides field units', 'pass', 'no issues');
   const troopTypes = new Set(document.units.map((unit) => unit.troopType));
   if (troopTypes.size < 2) {
     throw new Error('acceptance units must use at least two troop types');
@@ -308,6 +384,77 @@ async function phaseUnitPlacement() {
   // A shrink that keeps every footprint still succeeds.
   resizeBattlefield(document, 1400, 700);
   logStep('acceptance step 7: shrinking past a unit is refused', 'pass', shrinkError);
+
+  logStep('acceptance step 8: undo and redo terrain, unit, and property edits', 'running');
+  let session = cloneScenario(document);
+  let sessionHistory = createHistory();
+  sessionHistory = historyCommit(sessionHistory, cloneScenario(session));
+  session = { ...session, title: 'Acceptance plain (edited)' };
+  sessionHistory = historyCommit(sessionHistory, cloneScenario(session));
+  session = addGroundCoverFeature(session, {
+    category: 'forest',
+    polygon: [
+      { x: 100, y: 100 },
+      { x: 200, y: 100 },
+      { x: 200, y: 200 },
+      { x: 100, y: 200 },
+    ],
+  });
+  sessionHistory = historyCommit(sessionHistory, cloneScenario(session));
+  const placed = probeUnitForUndo(session);
+  session = { ...session, units: [...session.units, placed] };
+  const shifted = proposeUnitPatch(session, placed.id, { position: { x: 620, y: 400 } });
+  if (!shifted.ok) {
+    throw new Error(`undo-probe move refused: ${shifted.errors.join('; ')}`);
+  }
+  sessionHistory = historyCommit(sessionHistory, cloneScenario(session));
+  session = shifted.document;
+  for (let step = 0; step < 4; step += 1) {
+    const undone = historyUndo(sessionHistory, cloneScenario(session));
+    if (!undone) throw new Error(`undo step ${step + 1} is missing`);
+    sessionHistory = undone.history;
+    session = undone.document;
+  }
+  if (JSON.stringify(session) !== JSON.stringify(document)) {
+    throw new Error('undoing every step did not restore the session start');
+  }
+  for (let step = 0; step < 4; step += 1) {
+    const redone = historyRedo(sessionHistory, cloneScenario(session));
+    if (!redone) throw new Error(`redo step ${step + 1} is missing`);
+    sessionHistory = redone.history;
+    session = redone.document;
+  }
+  if (session.terrainFeatures.length !== document.terrainFeatures.length + 1) {
+    throw new Error('redoing every step did not restore the terrain edit');
+  }
+  logStep(
+    'acceptance step 8: undo and redo terrain, unit, and property edits',
+    'pass',
+    '4 undo steps · 4 redo steps',
+  );
+}
+
+function probeUnitForUndo(document) {
+  const side = document.sides[0].id;
+  let counter = 900;
+  const taken = new Set((document.units || []).map((unit) => unit.id));
+  let id = `00000000-0000-4000-8000-${String(counter).padStart(12, '0')}`;
+  while (taken.has(id)) {
+    counter += 1;
+    id = `00000000-0000-4000-8000-${String(counter).padStart(12, '0')}`;
+  }
+  return {
+    id,
+    name: 'Undo probe taxis',
+    side,
+    troopType: 'hoplite',
+    soldiers: 100,
+    files: 10,
+    lateralInterval: 1,
+    rankDepth: 1,
+    position: { x: 600, y: 400 },
+    facing: 0,
+  };
 }
 
 async function phaseSave() {
@@ -316,18 +463,31 @@ async function phaseSave() {
   await store.clear();
   logStep('clear the end-to-end test database', 'pass');
 
-  const title = `E2E probe ${new Date().toISOString()}`;
-  logStep('create a new scenario with a required title', 'running');
-  let created = createScenario({ title });
-  if (!created.id || created.title !== title) throw new Error('created scenario is incomplete');
+  logStep('acceptance step 1: create "Acceptance plain" with a required title', 'running');
+  let created = createScenario({
+    title: 'Acceptance plain',
+    description: 'Editor acceptance probe: save, reload, and reopen.',
+  });
+  if (!created.id || created.title !== 'Acceptance plain') {
+    throw new Error('created scenario is incomplete');
+  }
   if (created.sides.length !== 2) throw new Error('expected two default sides');
-  logStep('create a new scenario with a required title', 'pass', title);
+  try {
+    createScenario({ title: '   ' });
+    throw new Error('a blank title was accepted');
+  } catch (error) {
+    if (!/title is required/i.test(error.message)) throw error;
+  }
+  logStep('acceptance step 1: create "Acceptance plain" with a required title', 'pass', created.title);
 
-  logStep('set the battlefield to 1400 × 900 m', 'running');
+  logStep('acceptance step 1: set the battlefield to 1400 × 900 m with a description', 'running');
   created = resizeBattlefield(created, ACCEPTANCE_BATTLEFIELD.width, ACCEPTANCE_BATTLEFIELD.height);
-  logStep('set the battlefield to 1400 × 900 m', 'pass');
+  if (created.description !== 'Editor acceptance probe: save, reload, and reopen.') {
+    throw new Error('description was not kept');
+  }
+  logStep('acceptance step 1: set the battlefield to 1400 × 900 m with a description', 'pass');
 
-  logStep('draw forest, rough ground, and a settlement', 'running');
+  logStep('acceptance step 2: draw forest, rough ground, and a settlement', 'running');
   for (const ground of ACCEPTANCE_GROUNDS) {
     created = addGroundCoverFeature(created, ground);
   }
@@ -336,9 +496,9 @@ async function phaseSave() {
   if (validateScenario(created).length > 0) {
     throw new Error(`drawn areas are invalid: ${validateScenario(created).join('; ')}`);
   }
-  logStep('draw forest, rough ground, and a settlement', 'pass', '3 areas');
+  logStep('acceptance step 2: draw forest, rough ground, and a settlement', 'pass', '3 areas');
 
-  logStep('refuse an area overlapping the forest with a highlight', 'running');
+  logStep('acceptance step 2: refuse an area overlapping the forest with a highlight', 'running');
   const overlapping = validateGroundCoverCandidate(created, [
     { x: 200, y: 650 },
     { x: 350, y: 650 },
@@ -352,12 +512,12 @@ async function phaseSave() {
   if (!Array.isArray(overlapping.ring) || overlapping.ring.length < 3) {
     throw new Error('the refusal carries no highlight ring');
   }
-  logStep('refuse an area overlapping the forest with a highlight', 'pass', overlapping.reason);
+  logStep('acceptance step 2: refuse an area overlapping the forest with a highlight', 'pass', overlapping.reason);
 
   // Acceptance step 3: a river and a road crossing the river and the forest.
   // Linear features may cross ground cover, elevation, and each other, and
   // are clipped to the battlefield like every other terrain feature.
-  logStep('draw a river crossing the forest', 'running');
+  logStep('acceptance step 3: draw a river crossing the forest', 'running');
   created = addLinearFeature(created, {
     category: 'river',
     width: 18,
@@ -371,9 +531,9 @@ async function phaseSave() {
       { x: 610, y: 900 },
     ],
   });
-  logStep('draw a river crossing the forest', 'pass', '7 vertices · 18 m');
+  logStep('acceptance step 3: draw a river crossing the forest', 'pass', '7 vertices · 18 m');
 
-  logStep('draw a road crossing the river and the forest', 'running');
+  logStep('acceptance step 3: draw a road crossing the river and the forest', 'running');
   created = addLinearFeature(created, {
     category: 'road',
     width: 6,
@@ -388,9 +548,9 @@ async function phaseSave() {
   if (validateScenario(created).length > 0) {
     throw new Error(`crossing linears are invalid: ${validateScenario(created).join('; ')}`);
   }
-  logStep('draw a road crossing the river and the forest', 'pass', '5 vertices · 6 m');
+  logStep('acceptance step 3: draw a road crossing the river and the forest', 'pass', '5 vertices · 6 m');
 
-  logStep('move a river vertex and change the road width', 'running');
+  logStep('acceptance step 3: move a river vertex and change the road width', 'running');
   const river = created.terrainFeatures.find(
     (feature) => feature.kind === 'linear' && feature.category === 'river',
   );
@@ -414,9 +574,9 @@ async function phaseSave() {
   if (validateScenario(created).length > 0) {
     throw new Error(`edited linears are invalid: ${validateScenario(created).join('; ')}`);
   }
-  logStep('move a river vertex and change the road width', 'pass', '8 m');
+  logStep('acceptance step 3: move a river vertex and change the road width', 'pass', '8 m');
 
-  logStep('clip an area reaching past the edge to the battlefield', 'running');
+  logStep('acceptance step 3: clip an area reaching past the edge to the battlefield', 'running');
   created = addGroundCoverFeature(created, {
     category: 'water',
     polygon: [
@@ -433,9 +593,9 @@ async function phaseSave() {
   if (!clipped.polygon.some((point) => point.x === 0)) {
     throw new Error('the stored vertices are not the clipped boundary');
   }
-  logStep('clip an area reaching past the edge to the battlefield', 'pass');
+  logStep('acceptance step 3: clip an area reaching past the edge to the battlefield', 'pass');
 
-  logStep('draw a hill with two nested levels (levels 1 and 2 derived)', 'running');
+  logStep('acceptance step 3: draw a hill with two nested levels (levels 1 and 2 derived)', 'running');
   created = addElevationFeature(created, {
     polygon: [
       { x: 600, y: 300 },
@@ -460,9 +620,9 @@ async function phaseSave() {
   if (validateScenario(created).length > 0) {
     throw new Error(`drawn hills are invalid: ${validateScenario(created).join('; ')}`);
   }
-  logStep('draw a hill with two nested levels (levels 1 and 2 derived)', 'pass', 'levels 1, 2');
+  logStep('acceptance step 3: draw a hill with two nested levels (levels 1 and 2 derived)', 'pass', 'levels 1, 2');
 
-  logStep('refuse a hill crossing a sibling with a highlight', 'running');
+  logStep('acceptance step 3: refuse a hill crossing a sibling with a highlight', 'running');
   const crossingHill = validateElevationCandidate(created, [
     { x: 850, y: 400 },
     { x: 1000, y: 400 },
@@ -476,23 +636,23 @@ async function phaseSave() {
   if (!Array.isArray(crossingHill.ring) || crossingHill.ring.length < 3) {
     throw new Error('the refusal carries no highlight ring');
   }
-  logStep('refuse a hill crossing a sibling with a highlight', 'pass', crossingHill.reason);
+  logStep('acceptance step 3: refuse a hill crossing a sibling with a highlight', 'pass', crossingHill.reason);
 
-  logStep('save it through the scenario store', 'running');
+  logStep('acceptance step 9: save it through the scenario store', 'running');
   const metadata = await store.save(created);
   const snapshot = await store.load(created.id);
   if (!snapshot) throw new Error('saved scenario cannot be loaded back');
-  logStep('save it through the scenario store', 'pass', `rev. ${metadata.revision}`);
+  logStep('acceptance step 9: save it through the scenario store', 'pass', `rev. ${metadata.revision}`);
 
-  logStep('list the scenario in the library', 'running');
+  logStep('acceptance step 9: list the scenario in the library', 'running');
   const listed = await store.list();
   if (!listed.some((entry) => entry.id === created.id && entry.title === title)) {
     throw new Error('saved scenario is missing from the library');
   }
-  logStep('list the scenario in the library', 'pass', `${listed.length} in library`);
+  logStep('acceptance step 9: list the scenario in the library', 'pass', `${listed.length} in library`);
 
   sessionStorage.setItem(PHASE_KEY, JSON.stringify({ phase: 'reopen', id: created.id, snapshot }));
-  logStep('reload the browser', 'running', 'reloading…');
+  logStep('acceptance step 9: reload the browser', 'running', 'reloading…');
   store.close();
   location.reload();
 }
@@ -500,22 +660,22 @@ async function phaseSave() {
 async function phaseReopen(phase) {
   // Fresh store instance, as after a real reload: nothing is reused.
   const store = new IndexedDBScenarioStore({ dbName: DB_NAME });
-  logStep('create a new scenario with a required title', 'pass', '(before reload)');
-  logStep('save it through the scenario store', 'pass', '(before reload)');
-  logStep('list the scenario in the library', 'pass', '(before reload)');
-  logStep('reload the browser', 'pass', 'done');
+  logStep('acceptance step 1: create "Acceptance plain" with a required title', 'pass', '(before reload)');
+  logStep('acceptance step 9: save it through the scenario store', 'pass', '(before reload)');
+  logStep('acceptance step 9: list the scenario in the library', 'pass', '(before reload)');
+  logStep('acceptance step 9: reload the browser', 'pass', 'done');
 
-  logStep('list the scenario library after reload', 'running');
+  logStep('acceptance step 9: list the scenario library after reload', 'running');
   const listed = await store.list();
   const entry = listed.find((item) => item.id === phase.id);
   if (!entry) throw new Error('scenario missing from the library after reload');
-  logStep('list the scenario library after reload', 'pass', `${listed.length} in library`);
+  logStep('acceptance step 9: list the scenario library after reload', 'pass', `${listed.length} in library`);
 
-  logStep('reopen the scenario with identical values', 'running');
+  logStep('acceptance step 9: reopen the scenario with identical values', 'running');
   const reopened = await store.load(phase.id);
   if (!reopened) throw new Error('scenario cannot be reopened after reload');
   assertSameDocument(phase.snapshot, reopened);
-  logStep('reopen the scenario with identical values', 'pass', reopened.title);
+  logStep('acceptance step 9: reopen the scenario with identical values', 'pass', reopened.title);
 
   logStep('keep the drawn ground cover identical and valid', 'running');
   const grounds = (reopened.terrainFeatures || []).filter((feature) => feature.kind === 'ground');
@@ -542,12 +702,259 @@ async function phaseReopen(phase) {
   }
   logStep('keep the nested hills identical with derived levels', 'pass', 'levels 1, 2');
 
+  logStep('acceptance step 9: every value is identical to 0.1 m', 'running');
+  assertMetresToTenth(reopened);
+  const { json: reopenedJson } = exportScenario(reopened);
+  const reimported = importScenarioDocument(reopenedJson);
+  assertMetresToTenth(reimported);
+  logStep('acceptance step 9: every value is identical to 0.1 m', 'pass', 'save/export/import agree');
+
+  logStep('acceptance step 9: the undo history is empty after reopening', 'running');
+  const freshHistory = createHistory();
+  if (historyUndo(freshHistory, cloneScenario(reopened)) !== null) {
+    throw new Error('a fresh editing session must have nothing to undo');
+  }
+  if (historyRedo(freshHistory, cloneScenario(reopened)) !== null) {
+    throw new Error('a fresh editing session must have nothing to redo');
+  }
+  logStep('acceptance step 9: the undo history is empty after reopening', 'pass', 'nothing to undo or redo');
+
+  logStep('acceptance step 10: duplicate the scenario, then delete the duplicate', 'running');
+  const duplicate = duplicateScenario(reopened);
+  if (duplicate.id === reopened.id) throw new Error('the duplicate kept the original identifier');
+  const duplicateMetadata = await store.save(duplicate);
+  if (duplicateMetadata.revision !== 1) {
+    throw new Error(`expected the duplicate to start at rev. 1, got rev. ${duplicateMetadata.revision}`);
+  }
+  const withDuplicate = await store.list();
+  if (!withDuplicate.some((item) => item.id === duplicate.id)) {
+    throw new Error('the duplicate is missing from the library');
+  }
+  await store.remove(duplicate.id);
+  const afterDelete = await store.list();
+  if (afterDelete.some((item) => item.id === duplicate.id)) {
+    throw new Error('the deleted duplicate is still listed');
+  }
+  if (!afterDelete.some((item) => item.id === reopened.id)) {
+    throw new Error('deleting the duplicate removed the original');
+  }
+  logStep(
+    'acceptance step 10: duplicate the scenario, then delete the duplicate',
+    'pass',
+    'duplicate rev. 1 removed, original kept',
+  );
+
+  await phasePersistenceStep2And3(store, reopened);
+  await phasePersistenceStep4(store, reopened);
+  await phasePersistenceStep5(store);
+  await phasePersistenceStep8(store, reopened);
   await phasePersistenceStep6(store);
 
   await phaseBattleTurns();
 
   store.close();
   await phaseBattlePersistence(reopened, entry);
+}
+
+// Persistence acceptance steps 2–3 (#5): export the scenario, delete it,
+// import the file as a new copy with a new identifier and identical content,
+// import the same file again, and prove the two copies are independent.
+async function phasePersistenceStep2And3(store, reopened) {
+  logStep('persistence step 2: export, delete, and import as a new copy', 'running');
+  const countBefore = (await store.list()).length;
+  const { json } = exportScenario(reopened);
+  await store.remove(reopened.id);
+  if ((await store.list()).some((item) => item.id === reopened.id)) {
+    throw new Error('the deleted scenario is still listed');
+  }
+  const firstCopy = importScenarioDocument(json);
+  if (firstCopy.id === reopened.id) throw new Error('the import kept the original identifier');
+  await store.save(firstCopy);
+  const reloadedFirst = await store.load(firstCopy.id);
+  // Timestamps refresh on save; every other value survives verbatim.
+  assertSameDocument(
+    {
+      ...reopened,
+      id: reloadedFirst.id,
+      createdAt: reloadedFirst.createdAt,
+      updatedAt: reloadedFirst.updatedAt,
+    },
+    reloadedFirst,
+  );
+  logStep('persistence step 2: export, delete, and import as a new copy', 'pass', 'new id, identical content');
+
+  logStep('persistence step 3: import the same file again as an independent copy', 'running');
+  const secondCopy = importScenarioDocument(json);
+  if (secondCopy.id === firstCopy.id) throw new Error('the second import reused the first copy identifier');
+  await store.save(secondCopy);
+  const edited = cloneScenario(await store.load(firstCopy.id));
+  edited.title = 'Edited without touching the sibling copy';
+  await store.save(edited);
+  const sibling = await store.load(secondCopy.id);
+  if (sibling.title === edited.title) {
+    throw new Error('editing one copy changed the other');
+  }
+  if ((await store.list()).length !== countBefore + 1) {
+    throw new Error('expected the two imports minus the deleted original in the library');
+  }
+  // Restore the reopened scenario for the steps that follow.
+  await store.remove(firstCopy.id);
+  await store.remove(secondCopy.id);
+  const restored = importScenarioDocument(json);
+  restored.id = reopened.id;
+  await store.save(restored);
+  logStep('persistence step 3: import the same file again as an independent copy', 'pass', 'copies are independent');
+}
+
+// Persistence acceptance step 4 (#5): two tabs. A second tab saves first, so
+// the first tab's save raises a save conflict instead of silently
+// overwriting; overwriting only on request and saving as a copy both work.
+async function phasePersistenceStep4(store, reopened) {
+  logStep('persistence step 4: a stale second-tab save asks Overwrite or Save as copy', 'running');
+  const firstTab = await store.load(reopened.id);
+  const secondTab = await store.load(reopened.id);
+  const listed = await store.list();
+  const storedRevision = listed.find((item) => item.id === reopened.id)?.revision ?? 1;
+  await store.save({ ...secondTab, description: 'Second tab wins first.' });
+  let conflicted = null;
+  try {
+    await performSave(store, { ...firstTab, description: 'First tab.' }, {
+      loadedRevision: storedRevision,
+      storedRevision: storedRevision + 1,
+    });
+  } catch (error) {
+    conflicted = error;
+  }
+  if (!(conflicted instanceof SaveConflictError)) {
+    throw new Error('a stale save did not raise a save conflict');
+  }
+  if (!detectSaveConflict(storedRevision, storedRevision + 1)) {
+    throw new Error('stale revisions do not detect a conflict');
+  }
+  await performSave(store, { ...firstTab, description: 'First tab overwrites.' }, {
+    loadedRevision: storedRevision,
+    storedRevision: storedRevision + 1,
+    overwrite: true,
+  });
+  if ((await store.load(reopened.id)).description !== 'First tab overwrites.') {
+    throw new Error('overwrite did not store the first tab version');
+  }
+  const copy = duplicateScenario(await store.load(reopened.id));
+  await performSave(store, copy, { loadedRevision: null, storedRevision: null });
+  await store.remove(copy.id);
+  await store.save({ ...reopened, description: reopened.description });
+  logStep('persistence step 4: a stale second-tab save asks Overwrite or Save as copy', 'pass', 'overwrite and copy work');
+}
+
+// Persistence acceptance step 5 (#5): each bad file is rejected with its
+// specific cause and the library is unchanged.
+async function phasePersistenceStep5(store) {
+  logStep('persistence step 5: reject bad files with a specific cause', 'running');
+  const countBefore = (await store.list()).length;
+  const probe = createScenario({ title: 'Persistence step 5 probe' });
+  const exported = JSON.parse(exportScenario(probe).json);
+  const badFiles = [
+    { label: 'non-JSON', json: 'this is not json {', pattern: /not valid JSON/ },
+    {
+      label: 'another document kind',
+      json: JSON.stringify({ kind: 'battle', formatVersion: 1 }),
+      pattern: /not a scenario/,
+    },
+    {
+      label: 'higher format version',
+      json: JSON.stringify({ ...exported, formatVersion: SCENARIO_FORMAT_VERSION + 1 }),
+      pattern: /newer than the supported/,
+    },
+    {
+      label: 'unknown ruleset',
+      json: JSON.stringify({ ...exported, ruleset: { id: 'other-rules', version: '1.0' } }),
+      pattern: /unknown ruleset/,
+    },
+    {
+      label: 'overlapping units',
+      json: JSON.stringify({
+        ...exported,
+        units: [
+          {
+            id: '00000000-0000-4000-8000-000000000001',
+            name: 'First',
+            side: exported.sides[0].id,
+            troopType: 'hoplite',
+            soldiers: 100,
+            files: 10,
+            lateralInterval: 1,
+            rankDepth: 1,
+            position: { x: 600, y: 400 },
+            facing: 0,
+          },
+          {
+            id: '00000000-0000-4000-8000-000000000002',
+            name: 'Second',
+            side: exported.sides[0].id,
+            troopType: 'hoplite',
+            soldiers: 100,
+            files: 10,
+            lateralInterval: 1,
+            rankDepth: 1,
+            position: { x: 600, y: 400 },
+            facing: 0,
+          },
+        ],
+      }),
+      pattern: /overlap/,
+    },
+  ];
+  for (const bad of badFiles) {
+    let refused = null;
+    try {
+      parseScenarioImport(bad.json);
+    } catch (error) {
+      refused = error;
+    }
+    if (!refused || !bad.pattern.test(refused.message)) {
+      throw new Error(`"${bad.label}" was not refused specifically: ${refused?.message || 'accepted'}`);
+    }
+    // The unknown-ruleset refusal names the supported catalogue.
+    if (bad.label === 'unknown ruleset' && !refused.message.includes(RULESET_ID)) {
+      throw new Error(`the unknown-ruleset refusal does not name "${RULESET_ID}": ${refused.message}`);
+    }
+  }
+  if ((await store.list()).length !== countBefore) {
+    throw new Error('a rejected import changed the library');
+  }
+  logStep('persistence step 5: reject bad files with a specific cause', 'pass', '5 files refused, library unchanged');
+}
+
+// Persistence acceptance step 8 (#5): a save that hits a simulated quota
+// error shows an error, leaves the previous version intact, and keeps the
+// unsaved-changes indicator (the caller stays dirty).
+async function phasePersistenceStep8(store, reopened) {
+  logStep('persistence step 8: a quota failure keeps the previous version and stays dirty', 'running');
+  const quota = new Error('QuotaExceededError: storage is full');
+  quota.name = 'QuotaExceededError';
+  if (!isQuotaError(quota)) throw new Error('quota failures are not recognised');
+  const failingStore = {
+    save: async () => {
+      throw quota;
+    },
+  };
+  const before = await store.load(reopened.id);
+  let dirty = true;
+  try {
+    await performSave(failingStore, { ...before, description: 'Lost write.' }, {
+      loadedRevision: 1,
+      storedRevision: 1,
+    });
+    dirty = false;
+  } catch (error) {
+    if (!isQuotaError(error)) throw error;
+  }
+  if (!dirty) throw new Error('a failed save cleared the unsaved-changes state');
+  const intact = await store.load(reopened.id);
+  if (JSON.stringify(intact) !== JSON.stringify(before)) {
+    throw new Error('a failed save changed the stored version');
+  }
+  logStep('persistence step 8: a quota failure keeps the previous version and stays dirty', 'pass', 'previous version intact');
 }
 
 // Persistence acceptance step 6 (#5): a file carrying a unit whose

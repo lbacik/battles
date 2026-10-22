@@ -88,8 +88,17 @@ left, map in the centre, inspector on the right). No dependencies, no build step
   changes are marked, and the issues panel warns when a side fields no
   units. Viewports narrower than 1280 px show a
   notice instead of a broken layout.
-- `prototype/e2e.html` — browser end-to-end test: create → save → reload →
-  reopen against a separate IndexedDB test database.
+- `prototype/e2e.html` — browser end-to-end test: the ten-step editor
+  acceptance scenario (#4) plus persistence steps 1–6 and 8 (#5) against a
+  separate IndexedDB test database; save, export, and import round-trips keep
+  every value identical to 0.1 m.
+
+Format version 1 is frozen from this release: the first scenario editor
+release fixes the stored scenario document (kind `scenario`, integer format
+version 1), and every later format change ships a forward migration — older
+documents migrate forward on load and nothing is ever migrated backwards
+(ADR 0003). Development builds before this release carry no compatibility
+guarantee.
 
 Deliberately not Next.js yet: this repository ships a dependency-free browser
 prototype with no build step, so the tracer is implemented in that same style.
@@ -115,7 +124,10 @@ npm test
 
 Covers scenario defaults and structural validation, the map convention, the
 store interface (save → list → load, revision kept apart from the document, id
-immutability), and framework independence of the domain package.
+immutability), save/export/import round-trips identical to 0.1 m, multi-kind
+undo/redo, duplicate and save-conflict handling, import rejections, quota
+failures, ruleset reference compatibility, and framework independence of the
+domain package.
 
 ### Run the end-to-end test
 
@@ -123,9 +135,12 @@ immutability), and framework independence of the domain package.
 npm run prototype
 ```
 
-Open <http://localhost:4173/prototype/e2e.html?autostart=1>. The page creates a
-scenario, saves it to IndexedDB, reloads itself, reopens the scenario, and
-reports PASS/FAIL with the compared values (also logged to the console).
+Open <http://localhost:4173/prototype/e2e.html?autostart=1>. The page runs the
+ten-step editor acceptance scenario plus persistence steps 1–6 and 8 against
+IndexedDB — create, draw, save, reload, reopen with every value identical to
+0.1 m, duplicate and delete, export/import copies, the two-tab save conflict,
+rejected files, the unknown troop-type key, and a simulated quota failure —
+and reports PASS/FAIL with the compared values (also logged to the console).
 
 ### Run all checks
 
