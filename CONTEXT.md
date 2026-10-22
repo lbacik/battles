@@ -100,6 +100,10 @@ _Avoid_: Playability check
 Checking, by the ruleset, whether a structurally valid scenario can start a battle under that ruleset (for example permitted spacings or forbidden ground). It never changes the scenario.
 _Avoid_: Structural validation, editor validation
 
+**Battle log**:
+The readable record of what has happened in a battle, turn by turn: the orders carried out, every chance outcome, losses, cohesion changes, contacts, and any substitutions made for a player that failed to give valid orders. Both players read the same log.
+_Avoid_: History, replay (stepping back through past situations)
+
 **Player**:
 The participant making decisions for a side in a battle. A player may be human, automated, or, in the future, controlled by an LLM; every kind of player sees the same player view and gives orders under the same rules.
 _Avoid_: Side, army
