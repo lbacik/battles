@@ -438,6 +438,20 @@ export function startBattle(scenario, options = {}) {
     units: scenario.units.map((unit) => ({
       ...cloneValue(unit),
       cohesion: STEADY_COHESION,
+      cohesionState: STEADY_COHESION,
+      cohesionValue: (() => {
+        const entry = TROOP_TYPE_CATALOGUE[unit?.troopType];
+        if (entry && Number.isFinite(entry.cohesionMax) && entry.cohesionMax > 0) {
+          return entry.cohesionMax;
+        }
+        const table = RULESET_PARAMETERS?.cohesion?.maxByTroop;
+        if (table && Number.isFinite(table?.[unit?.troopType])) {
+          return table[unit.troopType];
+        }
+        return 10;
+      })(),
+      startingSoldiers: unit?.soldiers,
+      status: 'active',
       engaged: null,
     })),
     events,

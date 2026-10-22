@@ -55,6 +55,14 @@ import {
 import { validateReformOnField } from './reform.js';
 import { validateWithdrawOnField, withdrawParamsOf } from './withdraw.js';
 import {
+  cohesionParamsOf,
+  distanceBetween,
+  isActiveUnit,
+  nearestEnemyOf,
+  unitCohesionState,
+  unitCohesionValue,
+} from './cohesion.js';
+import {
   BATTLE_STATUS_CONCEDED,
   BATTLE_STATUS_ONGOING,
   RANDOM_DRAW_EVENT,
@@ -70,11 +78,11 @@ export const SUBMISSION_FORMAT_VERSION = TURN_CONTRACT_VERSION;
 export const PLAYER_VIEW_FORMAT_VERSION = TURN_CONTRACT_VERSION;
 export const AVAILABLE_ACTIONS_FORMAT_VERSION = TURN_CONTRACT_VERSION;
 
-// Order kinds. Hold, Move, Charge, Reform, and Withdraw are permitted in
-// this slice; Shoot and Rally are known kinds the engine reports as
-// unavailable until their slices land (Withdraw and Rally still gate
-// permissions: an engaged unit may only Hold or Withdraw, a routed unit may
-// only Rally).
+// Order kinds. Hold, Move, Charge, Reform, Withdraw, and Rally are permitted
+// in this slice; Shoot is the known kind the engine reports as unavailable
+// until its slice lands (Withdraw and Rally still gate permissions: an
+// engaged unit may only Hold or Withdraw, a routed unit may only Rally, and a
+// disordered unit cannot charge).
 export const ORDER_KIND_HOLD = 'Hold';
 export const ORDER_KIND_MOVE = 'Move';
 export const ORDER_KIND_CHARGE = 'Charge';
@@ -87,6 +95,7 @@ export const ORDER_KINDS = Object.freeze([
   ORDER_KIND_CHARGE,
   ORDER_KIND_REFORM,
   ORDER_KIND_WITHDRAW,
+  ORDER_KIND_RALLY,
 ]);
 export const KNOWN_ORDER_KINDS = Object.freeze([
   'Hold',
@@ -134,24 +143,30 @@ export const REFUSAL_NOT_ACTIVE_SIDE = 'not_active_side';
 export const REFUSAL_UNKNOWN_BATTLE = 'unknown_battle';
 export const REFUSAL_ORDERS_REJECTED = 'orders_rejected';
 
-// Numeric cohesion values behind the three cohesion states. The battle stores
-// the state string; the player view carries both the value and the state.
-const COHESION_VALUES = Object.freeze({ Steady: 2, Disordered: 1, Routed: 0 });
-
-function cohesionValue(state) {
-  return Object.hasOwn(COHESION_VALUES, state) ? COHESION_VALUES[state] : null;
+// Numeric cohesion behind the three states. The battle stores both the numeric
+// `cohesionValue` (0 to the troop-type maximum) and the derived state string;
+// the player view carries both. A withdraw that fails its cohesion test steps
+// the value down to the next state: Steady falls to just below the Disordered
+// threshold, Disordered falls to 0 (Routed).
+function cohesionValueOf(unit, params = null) {
+  return unitCohesionValue(unit, params ?? cohesionParamsOf({}));
 }
 
-// One cohesion step down: Steady fails to Disordered, Disordered to Routed.
-// A withdraw that fails its cohesion test costs exactly this.
-function stepDownCohesion(state) {
+function cohesionStateOf(unit, params = null) {
+  return unitCohesionState(unit, params ?? cohesionParamsOf({}));
+}
+
+function stepDownCohesionValue(unit, params = null) {
+  const resolved = params ?? cohesionParamsOf({});
+  const state = unitCohesionState(unit, resolved);
   if (state === 'Steady') {
-    return 'Disordered';
+    const threshold = Number.isFinite(resolved?.disorderedBelow) ? resolved.disorderedBelow : 4;
+    return Math.max(0, threshold - 1);
   }
   if (state === 'Disordered') {
-    return 'Routed';
+    return 0;
   }
-  return state;
+  return unitCohesionValue(unit, resolved);
 }
 
 // Deep clone a JSON-shaped value. Battle state, views, and submissions are
@@ -211,8 +226,17 @@ function formationOf(unit) {
   };
 }
 
-function statusOf(unit) {
-  return unit.cohesion === 'Routed' ? 'routed' : 'active';
+function statusOf(unit, params = null) {
+  if (unit?.status === 'destroyed') {
+    return 'destroyed';
+  }
+  if (unit?.status === 'fled') {
+    return 'fled';
+  }
+  if (!isActiveUnit(unit)) {
+    return 'inactive';
+  }
+  return unitCohesionState(unit, params) === 'Routed' ? 'routed' : 'active';
 }
 
 // The engaged contact of a unit for the player view: what it is engaged with
@@ -237,6 +261,7 @@ function engagedOf(unit) {
 // never changed, and the view shares no references with it.
 export function buildPlayerView(battle) {
   assertBattle(battle);
+  const cohesion = cohesionParamsOf(battle.parameters);
   return {
     formatVersion: PLAYER_VIEW_FORMAT_VERSION,
     battleId: battle.id,
@@ -254,9 +279,10 @@ export function buildPlayerView(battle) {
       soldiers: unit.soldiers,
       files: unit.files,
       formation: formationOf(unit),
-      cohesion: { value: cohesionValue(unit.cohesion), state: unit.cohesion },
+      cohesion: { value: unitCohesionValue(unit, cohesion), state: unitCohesionState(unit, cohesion) },
       engaged: engagedOf(unit),
-      status: statusOf(unit),
+      status: statusOf(unit, cohesion),
+      startingSoldiers: Number.isFinite(unit.startingSoldiers) ? unit.startingSoldiers : unit.soldiers,
     })),
     round: battle.round,
     turnNumber: battle.turnNumber,
@@ -282,8 +308,7 @@ export function buildPlayerView(battle) {
 // a disordered unit cannot charge.
 
 const UNAVAILABLE_REASONS = Object.freeze({
-  Shoot: 'Shoot is not available in this slice: only Hold, Move, Charge, Reform, and Withdraw are permitted.',
-  Rally: 'Rally is not available in this slice: only Hold, Move, Charge, Reform, and Withdraw are permitted.',
+  Shoot: 'Shoot is not available in this slice: only Hold, Move, Charge, Reform, Withdraw, and Rally are permitted.',
 });
 
 function movementParamsOf(battle) {
@@ -296,12 +321,27 @@ function isEngaged(unit) {
 }
 
 // Compute the permitted order kinds for a unit at the start of the turn: a
-// routed unit may only Rally, an engaged unit may only Hold or Withdraw, and
-// a disordered unit cannot charge. Returns `{ permitted, gated }` where
-// `gated` lists `{ kind, reason }` for the kinds refused by permission (as
-// opposed to kinds unavailable until their slice lands).
-function permissionFor(unit) {
-  if (unit?.cohesion === 'Routed') {
+// removed unit (destroyed or fled) may give no order, a routed unit may only
+// Rally, an engaged unit may only Hold or Withdraw, a disordered unit cannot
+// charge but may Rally, and a steady unit may not Rally. Returns
+// `{ permitted, gated }` where `gated` lists `{ kind, reason }` for the kinds
+// refused by permission (as opposed to kinds unavailable until their slice
+// lands).
+function permissionFor(unit, battle = null) {
+  if (!isActiveUnit(unit)) {
+    return {
+      permitted: [],
+      gated: KNOWN_ORDER_KINDS.map((kind) => ({
+        kind,
+        reason: unit?.status === 'fled'
+          ? 'The unit has left the battlefield and may give no order.'
+          : 'The unit is destroyed and may give no order.',
+      })),
+    };
+  }
+  const cohesion = battle ? cohesionParamsOf(battle.parameters) : cohesionParamsOf({});
+  const state = unitCohesionState(unit, cohesion);
+  if (state === 'Routed') {
     return {
       permitted: [{ kind: ORDER_KIND_RALLY }],
       gated: KNOWN_ORDER_KINDS.filter((kind) => kind !== ORDER_KIND_RALLY).map((kind) => ({
@@ -321,9 +361,14 @@ function permissionFor(unit) {
       })),
     };
   }
-  if (unit?.cohesion === 'Disordered') {
+  if (state === 'Disordered') {
     return {
-      permitted: [{ kind: ORDER_KIND_HOLD }, { kind: ORDER_KIND_MOVE }, { kind: ORDER_KIND_REFORM }],
+      permitted: [
+        { kind: ORDER_KIND_HOLD },
+        { kind: ORDER_KIND_MOVE },
+        { kind: ORDER_KIND_REFORM },
+        { kind: ORDER_KIND_RALLY },
+      ],
       gated: [{ kind: ORDER_KIND_CHARGE, reason: 'Disordered units cannot charge.' }],
     };
   }
@@ -334,12 +379,12 @@ function permissionFor(unit) {
       { kind: ORDER_KIND_CHARGE },
       { kind: ORDER_KIND_REFORM },
     ],
-    gated: [],
+    gated: [{ kind: ORDER_KIND_RALLY, reason: 'Steady units have no need to rally.' }],
   };
 }
 
 function actionsForUnit(unit, battle, params, terrainFeatures = []) {
-  const { permitted, gated } = permissionFor(unit);
+  const { permitted, gated } = permissionFor(unit, battle);
   const gatedKinds = new Set(gated.map((entry) => entry.kind));
   const unavailable = [
     ...gated.map((entry) => ({
@@ -360,7 +405,7 @@ function actionsForUnit(unit, battle, params, terrainFeatures = []) {
   const arc = Number.isFinite(params?.forwardArcDeg) ? params.forwardArcDeg : FORWARD_ARC_DEG;
   const enemies = canCharge
     ? battle.units
-      .filter((other) => other.side !== unit.side)
+      .filter((other) => other.side !== unit.side && isActiveUnit(other))
       .map((other) => ({ id: other.id, position: { ...other.position }, facing: other.facing }))
     : [];
   return {
@@ -591,7 +636,7 @@ export function validateTurn(battle, submission) {
   }
   function othersAt(moverId) {
     return battle.units
-      .filter((unit) => unit.id !== moverId)
+      .filter((unit) => unit.id !== moverId && isActiveUnit(unit))
       .map((unit) => {
         const pose = simulated.get(unit.id);
         return {
@@ -642,10 +687,18 @@ export function validateTurn(battle, submission) {
     }
     seen.set(unit.id, orderIndex);
     const kind = isRecord(order) ? order.kind : undefined;
-    // Permission gates: a routed unit may only Rally, an engaged unit may
-    // only Hold or Withdraw, and a disordered unit cannot charge. Each
-    // refusal names the reason so the player can fix the order.
-    if (unit.cohesion === 'Routed' && kind !== ORDER_KIND_RALLY) {
+    const cohesion = cohesionParamsOf(battle.parameters);
+    // Permission gates: a removed unit may give no order, a routed unit may
+    // only Rally, an engaged unit may only Hold or Withdraw, a disordered unit
+    // cannot charge, and a steady unit may not rally. Each refusal names the
+    // reason so the player can fix the order.
+    if (!isActiveUnit(unit)) {
+      return reject(orderIndex, unit.id, REJECTION_ORDER_NOT_PERMITTED,
+        { unitId: unit.id, reason: unit.status === 'fled' ? 'fled' : 'destroyed', permitted: [] },
+        `Order ${orderIndex}: unit "${unit.id}" is ${unit.status === 'fled' ? 'fled' : 'destroyed'} and may give no order.`);
+    }
+    const state = unitCohesionState(unit, cohesion);
+    if (state === 'Routed' && kind !== ORDER_KIND_RALLY) {
       return reject(orderIndex, unit.id, REJECTION_ORDER_NOT_PERMITTED,
         { unitId: unit.id, reason: 'routed', permitted: [ORDER_KIND_RALLY] },
         `Order ${orderIndex}: unit "${unit.id}" is Routed and may only Rally.`);
@@ -655,10 +708,56 @@ export function validateTurn(battle, submission) {
         { unitId: unit.id, reason: 'engaged', permitted: [ORDER_KIND_HOLD, ORDER_KIND_WITHDRAW] },
         `Order ${orderIndex}: unit "${unit.id}" is Engaged and may only Hold or Withdraw.`);
     }
-    if (unit.cohesion === 'Disordered' && kind === ORDER_KIND_CHARGE) {
+    if (state === 'Disordered' && kind === ORDER_KIND_CHARGE) {
       return reject(orderIndex, unit.id, REJECTION_ORDER_NOT_PERMITTED,
         { unitId: unit.id, reason: 'disordered' },
         `Order ${orderIndex}: unit "${unit.id}" is Disordered and cannot charge.`);
+    }
+    if (state === 'Steady' && kind === ORDER_KIND_RALLY) {
+      return reject(orderIndex, unit.id, REJECTION_ORDER_NOT_PERMITTED,
+        { unitId: unit.id, reason: 'not-disordered', permitted: [ORDER_KIND_HOLD, ORDER_KIND_MOVE, ORDER_KIND_CHARGE, ORDER_KIND_REFORM] },
+        `Order ${orderIndex}: unit "${unit.id}" is Steady and may not Rally.`);
+    }
+    if (kind === ORDER_KIND_RALLY) {
+      // Rally carries no parameters and the unit does not move. A Disordered
+      // unit always qualifies; a Routed unit qualifies only with no active
+      // enemy within the clear distance.
+      if (state === 'Disordered') {
+        return {
+          orderIndex,
+          unitId: unit.id,
+          accepted: true,
+          preview: previewAt(unit, simulated.get(unit.id)),
+          rally: { state },
+        };
+      }
+      if (state === 'Routed') {
+        const { enemy, distanceM } = nearestEnemyOf(
+          { units: battle.units.map((entry) => (entry.id === unit.id
+            ? { ...entry, position: { ...simulated.get(entry.id).position } }
+            : entry)) },
+          { ...unit, position: { ...simulated.get(unit.id).position } },
+        );
+        if (Number.isFinite(distanceM) && distanceM < cohesion.rallyClearM) {
+          return reject(orderIndex, unit.id, REJECTION_ORDER_NOT_PERMITTED,
+            {
+              unitId: unit.id,
+              reason: 'enemy-too-close',
+              nearestEnemyId: enemy?.id ?? null,
+              distanceM: Math.round(distanceM * 10) / 10,
+              requiredM: cohesion.rallyClearM,
+            },
+            `Order ${orderIndex}: unit "${unit.id}" may not Rally with enemy "${enemy?.id}" ` +
+              `${Math.round(distanceM * 10) / 10} m away (needs ${cohesion.rallyClearM} m clear).`);
+        }
+        return {
+          orderIndex,
+          unitId: unit.id,
+          accepted: true,
+          preview: previewAt(unit, simulated.get(unit.id)),
+          rally: { state },
+        };
+      }
     }
     if (kind === ORDER_KIND_HOLD) {
       return {
@@ -773,9 +872,9 @@ export function validateTurn(battle, submission) {
       // branch (Rally is their only permitted order); any other unit ordered
       // to withdraw is refused with the orders it may give instead.
       if (!engaged.has(unit.id)) {
-        const permitted = unit.cohesion === 'Disordered'
-          ? [ORDER_KIND_HOLD, ORDER_KIND_MOVE, ORDER_KIND_REFORM]
-          : [ORDER_KIND_HOLD, ORDER_KIND_MOVE, ORDER_KIND_CHARGE, ORDER_KIND_REFORM];
+        const steadyPermitted = [ORDER_KIND_HOLD, ORDER_KIND_MOVE, ORDER_KIND_CHARGE, ORDER_KIND_REFORM];
+        const disorderedPermitted = [ORDER_KIND_HOLD, ORDER_KIND_MOVE, ORDER_KIND_REFORM, ORDER_KIND_RALLY];
+        const permitted = state === 'Disordered' ? disorderedPermitted : steadyPermitted;
         return reject(orderIndex, unit.id, REJECTION_ORDER_NOT_PERMITTED,
           { unitId: unit.id, reason: 'not-engaged', permitted },
           `Order ${orderIndex}: unit "${unit.id}" is not Engaged and may not Withdraw.`);
