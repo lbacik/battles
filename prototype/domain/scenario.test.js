@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import {
   DEFAULT_BATTLEFIELD,
+  MAP_VIEW_MAX_ZOOM,
+  MAP_VIEW_MIN_ZOOM,
   MAX_BATTLEFIELD_HEIGHT_M,
   MAX_BATTLEFIELD_WIDTH_M,
   RULESET_ID,
@@ -13,20 +15,30 @@ import {
   SCENARIO_FORMAT_VERSION,
   SCENARIO_KIND,
   ScenarioImportError,
+  clampMapZoom,
   cloneScenario,
   createScenario,
   exportScenario,
+  fitMapView,
   fitScale,
   fromScreenPoint,
   generateId,
   importScenarioDocument,
   isUuid,
   isValidScenario,
+  mapViewBox,
+  metresPerPixel,
+  niceScaleBarMetres,
+  panMapViewByPixels,
   parseScenarioImport,
   roundScenarioToTenth,
   scenarioFileName,
   toScreenPoint,
+  unitFacingDeg,
+  unitFootprint,
+  unitPosition,
   validateScenario,
+  zoomViewAroundCursor,
 } from './scenario.js';
 import { MemoryScenarioStore } from './store.js';
 
@@ -143,6 +155,97 @@ describe('map convention (ADR 0001)', () => {
   it('fits the true-scale battlefield into a viewport', () => {
     assert.equal(fitScale(1200, 800, 600, 400), 0.5);
     assert.equal(fitScale(1200, 800, 0, 400), 1);
+  });
+});
+
+describe('map navigation view (display only)', () => {
+  it('fits the battlefield centre at zoom 1', () => {
+    const view = fitMapView({ width: 1200, height: 800 });
+    assert.equal(view.zoom, 1);
+    assert.deepEqual(view.center, { x: 600, y: 400 });
+  });
+
+  it('clamps zoom to the supported range', () => {
+    assert.equal(clampMapZoom(1000), MAP_VIEW_MAX_ZOOM);
+    assert.equal(clampMapZoom(0.001), MAP_VIEW_MIN_ZOOM);
+    assert.equal(clampMapZoom(Number.NaN), 1);
+  });
+
+  it('keeps the map point under the cursor fixed while zooming', () => {
+    const view = { zoom: 1, center: { x: 600, y: 400 } };
+    const cursor = { x: 700, y: 450 };
+    const next = zoomViewAroundCursor(view, cursor, 2);
+    assert.equal(next.zoom, 2);
+    assert.deepEqual(next.center, { x: 650, y: 425 });
+    const back = zoomViewAroundCursor(next, cursor, 1);
+    assert.ok(Math.abs(back.center.x - 600) < 1e-9);
+    assert.ok(Math.abs(back.center.y - 400) < 1e-9);
+  });
+
+  it('pans the centre opposite the drag in screen space', () => {
+    const view = { zoom: 1, center: { x: 600, y: 400 } };
+    // Drag 40 px right and 10 px down at 2 m/px: content follows the pointer.
+    assert.deepEqual(panMapViewByPixels(view, 40, 10, 2).center, { x: 520, y: 420 });
+  });
+
+  it('renders the fitted viewBox around the battlefield centre', () => {
+    const box = mapViewBox(fitMapView({ width: 1200, height: 800 }), {
+      width: 1200,
+      height: 800,
+    });
+    assert.equal(box.width, 1330);
+    assert.equal(box.height, 920);
+    // Centre of the viewBox matches the battlefield centre in screen space.
+    assert.ok(Math.abs(box.x + box.width / 2 - 600) < 1e-9);
+    assert.ok(Math.abs(box.y + box.height / 2 - 400) < 1e-9);
+  });
+
+  it('derives metres per pixel from the viewBox and viewport width', () => {
+    const view = fitMapView({ width: 1200, height: 800 });
+    assert.equal(metresPerPixel(view, { width: 1200, height: 800 }, 1330), 1);
+  });
+
+  it('picks a readable scale bar length', () => {
+    assert.equal(niceScaleBarMetres(1, 120), 200);
+    assert.equal(niceScaleBarMetres(0.5, 120), 100);
+  });
+});
+
+describe('unit footprint (ADR 0001, ADR 0002)', () => {
+  it('derives ranks, frontage, and depth from soldiers, files, and spacings', () => {
+    const footprint = unitFootprint({
+      soldiers: 256,
+      files: 16,
+      lateralIntervalM: 1,
+      rankDepthM: 1,
+    });
+    assert.deepEqual(footprint, { ranks: 16, frontageM: 16, depthM: 16 });
+  });
+
+  it('rounds ranks up when soldiers do not fill the last rank', () => {
+    const footprint = unitFootprint({
+      soldiers: 100,
+      files: 16,
+      lateralIntervalM: 1,
+      rankDepthM: 2,
+    });
+    assert.equal(footprint.ranks, 7);
+    assert.equal(footprint.frontageM, 16);
+    assert.equal(footprint.depthM, 14);
+  });
+
+  it('never invents a footprint from incomplete data', () => {
+    assert.equal(unitFootprint({ soldiers: 100, files: 16 }), null);
+    assert.equal(unitFootprint(null), null);
+  });
+
+  it('reads tolerant positions and compass facings', () => {
+    assert.deepEqual(unitPosition({ position: { x: 10, y: 20 } }), { x: 10, y: 20 });
+    assert.deepEqual(unitPosition({ x: 5, y: 6 }), { x: 5, y: 6 });
+    assert.equal(unitPosition({ x: 'a', y: 1 }), null);
+    assert.equal(unitFacingDeg({ facingDeg: 30 }), 30);
+    assert.equal(unitFacingDeg({ angle: 270 }), -90);
+    assert.equal(unitFacingDeg({}), 0);
   });
 });
 

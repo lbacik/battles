@@ -134,7 +134,44 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .map-caption {
   position: absolute; top: 12px; left: 14px; font-size: 11px; letter-spacing: .4px;
   background: #f4f3e9d9; border: 1px solid #d9dccb; border-radius: 4px; padding: 6px 10px;
+  z-index: 3;
 }
+.map-toolbar {
+  position: absolute; top: 12px; right: 14px; z-index: 3;
+  display: flex; align-items: center; gap: 6px;
+  background: #f4f3e9d9; border: 1px solid #d9dccb; border-radius: 6px; padding: 6px;
+}
+.map-tool {
+  font-size: 12px; font-weight: 550; padding: 6px 10px; border-radius: 4px;
+  border: 1px solid transparent; color: #4c554a;
+}
+.map-tool:hover { border-color: var(--line); background: #ffffff88; }
+.map-tool.active { background: var(--green); border-color: var(--green); color: #f8f9f0; }
+.map-zoom-group { display: flex; align-items: center; gap: 4px; }
+#zoom-level { font-size: 12px; min-width: 44px; text-align: center; color: #4c554a; font-variant-numeric: tabular-nums; }
+.map-viewport { position: relative; flex: 1; min-height: 0; touch-action: none; }
+.map-viewport.tool-hand #battle-svg, .map-viewport.space-pan #battle-svg { cursor: grab; }
+.map-viewport.panning #battle-svg { cursor: grabbing; }
+.map-status {
+  position: absolute; left: 14px; bottom: 12px; z-index: 3;
+  display: flex; align-items: center; gap: 12px;
+  background: #f4f3e9d9; border: 1px solid #d9dccb; border-radius: 4px; padding: 6px 10px;
+  font-size: 11px; color: #4c554a; font-variant-numeric: tabular-nums;
+}
+.scale-bar { display: inline-flex; align-items: center; gap: 8px; }
+#scale-bar {
+  display: inline-block; height: 5px; border: 2px solid #4c554a; border-top: 0;
+  min-width: 8px;
+}
+.cursor-coords.outside { color: #a46c5b; }
+.map-hint {
+  margin: 0; padding: 8px 14px; font-size: 11px; color: #777e70;
+  background: #f4f3e9d9; border-top: 1px solid #d9dccb;
+}
+.unit-label { fill: #303a32; paint-order: stroke; stroke: #f4f3e9; stroke-width: 3px; font-weight: 600; }
+.unit-dims { fill: #5c665a; paint-order: stroke; stroke: #f4f3e9; stroke-width: 3px; }
+.side-unit { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; margin: 4px 0 0 20px; }
+.side-unit .unit-detail { color: var(--muted); white-space: nowrap; }
 .field { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: #737d69; margin-bottom: 14px; }
 .field input, .field select {
   height: 38px; border: 1px solid #dce0d1; border-radius: 4px;
