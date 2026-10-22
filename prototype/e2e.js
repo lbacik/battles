@@ -72,7 +72,13 @@ import {
   resolveTurn,
   validateTurn,
 } from './domain/turn.js';
-import { createPassivePlayer, runTurn } from './domain/players.js';
+import {
+  changedUnitsForTurn,
+  describeBattleEvent,
+  groupLogEvents,
+  summarizeTurn,
+} from './domain/battle-log.js';
+import { createPassivePlayer, createRandomPlayer, runRounds, runTurn } from './domain/players.js';
 import { IndexedDBScenarioStore } from './library/idb.js';
 import { IndexedDBBattleStore } from './library/battles-idb.js';
 
@@ -774,6 +780,9 @@ async function phaseReopen(phase) {
   await phasePersistenceUnknownTroopKey(store);
 
   await phaseBattleTurns();
+
+  await phaseLocalBattleGate(store);
+  await phaseHumanVsRandomToEnd();
 
   store.close();
   await phaseBattlePersistence(reopened, entry);
@@ -1673,6 +1682,488 @@ async function phaseBattleFullOrdersDrafting() {
 // commits an empty turn through the engine, an automated side resolves through
 // the runner. Shared by the pre- and post-reload phases so both sides of the
 // reload exercise the same commit path.
+// Local battle gate (#39): one coherent story on a fixed seed harness:
+// (1) starting an unplayable reference scenario is refused, naming the unit;
+// (2) the editor fix (the same unit proposal the inspector uses) makes it
+// playable and it saves; (3) Human vs Passive starts; (4) a Move, a Charge,
+// and a deliberately colliding order see the collision rejected inline with
+// its highlight, the draft is reordered so the culprit flips, and the
+// surviving orders commit; (5) the turn-result summary and the battle log
+// show the outcome (the same helpers the battle screen renders); (6) the
+// battle saves mid-battle and resumes identically; (7) the active side
+// concedes; (8) a rematch starts from the snapshot.
+async function phaseLocalBattleGate(store) {
+  logStep('local battle gate: starting the unplayable reference is refused, naming the unit', 'running');
+  const reference = createScenario({ title: 'Local gate reference' });
+  const [refFirst, refSecond] = reference.sides;
+  let refCounter = 1;
+  const refId = () => `10000000-0000-4000-8000-${String(refCounter++).padStart(12, '0')}`;
+  const goodId = refId();
+  const badId = refId();
+  reference.units.push(
+    {
+      id: goodId,
+      name: 'Gate taxis',
+      side: refFirst.id,
+      troopType: 'hoplite',
+      soldiers: 100,
+      files: 10,
+      lateralInterval: 1,
+      rankDepth: 1,
+      position: { x: 500, y: 600 },
+      facing: 180,
+    },
+    {
+      id: badId,
+      name: 'Spartan mora',
+      side: refSecond.id,
+      troopType: 'hoplite',
+      soldiers: 100,
+      files: 10,
+      lateralInterval: 5,
+      rankDepth: 1,
+      position: { x: 500, y: 300 },
+      facing: 0,
+    },
+  );
+  if (validateScenario(reference).length > 0) {
+    throw new Error(`the gate reference is structurally invalid: ${validateScenario(reference).join('; ')}`);
+  }
+  const problems = validatePlayability(reference);
+  const spacing = problems.find((problem) => problem.code === 'spacing-out-of-range');
+  if (!spacing) {
+    throw new Error('the spacing violation was not reported as unplayable');
+  }
+  if (spacing.unitId !== badId || spacing.unitName !== 'Spartan mora') {
+    throw new Error(`the refusal names the wrong unit: ${JSON.stringify(spacing)}`);
+  }
+  if (!spacing.message.includes('Spartan mora')) {
+    throw new Error(`the refusal does not name the unit: ${spacing.message}`);
+  }
+  let refused = null;
+  try {
+    startBattle(reference, {
+      seed: 20260309,
+      controllers: { [refFirst.id]: 'human', [refSecond.id]: 'passive' },
+    });
+  } catch (error) {
+    refused = error;
+  }
+  if (!(refused instanceof BattleStartError)) {
+    throw new Error('an unplayable reference did not raise BattleStartError (no battle may be created)');
+  }
+  if (!refused.message.includes('Spartan mora')) {
+    throw new Error(`the refusal does not name the unit: ${refused.message}`);
+  }
+  logStep(
+    'local battle gate: starting the unplayable reference is refused, naming the unit',
+    'pass',
+    spacing.message,
+  );
+
+  logStep('local battle gate: open in editor, fix the problem, save', 'running');
+  // The editor fixes a spacing through the inspector field: the document is
+  // cloned, the spacing is set (rounded to 0.1 m like every inspector
+  // commit), and the change is kept when it stays structurally valid.
+  // Playability is rechecked at battle start, not at the editor commit.
+  const playable = cloneScenario(reference);
+  playable.units.find((unit) => unit.id === badId).lateralInterval = 1;
+  if (validateScenario(playable).length > 0) {
+    throw new Error(`the fixed scenario is invalid: ${validateScenario(playable).join('; ')}`);
+  }
+  if (validatePlayability(playable).length > 0) {
+    throw new Error(
+      `the fixed scenario is still unplayable: ${validatePlayability(playable).map((problem) => problem.message).join('; ')}`,
+    );
+  }
+  const metadata = await store.save(playable);
+  const reopenedFixed = await store.load(playable.id);
+  if (!reopenedFixed) {
+    throw new Error('the fixed scenario cannot be loaded back');
+  }
+  if (validatePlayability(reopenedFixed).length > 0) {
+    throw new Error('the saved fix did not survive the reload');
+  }
+  await store.remove(playable.id);
+  if ((await store.list()).some((item) => item.id === playable.id)) {
+    throw new Error('the gate probe pollutes the library');
+  }
+  logStep('local battle gate: open in editor, fix the problem, save', 'pass', `rev. ${metadata.revision}`);
+
+  logStep('local battle gate: start Human vs Passive', 'running');
+  const document = createScenario({ title: 'Local gate battle' });
+  const [first, second] = document.sides;
+  let counter = 1;
+  const probeId = () => `00000000-0000-4000-8000-${String(counter++).padStart(12, '0')}`;
+  const gateMover1 = {
+    id: probeId(), name: 'Gate mover one', side: first.id, troopType: 'hoplite',
+    soldiers: 100, files: 10, lateralInterval: 1, rankDepth: 1, position: { x: 400, y: 600 }, facing: 180,
+  };
+  const gateMover2 = {
+    id: probeId(), name: 'Gate mover two', side: first.id, troopType: 'hoplite',
+    soldiers: 100, files: 10, lateralInterval: 1, rankDepth: 1, position: { x: 440, y: 600 }, facing: 180,
+  };
+  const gateCharger = {
+    id: probeId(), name: 'Gate charger', side: first.id, troopType: 'hoplite',
+    soldiers: 100, files: 10, lateralInterval: 1, rankDepth: 1, position: { x: 600, y: 600 }, facing: 0,
+  };
+  const gateTarget = {
+    id: probeId(), name: 'Gate target', side: second.id, troopType: 'hoplite',
+    soldiers: 100, files: 10, lateralInterval: 1, rankDepth: 1, position: { x: 600, y: 680 }, facing: 180,
+  };
+  const gateExtra = {
+    id: probeId(), name: 'Gate extra', side: second.id, troopType: 'hoplite',
+    soldiers: 100, files: 10, lateralInterval: 1, rankDepth: 1, position: { x: 400, y: 300 }, facing: 0,
+  };
+  document.units.push(gateMover1, gateMover2, gateCharger, gateTarget, gateExtra);
+  if (validateScenario(document).length > 0) {
+    throw new Error(`the gate battle is invalid: ${validateScenario(document).join('; ')}`);
+  }
+  if (validatePlayability(document).length > 0) {
+    throw new Error(
+      `the gate battle is unplayable: ${validatePlayability(document).map((problem) => problem.message).join('; ')}`,
+    );
+  }
+  const controllers = { [first.id]: 'human', [second.id]: 'passive' };
+  const started = startBattle(document, { seed: 7, controllers, battleId: 'e2e-local-gate' });
+  if (started.activeSide !== first.id) {
+    throw new Error(`seed 7 must start the first side, got "${started.activeSide}"`);
+  }
+  if (started.controllers[first.id] !== 'human' || started.controllers[second.id] !== 'passive') {
+    throw new Error('the gate battle is not Human vs Passive');
+  }
+  logStep('local battle gate: start Human vs Passive', 'pass', 'seed 7 · first side begins');
+
+  const sub = (battle, orders) => ({
+    formatVersion: SUBMISSION_FORMAT_VERSION,
+    battleId: battle.id,
+    turnNumber: battle.turnNumber,
+    side: battle.activeSide,
+    orders,
+  });
+  const dest = { x: 400, y: 560 };
+
+  logStep('local battle gate: a Move, a Charge, and a deliberately colliding order', 'running');
+  const triple = validateTurn(started, sub(started, [
+    { unitId: gateMover1.id, kind: 'Move', legs: [{ to: dest }] },
+    { unitId: gateCharger.id, kind: 'Charge', targetId: gateTarget.id, edge: 'front', approach: [] },
+    { unitId: gateMover2.id, kind: 'Move', legs: [{ to: dest }] },
+  ]));
+  if (triple.ok) {
+    throw new Error('a Move, a Charge, and a colliding Move were all accepted');
+  }
+  if (triple.verdicts[0]?.accepted !== true || triple.verdicts[1]?.accepted !== true) {
+    throw new Error('the Move and the Charge should stay accepted while the third order collides');
+  }
+  const collision = triple.verdicts[2]?.rejection;
+  if (collision?.code !== 'collision') {
+    throw new Error(`expected a collision rejection, got "${collision?.code}"`);
+  }
+  if (collision.details?.withUnitId !== gateMover1.id) {
+    throw new Error(`the collision names the wrong unit: ${JSON.stringify(collision.details)}`);
+  }
+  if (!Number.isFinite(collision.details?.at?.x) || !Number.isFinite(collision.details?.at?.y)) {
+    throw new Error(`the collision carries no highlight point: ${JSON.stringify(collision.details)}`);
+  }
+  logStep('local battle gate: a Move, a Charge, and a deliberately colliding order', 'pass', collision.message);
+
+  logStep('local battle gate: reorder the draft so the culprit flips', 'running');
+  const swapped = validateTurn(started, sub(started, [
+    { unitId: gateMover2.id, kind: 'Move', legs: [{ to: dest }] },
+    { unitId: gateCharger.id, kind: 'Charge', targetId: gateTarget.id, edge: 'front', approach: [] },
+    { unitId: gateMover1.id, kind: 'Move', legs: [{ to: dest }] },
+  ]));
+  if (swapped.ok || swapped.verdicts[2]?.rejection?.code !== 'collision') {
+    throw new Error('the reordered draft should still reject the third order with a collision');
+  }
+  if (swapped.verdicts[2].rejection.details?.withUnitId !== gateMover2.id) {
+    throw new Error(`reordering did not flip the culprit: ${JSON.stringify(swapped.verdicts[2].rejection.details)}`);
+  }
+  logStep('local battle gate: reorder the draft so the culprit flips', 'pass', 'culprit flipped');
+
+  logStep('local battle gate: commit the Move and the Charge', 'running');
+  const committed = resolveTurn(started, {
+    type: 'commit',
+    submission: sub(started, [
+      { unitId: gateMover1.id, kind: 'Move', legs: [{ to: dest }] },
+      { unitId: gateCharger.id, kind: 'Charge', targetId: gateTarget.id, edge: 'front', approach: [] },
+    ]),
+  });
+  if (committed.turnNumber !== started.turnNumber + 1) {
+    throw new Error(`expected turn ${started.turnNumber + 1} after commit, got turn ${committed.turnNumber}`);
+  }
+  const landed = committed.units.find((unit) => unit.id === gateCharger.id);
+  if (!landed || landed.position.x !== 600 || landed.position.y !== 680 || !landed.engaged) {
+    throw new Error(`the committed Charge did not land in contact: ${JSON.stringify(landed?.position)}`);
+  }
+  logStep('local battle gate: commit the Move and the Charge', 'pass', `now turn ${committed.turnNumber}`);
+
+  logStep('local battle gate: the turn result panel and the battle log show the outcome', 'running');
+  const resolvedTurn = committed.turnNumber - 1;
+  const summary = summarizeTurn(committed, resolvedTurn);
+  if (summary.orders.length < 2) {
+    throw new Error(`the turn result names too few orders: ${summary.orders.length}`);
+  }
+  if (summary.contacts.length < 1) {
+    throw new Error('the turn result names no contact for the committed Charge');
+  }
+  const groups = groupLogEvents(committed);
+  const turnGroup = groups.find((group) => group.turnNumber === resolvedTurn);
+  if (!turnGroup || turnGroup.sections.length === 0) {
+    throw new Error('the battle log has no section for the resolved turn');
+  }
+  const lines = turnGroup.sections.flatMap((section) =>
+    section.events.map((event) => describeBattleEvent(event, committed)),
+  );
+  if (lines.length === 0 || lines.some((line) => typeof line !== 'string' || line.length === 0)) {
+    throw new Error('the battle log renders no readable lines for the resolved turn');
+  }
+  const joined = lines.join(' ');
+  if (!joined.includes('Gate charger') || !joined.includes('Gate target')) {
+    throw new Error(`the battle log does not name the outcome: ${joined.slice(0, 200)}`);
+  }
+  const changed = changedUnitsForTurn(committed, resolvedTurn);
+  if (!changed.some((entry) => entry.unitId === gateCharger.id)) {
+    throw new Error('the changed-unit highlights miss the charger');
+  }
+  logStep(
+    'local battle gate: the turn result panel and the battle log show the outcome',
+    'pass',
+    `${summary.orders.length} orders · ${lines.length} log lines`,
+  );
+
+  logStep('local battle gate: reload mid-battle and resume', 'running');
+  const gateStore = new IndexedDBBattleStore({ dbName: BATTLE_DB_NAME });
+  const gateDecisions = [{
+    type: 'commit',
+    submission: sub(started, [
+      { unitId: gateMover1.id, kind: 'Move', legs: [{ to: dest }] },
+      { unitId: gateCharger.id, kind: 'Charge', targetId: gateTarget.id, edge: 'front', approach: [] },
+    ]),
+  }];
+  await gateStore.save(committed, gateDecisions);
+  gateStore.close();
+  const gateFresh = new IndexedDBBattleStore({ dbName: BATTLE_DB_NAME });
+  const reloadedGate = await gateFresh.load(committed.id);
+  if (!reloadedGate) {
+    throw new Error('the saved gate battle is missing after reload');
+  }
+  assertSameBattle({ battle: committed, decisions: gateDecisions }, reloadedGate);
+  const resumed = await resolveOneProbeTurn(reloadedGate.battle, reloadedGate.battle.scenario.sides, 'local gate resume');
+  if (resumed.battle.turnNumber !== reloadedGate.battle.turnNumber + 1) {
+    throw new Error('the resumed gate battle did not advance one turn');
+  }
+  await gateFresh.save(resumed.battle, [...reloadedGate.decisions, resumed.decision]);
+  logStep('local battle gate: reload mid-battle and resume', 'pass', `now turn ${resumed.battle.turnNumber}`);
+
+  logStep('local battle gate: play on to a concession', 'running');
+  let ongoing = resumed.battle;
+  const ongoingDecisions = [...reloadedGate.decisions, resumed.decision];
+  if (ongoing.status !== 'ongoing') {
+    throw new Error(`the resumed battle ended before the concession (status "${ongoing.status}")`);
+  }
+  const conceder = ongoing.activeSide;
+  const concederName = (ongoing.scenario.sides.find((side) => side.id === conceder) || {}).name || conceder;
+  const expectedWinner = ongoing.scenario.sides.find((side) => side.id !== conceder).id;
+  const conceded = resolveTurn(ongoing, { type: 'concede', side: conceder });
+  if (conceded.status !== 'conceded') {
+    throw new Error(`expected a conceded battle, got "${conceded.status}"`);
+  }
+  if (conceded.winner !== expectedWinner) {
+    throw new Error(`the concession names the wrong winner: ${conceded.winner}`);
+  }
+  if (conceded.result?.reason !== 'concede') {
+    throw new Error(`the concession records the wrong reason: ${conceded.result?.reason}`);
+  }
+  const noted = conceded.events.find((event) => event?.type === 'turn-conceded');
+  const ended = conceded.events.find((event) => event?.type === 'battle-ended');
+  if (!noted || noted.side !== conceder) {
+    throw new Error('the concession is missing its turn-conceded event');
+  }
+  if (!ended || ended.winner !== expectedWinner) {
+    throw new Error('the concession is missing its battle-ended event');
+  }
+  const concededLine = describeBattleEvent(noted, conceded);
+  if (!concededLine.includes(concederName)) {
+    throw new Error(`the battle log does not name who conceded: ${concededLine}`);
+  }
+  const endedLine = describeBattleEvent(ended, conceded);
+  if (!endedLine.includes('concession')) {
+    throw new Error(`the battle log does not record the concession: ${endedLine}`);
+  }
+  let finishedRefused = null;
+  try {
+    resolveTurn(conceded, { type: 'commit', submission: sub(conceded, []) });
+  } catch (error) {
+    finishedRefused = error;
+  }
+  if (!finishedRefused) {
+    throw new Error('a finished battle still accepts decisions');
+  }
+  ongoingDecisions.push({ type: 'concede', side: conceder });
+  await gateFresh.save(conceded, ongoingDecisions);
+  const reread = await gateFresh.load(conceded.id);
+  if (!reread || reread.battle.status !== 'conceded' || reread.battle.winner !== expectedWinner) {
+    throw new Error('the conceded battle did not persist');
+  }
+  gateFresh.close();
+  logStep('local battle gate: play on to a concession', 'pass', `${concederName} conceded`);
+
+  logStep('local battle gate: start a rematch', 'running');
+  const rematch = startBattle(conceded.scenario, {
+    seed: 20260310,
+    controllers: { [first.id]: 'human', [second.id]: 'passive' },
+    battleId: 'e2e-local-gate-rematch',
+  });
+  if (rematch.status !== 'ongoing' || rematch.turnNumber !== 1 || rematch.round !== 1) {
+    throw new Error(`the rematch did not open on round 1, turn 1 (turn ${rematch.turnNumber}, round ${rematch.round})`);
+  }
+  if (rematch.scenario.id !== conceded.scenario.id) {
+    throw new Error('the rematch left its scenario snapshot');
+  }
+  if (rematch.units.length !== conceded.scenario.units.length) {
+    throw new Error('the rematch dropped units from the snapshot');
+  }
+  if (!rematch.units.every((unit) => unit.cohesion === 'Steady')) {
+    throw new Error('rematch units do not all start Steady');
+  }
+  const rematchStore = new IndexedDBBattleStore({ dbName: BATTLE_DB_NAME });
+  await rematchStore.save(rematch, []);
+  await rematchStore.remove(rematch.id);
+  await rematchStore.remove(conceded.id);
+  rematchStore.close();
+  logStep('local battle gate: start a rematch', 'pass', 'round 1, turn 1');
+}
+
+// Human vs Random (#39, second gate): a fixed-seed battle plays through the
+// runner to an army break or the round limit, and the outcome screen data is
+// checked — the winner (or draw), the reason, both lost shares and losses,
+// and the readable battle-ended line. The same fixed seed replays to the
+// identical event record, so the harness (not the UI) fixes the seed.
+async function phaseHumanVsRandomToEnd() {
+  logStep('human vs random: play a fixed-seed battle to an army break or the round limit', 'running');
+  const playOne = async () => {
+    const document = createScenario({ title: 'Human vs Random probe' });
+    const [first, second] = document.sides;
+    let counter = 1;
+    const probeId = () => `00000000-0000-4000-8000-${String(counter++).padStart(12, '0')}`;
+    document.units.push(
+      {
+        id: probeId(), name: 'Random taxis', side: first.id, troopType: 'hoplite',
+        soldiers: 100, files: 10, lateralInterval: 1, rankDepth: 1, position: { x: 500, y: 550 }, facing: 180,
+      },
+      {
+        id: probeId(), name: 'Random peltasts', side: first.id, troopType: 'hoplite',
+        soldiers: 100, files: 10, lateralInterval: 1, rankDepth: 1, position: { x: 560, y: 550 }, facing: 180,
+      },
+      {
+        id: probeId(), name: 'Random mora', side: second.id, troopType: 'hoplite',
+        soldiers: 100, files: 10, lateralInterval: 1, rankDepth: 1, position: { x: 500, y: 450 }, facing: 0,
+      },
+      {
+        id: probeId(), name: 'Random archers', side: second.id, troopType: 'hoplite',
+        soldiers: 100, files: 10, lateralInterval: 1, rankDepth: 1, position: { x: 560, y: 450 }, facing: 0,
+      },
+    );
+    if (validateScenario(document).length > 0) {
+      throw new Error(`the random probe is invalid: ${validateScenario(document).join('; ')}`);
+    }
+    if (validatePlayability(document).length > 0) {
+      throw new Error(
+        `the random probe is unplayable: ${validatePlayability(document).map((problem) => problem.message).join('; ')}`,
+      );
+    }
+    const gameSeed = 20260309;
+    const controllers = { [first.id]: 'human', [second.id]: 'random' };
+    let battle = startBattle(document, { seed: gameSeed, controllers });
+    // The harness stands in for the human side with a fixed-seed Random
+    // player, so the whole battle stays reproducible from its seed; the
+    // battle itself still records Human vs Random controllers.
+    const players = {
+      [first.id]: createRandomPlayer({ seed: gameSeed * 1000 + 1 }),
+      [second.id]: createRandomPlayer({ seed: gameSeed * 1000 + 2 }),
+    };
+    let turns = 0;
+    while (battle.status === 'ongoing' && turns < 24) {
+      const step = await runTurn(battle, players);
+      battle = step.battle;
+      turns += 1;
+      if (step.decision?.type === 'concede') {
+        throw new Error('an automated stand-in conceded (only an explicit concede may concede)');
+      }
+    }
+    return { battle, turns };
+  };
+  const firstRun = await playOne();
+  if (firstRun.battle.status === 'ongoing') {
+    throw new Error('the fixed-seed battle did not end within 24 turns');
+  }
+  if (!['broken', 'round-limit'].includes(firstRun.battle.status)) {
+    throw new Error(`the fixed-seed battle ended oddly (status "${firstRun.battle.status}")`);
+  }
+  const result = firstRun.battle.result;
+  if (!result || !['break', 'round-limit'].includes(result.reason)) {
+    throw new Error(`the outcome records no break or round-limit reason: ${JSON.stringify(result)}`);
+  }
+  if (!result.lostShares || !result.losses) {
+    throw new Error('the outcome screen data is missing lost shares or losses');
+  }
+  const ended = firstRun.battle.events.find((event) => event?.type === 'battle-ended');
+  if (!ended) {
+    throw new Error('the finished battle records no battle-ended event');
+  }
+  const outcomeLine = describeBattleEvent(ended, firstRun.battle);
+  if (typeof outcomeLine !== 'string' || outcomeLine.length === 0 || !/wins|draw/i.test(outcomeLine)) {
+    throw new Error(`the outcome screen line is unreadable: ${outcomeLine}`);
+  }
+  const outcomeGroups = groupLogEvents(firstRun.battle);
+  if (outcomeGroups.length === 0) {
+    throw new Error('the finished battle has no battle log');
+  }
+  logStep(
+    'human vs random: play a fixed-seed battle to an army break or the round limit',
+    'pass',
+    `${firstRun.battle.status} after ${firstRun.turns} turns`,
+  );
+
+  logStep('human vs random: the fixed seed replays deterministically', 'running');
+  const secondRun = await playOne();
+  if (JSON.stringify(secondRun.battle.events) !== JSON.stringify(firstRun.battle.events)) {
+    throw new Error('the same fixed seed replayed to a different event record');
+  }
+  if (secondRun.turns !== firstRun.turns || secondRun.battle.status !== firstRun.battle.status) {
+    throw new Error('the replay ended on a different turn or status');
+  }
+  // The runner alternative covers the same ground in fewer calls.
+  const replayed = await (async () => {
+    const document = createScenario({ title: 'Human vs Random rounds probe' });
+    const [first, second] = document.sides;
+    let counter = 1;
+    const probeId = () => `00000000-0000-4000-8000-${String(counter++).padStart(12, '0')}`;
+    document.units.push(
+      {
+        id: probeId(), name: 'Rounds taxis', side: first.id, troopType: 'hoplite',
+        soldiers: 100, files: 10, lateralInterval: 1, rankDepth: 1, position: { x: 500, y: 600 }, facing: 180,
+      },
+      {
+        id: probeId(), name: 'Rounds mora', side: second.id, troopType: 'hoplite',
+        soldiers: 100, files: 10, lateralInterval: 1, rankDepth: 1, position: { x: 500, y: 400 }, facing: 0,
+      },
+    );
+    const gameSeed = 20260309;
+    const battle = startBattle(document, { seed: gameSeed, controllers: { [first.id]: 'human', [second.id]: 'random' } });
+    const players = {
+      [first.id]: createRandomPlayer({ seed: gameSeed * 1000 + 1 }),
+      [second.id]: createRandomPlayer({ seed: gameSeed * 1000 + 2 }),
+    };
+    return runRounds(battle, players, 12);
+  })();
+  if (replayed.battle.status === 'ongoing') {
+    throw new Error('twelve rounds of fixed-seed play did not reach an outcome');
+  }
+  logStep('human vs random: the fixed seed replays deterministically', 'pass', 'identical event record');
+}
+
 async function resolveOneProbeTurn(battle, sides, context) {
   const active = battle.activeSide;
   if (battle.controllers[active] === 'human') {

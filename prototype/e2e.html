@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="PÓLIS tracer bullet: browser end-to-end test (ten-step editor acceptance, persistence steps 1-6 and 8, battle reload-resume).">
+  <meta name="description" content="PÓLIS tracer bullet: browser end-to-end test (ten-step editor acceptance, persistence steps 1-6 and 8, battle reload-resume, local battle gate, Human vs Random to an outcome).">
   <title>PÓLIS — end-to-end test</title>
   <style>
     body { font-family: 'DM Sans', -apple-system, sans-serif; background: #f5f4ed; color: #303a32; margin: 0; }
@@ -24,7 +24,7 @@
 </head>
 <body>
   <main>
-    <h1>End-to-end test: ten-step editor acceptance → persistence steps 1–6 and 8 → battle (Human vs Passive, two turns) → Move drafting → full-orders drafting → battle reload-resume</h1>
+    <h1>End-to-end test: ten-step editor acceptance → persistence steps 1–6 and 8 → battle (Human vs Passive, two turns) → Move drafting → full-orders drafting → local battle gate (refusal, editor fix, Human vs Passive, collision, turn result, reload, concession, rematch) → Human vs Random to an outcome → battle reload-resume</h1>
     <p class="lede">Drives the real domain model and the real IndexedDB scenario store
       in this browser. Editor acceptance (#4): create "Acceptance plain" at
       1400 × 900 m with a description (step 1); forest, rough ground, and a
@@ -47,7 +47,7 @@
       approach leg), a Shoot, a Reform with the new footprint, a Rally for a
       Disordered unit, every kind's rejection with its highlight, a Move plus a
       Charge plus a deliberately colliding order with reorder and commit, and a
-      Withdraw next turn. Finally a battle that resolves a turn, saves to the
+      Withdraw next turn. Then the local battle gate (#39): an unplayable reference refused naming the unit, the editor fix saved, Human vs Passive started, a Move plus a Charge plus a colliding order with reorder and commit, the turn result and the battle log showing the outcome, a mid-battle reload and resume, a concession, and a rematch; separately Human vs Random with a fixed seed played to an army break or the round limit with the outcome checked. Finally a battle that resolves a turn, saves to the
       battles collection, reloads mid-battle, and resumes the identical state
       before resolving another turn. Add <code>?autostart=1</code> to run on load.</p>
     <button id="run">Run end-to-end test</button>
