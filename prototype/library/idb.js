@@ -7,6 +7,7 @@
 // the document itself.
 
 import { assertValidScenario, cloneScenario } from '../domain/scenario.js';
+import { classifyStoredRecord, compareLibraryEntries } from '../domain/library.js';
 
 export const SCENARIO_DB_NAME = 'polis-scenarios';
 const RECORD_STORE = 'scenarios';
@@ -59,19 +60,22 @@ export class IndexedDBScenarioStore {
     const database = await this.open();
     const records = await requestToPromise(recordStore(database, 'readonly').getAll());
     return records
-      .map((record) => ({
-        id: record.id,
-        title: record.document.title,
-        revision: record.revision,
-        updatedAt: record.updatedAt,
-      }))
-      .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));
+      .map((record) => classifyStoredRecord(record))
+      .sort(compareLibraryEntries);
   }
 
   async load(id) {
     const database = await this.open();
     const record = await requestToPromise(recordStore(database, 'readonly').get(id));
     return record ? cloneScenario(record.document) : null;
+  }
+
+  // The raw stored record, deep-cloned: for raw export of library entries
+  // that cannot be read (and of documents with a newer format version).
+  async loadRaw(id) {
+    const database = await this.open();
+    const record = await requestToPromise(recordStore(database, 'readonly').get(id));
+    return record ? JSON.parse(JSON.stringify(record)) : null;
   }
 
   async save(document) {
