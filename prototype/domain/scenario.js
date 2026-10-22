@@ -1108,3 +1108,181 @@ export function unitFootprint(unit) {
   if (!Number.isFinite(rankDepth) || rankDepth <= 0) return null;
   return { ranks, frontageM: files * lateral, depthM: ranks * rankDepth };
 }
+
+// --- Order of battle editing helpers (framework-free) ------------------------
+// The editor places new and duplicated units automatically: the author never
+// types coordinates. These helpers stay in the domain model so unit tests
+// cover them without a browser.
+
+// A provisional ruleset version is any `0.x` version: the catalogue-only
+// `polis-classical 0.1` the editor is built against. The editor badges it so
+// authors know battles cannot start under it yet.
+export function isProvisionalRulesetVersion(version) {
+  return typeof version === 'string' && /^0(\.|$)/.test(version.trim());
+}
+
+export function isProvisionalRuleset(ruleset) {
+  return !!ruleset && isProvisionalRulesetVersion(ruleset?.version);
+}
+
+// Suggest a unit name that is unique across the document (case-insensitive on
+// the trimmed name). Returns `base` when it is free, else `base 2`, `base 3`,
+// and so on. Pure.
+export function suggestUnitName(document, base = 'New Unit') {
+  const units = Array.isArray(document?.units) ? document.units : [];
+  const taken = new Set(
+    units
+      .filter((unit) => unit && isNonEmptyString(unit.name))
+      .map((unit) => unit.name.trim().toLowerCase()),
+  );
+  const stem = isNonEmptyString(base) ? base.trim() : 'New Unit';
+  if (!taken.has(stem.toLowerCase())) {
+    return stem;
+  }
+  let counter = 2;
+  while (taken.has(`${stem} ${counter}`.toLowerCase())) {
+    counter += 1;
+  }
+  return `${stem} ${counter}`;
+}
+
+// Default facing for a new unit of a side: the first side faces south (180)
+// and the second faces north (0), so opposing deployments face each other as
+// in the acceptance scenario. Unknown sides face north.
+export function defaultFacingForSide(document, sideId) {
+  const sides = Array.isArray(document?.sides) ? document.sides : [];
+  const index = sides.findIndex((side) => side?.id === sideId);
+  if (index === 0) {
+    return 180;
+  }
+  return 0;
+}
+
+// Find the first free front-midpoint for a footprint of the given size and
+// facing inside `searchRect` ({ minX, maxX, minY, maxY } in map metres,
+// clamped to the battlefield; defaults to the whole battlefield). Candidates
+// are tried north to south, west to east on a 5 m grid, rounded to the stored
+// 0.1 m precision. A candidate is free when its footprint lies wholly inside
+// the battlefield and does not overlap any existing unit (using the same
+// 0.1 m shrink tolerance as structural validation, so touching stays legal).
+// Returns the position or null when no candidate fits. Pure.
+export function findFreeUnitPosition(
+  document,
+  { frontage, depth, facing = 0 } = {},
+  searchRect = null,
+) {
+  const battlefield = document?.battlefield;
+  const width = Number(battlefield?.width);
+  const height = Number(battlefield?.height);
+  if (
+    !Number.isFinite(width) ||
+    width <= 0 ||
+    !Number.isFinite(height) ||
+    height <= 0 ||
+    !Number.isFinite(frontage) ||
+    frontage <= 0 ||
+    !Number.isFinite(depth) ||
+    depth <= 0 ||
+    !Number.isFinite(facing)
+  ) {
+    return null;
+  }
+  const rect = {
+    minX: Math.max(0, Number(searchRect?.minX) || 0),
+    minY: Math.max(0, Number(searchRect?.minY) || 0),
+    maxX: Math.min(width, Number.isFinite(Number(searchRect?.maxX)) ? Number(searchRect.maxX) : width),
+    maxY: Math.min(height, Number.isFinite(Number(searchRect?.maxY)) ? Number(searchRect.maxY) : height),
+  };
+  if (rect.minX > rect.maxX || rect.minY > rect.maxY) {
+    return null;
+  }
+  // Existing footprints, shrunk exactly as structural validation shrinks them,
+  // so placement accepts what validation accepts. Units without valid numbers
+  // are skipped: they cannot overlap a candidate geometrically.
+  const blockers = [];
+  for (const unit of Array.isArray(document?.units) ? document.units : []) {
+    if (
+      !unit ||
+      typeof unit !== 'object' ||
+      !Number.isInteger(unit.soldiers) ||
+      unit.soldiers < 1 ||
+      !Number.isInteger(unit.files) ||
+      unit.files < 1 ||
+      unit.files > unit.soldiers ||
+      !Number.isFinite(unit.lateralInterval) ||
+      unit.lateralInterval <= 0 ||
+      !Number.isFinite(unit.rankDepth) ||
+      unit.rankDepth <= 0 ||
+      !Number.isFinite(unit.position?.x) ||
+      !Number.isFinite(unit.position?.y) ||
+      !Number.isFinite(unit.facing)
+    ) {
+      continue;
+    }
+    try {
+      const shrunk = shrinkFootprint(unit);
+      const derived = shrunk ? null : deriveFootprint(unit);
+      const corners = shrunk ? shrunk.corners : derived.corners;
+      if (Array.isArray(corners) && corners.length === 4) {
+        blockers.push(corners);
+      }
+    } catch {
+      // A unit that cannot derive a footprint blocks nothing.
+    }
+  }
+  const STEP_M = 5;
+  for (let y = rect.maxY; y >= rect.minY - 1e-9; y -= STEP_M) {
+    for (let x = rect.minX; x <= rect.maxX + 1e-9; x += STEP_M) {
+      const candidate = { x: round1(Math.min(x, rect.maxX)), y: round1(Math.min(y, rect.maxY)) };
+      let corners;
+      try {
+        const derived = deriveFootprint({
+          soldiers: 1,
+          files: 1,
+          lateralInterval: frontage,
+          rankDepth: depth,
+          position: candidate,
+          facing,
+        });
+        corners = derived.corners;
+      } catch {
+        continue;
+      }
+      if (
+        !pointsWithinBounds([candidate], width, height) ||
+        !pointsWithinBounds(corners, width, height)
+      ) {
+        continue;
+      }
+      let probeCorners = corners;
+      try {
+        const shrunk = shrinkFootprint({
+          soldiers: 1,
+          files: 1,
+          lateralInterval: frontage,
+          rankDepth: depth,
+          position: candidate,
+          facing,
+        });
+        if (shrunk) {
+          probeCorners = shrunk.corners;
+        }
+      } catch {
+        // Keep the unshrunk corners.
+      }
+      let blocked = false;
+      for (const ring of blockers) {
+        if (polygonsOverlapPositiveArea(probeCorners, ring)) {
+          blocked = true;
+          break;
+        }
+      }
+      if (!blocked) {
+        return candidate;
+      }
+    }
+    // The grid step rarely divides the rect edge exactly: the clamped edge
+    // value above already covers the remainder, so no extra pass is needed.
+  }
+  return null;
+}

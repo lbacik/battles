@@ -194,6 +194,27 @@ input[aria-invalid="true"], textarea[aria-invalid="true"] { border-color: #b76e5
 .unit-dims { fill: #5c665a; paint-order: stroke; stroke: #f4f3e9; stroke-width: 3px; }
 .side-unit { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; margin: 4px 0 0 20px; }
 .side-unit .unit-detail { color: var(--muted); white-space: nowrap; }
+.spacer { flex: 1; }
+.unit-row {
+  width: 100%; text-align: left; margin: 0 0 6px; padding: 6px 8px;
+  border: 1px solid transparent; border-radius: 6px;
+}
+.unit-row:hover { border-color: var(--line); background: #ffffff88; }
+.unit-row.selected { border-color: var(--green); background: #eef2e4; }
+.unit-row.conflict { border-color: #b76e5a; background: #f9e9e4; }
+.unit-editor { margin-bottom: 6px; }
+.unit-editor h3 { font-size: 15px; margin: 0 0 4px; }
+.unit-editor.has-conflict { border-left: 3px solid #b76e5a; padding-left: 10px; }
+.derived-line { font-size: 12px; color: #4c554a; line-height: 1.6; margin: 0 0 12px; }
+.preset-note { font-size: 11px; color: var(--muted); line-height: 1.6; margin: -6px 0 12px; }
+.unit-actions { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+.panel-divider { border: 0; border-top: 1px solid var(--line); margin: 16px 0; }
+.provisional-badge {
+  display: inline-block; font-size: 11px; font-weight: 650; color: #6b5518;
+  background: #faf3dd; border: 1px solid #e5d9b5; border-radius: 999px;
+  padding: 3px 10px; white-space: nowrap;
+}
+.unit.conflict .unit-label { fill: #8a4636; }
 .field { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: #737d69; margin-bottom: 14px; }
 .field input, .field select {
   height: 38px; border: 1px solid #dce0d1; border-radius: 4px;

@@ -11,14 +11,19 @@ import {
   cloneScenario,
   collectWarnings,
   createScenario,
+  defaultFacingForSide,
   deriveFootprint,
   exportScenario,
+  findFreeUnitPosition,
   fitMapView,
+  generateId,
   importScenarioDocument,
+  isProvisionalRuleset,
   mapViewBox,
   niceScaleBarMetres,
   panMapViewByPixels,
   resizeBattlefield,
+  suggestUnitName,
   toScreenPoint,
   unitFacingDeg,
   unitFootprint,
@@ -34,7 +39,12 @@ import {
   isUnsupportedDocument,
   performSave,
 } from './domain/library.js';
-import { getTroopType } from './domain/polis-classical.js';
+import {
+  TROOP_TYPE_CATALOGUE,
+  TROOP_TYPE_KEYS,
+  getTroopType,
+  spacingClass,
+} from './domain/polis-classical.js';
 import { IndexedDBScenarioStore, ensurePersistentStorage } from './library/idb.js';
 
 const NARROW_NOTICE_WIDTH = 1280;
@@ -68,6 +78,12 @@ const state = {
   newTitle: '',
   mapView: null,
   spaceHeld: false,
+  // Order of battle selection and conflict highlight. Both are display-only:
+  // selecting a unit never marks the scenario unsaved, and the conflict
+  // highlight only mirrors a refused edit (the document keeps the last valid
+  // values). Neither is recorded in the undo history.
+  selectedUnitId: null,
+  unitConflictIds: [],
 };
 
 function ensureMapView(document) {
@@ -140,6 +156,7 @@ function commitEdit(nextDocument, refocusSelector) {
     return;
   }
   state.fieldErrors = {};
+  state.unitConflictIds = [];
   if (documentsMatch(nextDocument, state.document)) {
     render();
     return;
@@ -147,6 +164,9 @@ function commitEdit(nextDocument, refocusSelector) {
   state.history.past.push(cloneScenario(state.document));
   state.history.future = [];
   state.document = nextDocument;
+  if (state.selectedUnitId && !nextDocument.units.some((unit) => unit?.id === state.selectedUnitId)) {
+    state.selectedUnitId = null;
+  }
   state.status = '';
   state.statusError = false;
   render(refocusSelector);
@@ -159,6 +179,10 @@ function undoEdit(refocusSelector) {
   state.history.future.push(cloneScenario(state.document));
   state.document = state.history.past.pop();
   state.fieldErrors = {};
+  state.unitConflictIds = [];
+  if (state.selectedUnitId && !state.document.units.some((unit) => unit?.id === state.selectedUnitId)) {
+    state.selectedUnitId = null;
+  }
   // Undoing back to the saved version clears the transient message so the
   // header falls back to the saved state; anything else stays marked dirty.
   state.status = isDirty() ? 'Undone.' : '';
@@ -173,6 +197,10 @@ function redoEdit(refocusSelector) {
   state.history.past.push(cloneScenario(state.document));
   state.document = state.history.future.pop();
   state.fieldErrors = {};
+  state.unitConflictIds = [];
+  if (state.selectedUnitId && !state.document.units.some((unit) => unit?.id === state.selectedUnitId)) {
+    state.selectedUnitId = null;
+  }
   state.status = isDirty() ? 'Redone.' : '';
   state.statusError = false;
   render(refocusSelector);
@@ -182,6 +210,19 @@ function redoEdit(refocusSelector) {
 // and the reason is shown in the status line and under the field.
 function failCommit(field, message) {
   state.fieldErrors = { [field]: message };
+  state.unitConflictIds = [];
+  state.status = message;
+  state.statusError = true;
+  render();
+}
+
+// Reject a unit form value. Like failCommit, but it can also highlight the
+// units the refused edit would conflict with (overlap or outside): those ids
+// are drawn with a conflict outline on the map and in the order of battle
+// until the next successful commit or selection change.
+function failUnitCommit(field, message, conflictIds = []) {
+  state.fieldErrors = { [field]: message };
+  state.unitConflictIds = [...new Set(conflictIds.filter(Boolean))];
   state.status = message;
   state.statusError = true;
   render();
@@ -291,8 +332,381 @@ function commitSideColor(index, raw) {
   commitEdit(next, `[data-field="side-color"][data-index="${index}"]`);
 }
 
+// --- Unit commits (invalid values never reach the document) -----------------
+// Every unit change goes through commitEdit, so adding, editing, duplicating,
+// and deleting units are all undoable. Geometry-changing edits are validated
+// against the whole document: an edit whose footprint would overlap another
+// unit or leave the battlefield is refused and the conflict is highlighted.
+
+function unitById(document, id) {
+  return (document?.units || []).find((unit) => unit?.id === id) || null;
+}
+
+function selectedUnit() {
+  if (!state.document || !state.selectedUnitId) {
+    return null;
+  }
+  return unitById(state.document, state.selectedUnitId);
+}
+
+// Which spacing preset the unit's spacings match, or 'custom' when they match
+// none of the troop type's presets.
+function currentPresetKey(unit) {
+  const entry = getTroopType(unit?.troopType);
+  if (!entry || !Number.isFinite(unit?.lateralInterval) || !Number.isFinite(unit?.rankDepth)) {
+    return 'custom';
+  }
+  for (const key of ['close', 'normal', 'open']) {
+    const preset = entry.presets[key];
+    if (
+      preset &&
+      Math.abs(preset.lateralInterval - unit.lateralInterval) < 1e-9 &&
+      Math.abs(preset.rankDepth - unit.rankDepth) < 1e-9
+    ) {
+      return key;
+    }
+  }
+  return 'custom';
+}
+
+// The map rectangle (in metres, map convention) currently in view, clipped to
+// the battlefield. New and duplicated units are placed at the first free spot
+// inside it; view navigation never touches the document, so this only reads
+// the display-only camera.
+function visibleSearchRect() {
+  const battlefield = state.document?.battlefield;
+  const width = Number(battlefield?.width);
+  const height = Number(battlefield?.height);
+  if (!Number.isFinite(width) || width <= 0 || !Number.isFinite(height) || height <= 0) {
+    return null;
+  }
+  if (!state.mapView) {
+    return { minX: 0, minY: 0, maxX: width, maxY: height };
+  }
+  const box = mapViewBox(state.mapView, battlefield);
+  if (!Number.isFinite(box?.x) || !Number.isFinite(box?.width)) {
+    return { minX: 0, minY: 0, maxX: width, maxY: height };
+  }
+  return {
+    minX: Math.max(0, box.x),
+    minY: Math.max(0, height - (box.y + box.height)),
+    maxX: Math.min(width, box.x + box.width),
+    maxY: Math.min(height, height - box.y),
+  };
+}
+
+function describeFootprintSize(frontage, depth) {
+  return `${frontage.toFixed(1)} × ${depth.toFixed(1)} m`;
+}
+
+// Refuse the edited unit when structural validation names it: the value is
+// never committed, the field reverts, and every other unit named alongside it
+// (an overlap partner) is highlighted as the conflict.
+function refuseIfConflicting(nextDocument, editedIndex, field) {
+  const errors = validateScenario(nextDocument);
+  const relevant = errors.filter((error) => error.includes(`units[${editedIndex}]`));
+  if (relevant.length === 0) {
+    return false;
+  }
+  const editedId = nextDocument.units[editedIndex]?.id;
+  const conflictIds = [editedId];
+  for (const error of relevant) {
+    for (const match of error.matchAll(/units\[(\d+)\]/g)) {
+      const other = nextDocument.units[Number(match[1])];
+      if (other?.id) {
+        conflictIds.push(other.id);
+      }
+    }
+  }
+  failUnitCommit(field, relevant[0], conflictIds);
+  return true;
+}
+
+function commitAddUnit(sideId) {
+  if (!state.document) {
+    return;
+  }
+  const side = (state.document.sides || []).find((entry) => entry.id === sideId)
+    || state.document.sides[0];
+  if (!side) {
+    return;
+  }
+  const troopKey = TROOP_TYPE_KEYS.includes('hoplite') ? 'hoplite' : TROOP_TYPE_KEYS[0];
+  const preset = getTroopType(troopKey)?.presets?.normal
+    || { lateralInterval: 1.8, rankDepth: 1.8 };
+  const soldiers = 100;
+  const files = 10;
+  const frontage = files * preset.lateralInterval;
+  const depth = Math.ceil(soldiers / files) * preset.rankDepth;
+  const facing = defaultFacingForSide(state.document, side.id);
+  const position = findFreeUnitPosition(
+    state.document,
+    { frontage, depth, facing },
+    visibleSearchRect(),
+  );
+  if (!position) {
+    const message = 'No free space in the current view: pan or zoom out, then add the Unit again.';
+    state.fieldErrors = {};
+    state.unitConflictIds = [];
+    state.status = message;
+    state.statusError = true;
+    render();
+    toast(message);
+    return;
+  }
+  const next = cloneScenario(state.document);
+  const unit = {
+    id: generateId(),
+    name: suggestUnitName(next),
+    side: side.id,
+    troopType: troopKey,
+    soldiers,
+    files,
+    lateralInterval: preset.lateralInterval,
+    rankDepth: preset.rankDepth,
+    position,
+    facing,
+  };
+  next.units.push(unit);
+  state.selectedUnitId = unit.id;
+  commitEdit(next);
+  toast(`Added ${unit.name}.`);
+}
+
+function commitDuplicateUnit(unitId) {
+  if (!state.document) {
+    return;
+  }
+  const source = unitById(state.document, unitId);
+  if (!source) {
+    return;
+  }
+  const ranks = Math.ceil(source.soldiers / source.files);
+  const frontage = source.files * source.lateralInterval;
+  const depth = ranks * source.rankDepth;
+  const position = findFreeUnitPosition(
+    state.document,
+    { frontage, depth, facing: source.facing },
+    visibleSearchRect(),
+  );
+  if (!position) {
+    const message = 'No free space in the current view: pan or zoom out, then duplicate the Unit again.';
+    state.fieldErrors = {};
+    state.unitConflictIds = [];
+    state.status = message;
+    state.statusError = true;
+    render();
+    toast(message);
+    return;
+  }
+  const next = cloneScenario(state.document);
+  const copy = {
+    ...JSON.parse(JSON.stringify(source)),
+    id: generateId(),
+    name: suggestUnitName(next, `${source.name} copy`),
+    position,
+  };
+  next.units.push(copy);
+  state.selectedUnitId = copy.id;
+  commitEdit(next);
+  toast(`Duplicated as ${copy.name}.`);
+}
+
+function commitDeleteUnit(unitId) {
+  if (!state.document) {
+    return;
+  }
+  const target = unitById(state.document, unitId);
+  if (!target) {
+    return;
+  }
+  const next = cloneScenario(state.document);
+  next.units = next.units.filter((unit) => unit?.id !== unitId);
+  if (state.selectedUnitId === unitId) {
+    state.selectedUnitId = null;
+  }
+  commitEdit(next);
+  toast(`Deleted ${target.name}.`);
+}
+
+function commitUnitField(unitId, field, raw) {
+  if (!state.document) {
+    return;
+  }
+  const unit = unitById(state.document, unitId);
+  if (!unit) {
+    return;
+  }
+  const index = state.document.units.findIndex((entry) => entry?.id === unitId);
+  const fieldKey = `unit-${field}-${unitId}`;
+  if (field === 'name') {
+    const value = String(raw ?? '');
+    if (!value.trim()) {
+      failUnitCommit(fieldKey, 'Unit name is required.');
+      return;
+    }
+    const clash = (state.document.units || []).some(
+      (other) => other?.id !== unitId
+        && String(other?.name || '').trim().toLowerCase() === value.trim().toLowerCase(),
+    );
+    if (clash) {
+      failUnitCommit(fieldKey, `Unit name "${value.trim()}" is already used (names must be unique).`, [unitId]);
+      return;
+    }
+    if (value.trim() === unit.name) {
+      state.fieldErrors = {};
+      state.unitConflictIds = [];
+      render();
+      return;
+    }
+    const next = cloneScenario(state.document);
+    next.units[index].name = value.trim();
+    if (refuseIfConflicting(next, index, fieldKey)) {
+      return;
+    }
+    commitEdit(next);
+    return;
+  }
+  if (field === 'side') {
+    const value = String(raw ?? '');
+    if (!value || !state.document.sides.some((side) => side.id === value)) {
+      failUnitCommit(fieldKey, 'Side is required.');
+      return;
+    }
+    if (value === unit.side) {
+      state.fieldErrors = {};
+      state.unitConflictIds = [];
+      render();
+      return;
+    }
+    const next = cloneScenario(state.document);
+    next.units[index].side = value;
+    if (refuseIfConflicting(next, index, fieldKey)) {
+      return;
+    }
+    commitEdit(next);
+    return;
+  }
+  if (field === 'troopType') {
+    const value = String(raw ?? '');
+    if (!value.trim()) {
+      failUnitCommit(fieldKey, 'Troop type is required.');
+      return;
+    }
+    if (value === unit.troopType) {
+      state.fieldErrors = {};
+      state.unitConflictIds = [];
+      render();
+      return;
+    }
+    const next = cloneScenario(state.document);
+    next.units[index].troopType = value;
+    if (refuseIfConflicting(next, index, fieldKey)) {
+      return;
+    }
+    commitEdit(next);
+    return;
+  }
+  if (field === 'soldiers' || field === 'files') {
+    const value = Number(raw);
+    if (String(raw ?? '').trim() === '' || !Number.isInteger(value) || value < 1) {
+      failUnitCommit(fieldKey, field === 'soldiers'
+        ? 'Soldiers must be a whole number of at least 1.'
+        : 'Files must be a whole number of at least 1.');
+      return;
+    }
+    const soldiers = field === 'soldiers' ? value : unit.soldiers;
+    const files = field === 'files' ? value : unit.files;
+    if (files > soldiers) {
+      failUnitCommit(fieldKey, `Files (${files}) must not exceed soldiers (${soldiers}).`, [unitId]);
+      return;
+    }
+    if (soldiers === unit.soldiers && files === unit.files) {
+      state.fieldErrors = {};
+      state.unitConflictIds = [];
+      render();
+      return;
+    }
+    const next = cloneScenario(state.document);
+    next.units[index].soldiers = soldiers;
+    next.units[index].files = files;
+    if (refuseIfConflicting(next, index, fieldKey)) {
+      return;
+    }
+    commitEdit(next, `[data-unit-field="${field}"][data-id="${unitId}"]`);
+    return;
+  }
+  if (field === 'lateralInterval' || field === 'rankDepth') {
+    const value = Number(raw);
+    const label = field === 'lateralInterval' ? 'Lateral interval' : 'Rank depth';
+    if (String(raw ?? '').trim() === '' || !Number.isFinite(value) || value <= 0) {
+      failUnitCommit(fieldKey, `${label} must be a positive number of metres.`);
+      return;
+    }
+    if (value > 10) {
+      failUnitCommit(fieldKey, `${label} must not exceed the application limit of 10 m.`);
+      return;
+    }
+    if (value === unit[field]) {
+      state.fieldErrors = {};
+      state.unitConflictIds = [];
+      render();
+      return;
+    }
+    const next = cloneScenario(state.document);
+    next.units[index][field] = Math.round(value * 10) / 10;
+    if (refuseIfConflicting(next, index, fieldKey)) {
+      return;
+    }
+    commitEdit(next, `[data-unit-field="${field}"][data-id="${unitId}"]`);
+    return;
+  }
+}
+
+function commitUnitPreset(unitId, presetKey) {
+  if (!state.document) {
+    return;
+  }
+  const unit = unitById(state.document, unitId);
+  if (!unit) {
+    return;
+  }
+  const entry = getTroopType(unit.troopType);
+  const preset = entry?.presets?.[presetKey];
+  if (!preset) {
+    return;
+  }
+  const index = state.document.units.findIndex((entry) => entry?.id === unitId);
+  if (unit.lateralInterval === preset.lateralInterval && unit.rankDepth === preset.rankDepth) {
+    state.fieldErrors = {};
+    state.unitConflictIds = [];
+    render();
+    return;
+  }
+  const next = cloneScenario(state.document);
+  next.units[index].lateralInterval = preset.lateralInterval;
+  next.units[index].rankDepth = preset.rankDepth;
+  // Both spacings change in one undo step; a conflicting preset is refused.
+  if (refuseIfConflicting(next, index, `unit-preset-${unitId}`)) {
+    return;
+  }
+  commitEdit(next, `[data-unit-field="lateralInterval"][data-id="${unitId}"]`);
+  toast(`Spacing preset ${presetKey} applied (${describeFootprintSize(preset.lateralInterval, preset.rankDepth)}).`);
+}
+
 function committedFieldValue(input) {
   const index = Number(input.dataset.index);
+  if (input.dataset.unitField) {
+    const unit = unitById(state.document, input.dataset.id);
+    if (!unit) {
+      return input.value;
+    }
+    const unitField = input.dataset.unitField;
+    if (unitField === 'preset') {
+      return currentPresetKey(unit);
+    }
+    return String(unit[unitField] ?? '');
+  }
   if (input.dataset.field === 'title') {
     return state.document.title;
   }
@@ -308,7 +722,28 @@ function committedFieldValue(input) {
 // Whether a form field holds edits not yet committed to the document.
 // Undo and redo skip such fields so the shortcut never destroys a draft.
 function fieldHasDraft(input) {
-  if (!input || !input.dataset || !input.dataset.field || !state.document) {
+  if (!input || !input.dataset || !state.document) {
+    return false;
+  }
+  if (input.dataset.unitField) {
+    const unit = unitById(state.document, input.dataset.id);
+    if (!unit) {
+      return false;
+    }
+    const unitField = input.dataset.unitField;
+    const value = input.value ?? '';
+    if (unitField === 'preset') {
+      return value !== currentPresetKey(unit);
+    }
+    if (unitField === 'name' || unitField === 'side' || unitField === 'troopType') {
+      return value !== String(unit[unitField] ?? '');
+    }
+    if (String(value).trim() === '' || !Number.isFinite(Number(value))) {
+      return true;
+    }
+    return Number(value) !== Number(unit[unitField]);
+  }
+  if (!input.dataset.field) {
     return false;
   }
   const field = input.dataset.field;
@@ -380,7 +815,7 @@ function unitLabelLines(unit, footprint) {
   return [name, dims];
 }
 
-function unitSvg(document, unit, mapView, mpp) {
+function unitSvg(document, unit, mapView, mpp, flags = {}) {
   const position = unitPosition(unit);
   const footprint = unitFootprint(unit);
   if (!position || !footprint) return '';
@@ -407,11 +842,15 @@ function unitSvg(document, unit, mapView, mpp) {
       ? `<rect x="${-helperBox / 2}" y="${-helperBox / 2}" width="${helperBox}" height="${helperBox}" rx="${4 * mpp}" fill="none" stroke="${esc(color)}" stroke-width="${1.5 * mpp}" stroke-dasharray="${6 * mpp} ${4 * mpp}" opacity="0.85" class="unit-helper"/>` +
         `<path d="M0 ${-helperBox / 2 - 10 * mpp} l${5 * mpp} ${5 * mpp} l${-5 * mpp} ${5 * mpp} l${-5 * mpp} ${-5 * mpp} Z" fill="${esc(color)}" opacity="0.9" class="unit-helper"/>`
       : '';
-  return `<g class="unit" transform="translate(${centre.x} ${centre.y)}">
+  const classes = ['unit'];
+  if (flags.selected) classes.push('selected');
+  if (flags.conflict) classes.push('conflict');
+  const outline = flags.conflict ? '#b91c1c' : esc(color);
+  return `<g class="${classes.join(' ')}" transform="translate(${centre.x} ${centre.y)}" data-unit-id="${esc(unit.id || '')}">
     <g transform="rotate(${facing)}">
       ${helper}
-      <rect x="${-frontW / 2}" y="${-depthH / 2}" width="${frontW}" height="${depthH}" fill="${esc(color)}" fill-opacity="0.32" stroke="${esc(color)}" stroke-width="${1.6 * mpp}" class="unit-footprint"/>
-      <line x1="${-frontW / 2}" y1="${-depthH / 2}" x2="${frontW / 2}" y2="${-depthH / 2}" stroke="${esc(color)}" stroke-width="${3 * mpp}"/>
+      <rect x="${-frontW / 2}" y="${-depthH / 2}" width="${frontW}" height="${depthH}" fill="${esc(color)}" fill-opacity="0.32" stroke="${outline}" stroke-width="${(flags.selected || flags.conflict ? 3 : 1.6) * mpp}" class="unit-footprint"/>
+      <line x1="${-frontW / 2}" y1="${-depthH / 2}" x2="${frontW / 2}" y2="${-depthH / 2}" stroke="${outline}" stroke-width="${3 * mpp}"/>
     </g>
     <text x="0" y="${depthH / 2 + 8 * mpp + labelSize * 0.9}" text-anchor="middle" font-size="${labelSize}" class="unit-label">${esc(name)}</text>
     ${dims ? `<text x="0" y="${depthH / 2 + 8 * mpp + labelSize * 0.9 + dimsSize * 1.25}" text-anchor="middle" font-size="${dimsSize}" class="unit-dims">${esc(dims)}</text>` : ''}
@@ -492,7 +931,7 @@ function battlefieldSvg(document, mapView) {
     ${terrain}
     <rect x="0" y="0" width="${widthM}" height="${heightM}" fill="none" stroke="#6f7a65" stroke-width="2" vector-effect="non-scaling-stroke"/>
     ${xLabels}${yLabels}
-    <g id="map-units-group">${placed.map((unit) => unitSvg(document, unit, mapView, mpp)).join('')}</g>
+    <g id="map-units-group">${placed.map((unit) => unitSvg(document, unit, mapView, mpp, { selected: unit?.id === state.selectedUnitId, conflict: state.unitConflictIds.includes(unit?.id) })).join('')}</g>
     <circle cx="${origin.x}" cy="${origin.y}" r="${5 * mpp}" fill="#4e6047"/>
     <text x="${origin.x + 10 * mpp}" y="${origin.y - 10 * mpp}" font-size="${axisSize}" fill="#4e6047">origin (0, 0) · SW</text>
     ${units.length === 0 ? `<text x="${centre.x}" y="${centre.y}" text-anchor="middle" font-size="${17 / zoom}" fill="#9aa08b">Empty battlefield — no units yet</text>` : ''}
@@ -652,7 +1091,9 @@ function orderOfBattleView(document) {
         const sideUnits = unitsOf(side);
         const soldiers = sideUnits.reduce((sum, unit) => sum + (Number(unit?.soldiers) || 0), 0);
         return `<div class="side">
-          <div class="side-name"><span class="swatch" style="background:${esc(side.color)}"></span>${esc(side.name)}</div>
+          <div class="side-name"><span class="swatch" style="background:${esc(side.color)}"></span>${esc(side.name)}
+            <span class="spacer"></span><button class="btn-quiet" data-action="add-unit" data-side="${esc(side.id)}" title="Add a Unit to ${esc(side.name)}">+ Add Unit</button>
+          </div>
           <p class="side-count">${sideUnits.length} ${sideUnits.length === 1 ? 'unit' : 'units'} · ${soldiers.toLocaleString('en')} soldiers</p>
           ${sideUnits
             .map((unit) => {
@@ -666,14 +1107,96 @@ function orderOfBattleView(document) {
               const detail = footprint
                 ? `${esc(troopDisplayName(unit.troopType))} · ${esc(unit.soldiers)} soldiers · ${esc(unit.files)} files × ${footprint.ranks} ranks`
                 : `${esc(troopDisplayName(unit.troopType))} · not placed`;
-              return `<div class="unit-row"><span class="swatch" style="background:${esc(side.color)}"></span><div><div class="unit-name">${esc(unit?.name || 'Unit')}</div><div class="unit-detail">${detail}</div></div></div>`;
+              const classes = ['unit-row'];
+              if (unit?.id === state.selectedUnitId) classes.push('selected');
+              if (state.unitConflictIds.includes(unit?.id)) classes.push('conflict');
+              return `<button class="${classes.join(' ')}" data-action="select-unit" data-id="${esc(unit?.id || '')}" aria-pressed="${String(unit?.id === state.selectedUnitId)}"><span class="swatch" style="background:${esc(side.color)}"></span><div><div class="unit-name">${esc(unit?.name || 'Unit')}</div><div class="unit-detail">${detail}</div></div></button>`;
             })
             .join('')}
         </div>`;
       })
       .join('')}
-    <p class="readonly-note">Positions, terrain, and forces are read-only in this release: import a scenario file to see them drawn at true scale.</p>
+    <p class="readonly-note">Select a Unit to edit it in the inspector. New and duplicated Units are placed at the first free spot in the current view. Unit positions and terrain geometry are otherwise read-only in this release.</p>
   </div>`;
+}
+
+function unitEditorView(document, unit) {
+  const fieldError = (name) =>
+    state.fieldErrors[name] ? `<p class="field-error" role="alert">${esc(state.fieldErrors[name])}</p>` : '';
+  const invalid = (name) => (state.fieldErrors[name] ? ' aria-invalid="true"' : '');
+  const id = unit.id;
+  let derived = null;
+  try {
+    derived = deriveFootprint(unit);
+  } catch {
+    derived = null;
+  }
+  if (!derived || !Number.isFinite(derived.ranks)) {
+    const fallback = unitFootprint(unit);
+    if (fallback && Number.isFinite(fallback.ranks)) {
+      derived = {
+        ranks: fallback.ranks,
+        frontage: fallback.frontageM,
+        depth: fallback.depthM,
+      };
+    }
+  }
+  const derivedLine = derived
+    ? `${derived.ranks} ${derived.ranks === 1 ? 'rank' : 'ranks'} · ${derived.frontage.toFixed(1)} m frontage · ${derived.depth.toFixed(1)} m depth`
+    : 'Ranks, frontage, and depth follow from soldiers, files, and spacings.';
+  const spacing = spacingClass(unit.troopType, unit.lateralInterval);
+  const presetKey = currentPresetKey(unit);
+  const entry = getTroopType(unit.troopType);
+  const presetLabel = (key) => {
+    const preset = entry?.presets?.[key];
+    if (!preset) {
+      return key;
+    }
+    return `${key} (${preset.lateralInterval} × ${preset.rankDepth} m)`;
+  };
+  const sideOptions = (document.sides || [])
+    .map((side) => `<option value="${esc(side.id)}"${side.id === unit.side ? ' selected' : ''}>${esc(side.name)}</option>`)
+    .join('');
+  const troopOptions = TROOP_TYPE_KEYS.map((key) => {
+    const label = TROOP_TYPE_CATALOGUE[key]?.displayName || key;
+    return `<option value="${esc(key)}"${key === unit.troopType ? ' selected' : ''}>${esc(label)}</option>`;
+  }).join('');
+  return `<section class="unit-editor${state.unitConflictIds.includes(id) ? ' has-conflict' : ''}" aria-label="Unit">
+    <span class="eyebrow">SELECTED UNIT</span>
+    <h3>${esc(unit.name || 'Unit')}</h3>
+    <p class="derived-line">${esc(derivedLine)}${spacing ? ` · ${esc(spacing)} spacing` : ''}</p>
+    <label class="field">Unit name (required)<input data-unit-field="name" data-id="${esc(id)}" value="${esc(unit.name || '')}" maxlength="60"${invalid(`unit-name-${id}`)}></label>
+    ${fieldError(`unit-name-${id}`)}
+    <div class="field-pair">
+      <div><label class="field">Side<select data-unit-field="side" data-id="${esc(id)}"${invalid(`unit-side-${id}`)}>${sideOptions}</select></label>${fieldError(`unit-side-${id}`)}</div>
+      <div><label class="field">Troop type<select data-unit-field="troopType" data-id="${esc(id)}"${invalid(`unit-troopType-${id}`)}>${troopOptions}</select></label>${fieldError(`unit-troopType-${id}`)}</div>
+    </div>
+    <div class="field-pair">
+      <div><label class="field">Soldiers<input type="number" data-unit-field="soldiers" data-id="${esc(id)}" min="1" step="1" value="${esc(unit.soldiers)}"${invalid(`unit-soldiers-${id}`)}></label>${fieldError(`unit-soldiers-${id}`)}</div>
+      <div><label class="field">Files<input type="number" data-unit-field="files" data-id="${esc(id)}" min="1" step="1" value="${esc(unit.files)}"${invalid(`unit-files-${id}`)}></label>${fieldError(`unit-files-${id}`)}</div>
+    </div>
+    <label class="field">Spacing preset<select data-unit-field="preset" data-id="${esc(id)}"${invalid(`unit-preset-${id}`)}>
+      ${presetKey === 'custom' ? '<option value="custom" selected>Custom spacings</option>' : ''}
+      ${['close', 'normal', 'open'].map((key) => `<option value="${key}"${key === presetKey ? ' selected' : ''}>${esc(presetLabel(key))}</option>`).join('')}
+    </select></label>
+    ${fieldError(`unit-preset-${id}`)}
+    <div class="field-pair">
+      <div><label class="field">Lateral interval (m)<input type="number" data-unit-field="lateralInterval" data-id="${esc(id)}" min="0.1" max="10" step="0.1" value="${esc(unit.lateralInterval)}"${invalid(`unit-lateralInterval-${id}`)}></label>${fieldError(`unit-lateralInterval-${id}`)}</div>
+      <div><label class="field">Rank depth (m)<input type="number" data-unit-field="rankDepth" data-id="${esc(id)}" min="0.1" max="10" step="0.1" value="${esc(unit.rankDepth)}"${invalid(`unit-rankDepth-${id}`)}></label>${fieldError(`unit-rankDepth-${id}`)}</div>
+    </div>
+    <p class="preset-note">A spacing preset pre-fills both spacings in metres; the scenario stores the metres (the preset itself is not stored).</p>
+    <div class="unit-actions">
+      <button class="btn-secondary" data-action="duplicate-unit" data-id="${esc(id)}">Duplicate</button>
+      <button class="btn-quiet btn-danger" data-action="delete-unit" data-id="${esc(id)}">Delete</button>
+    </div>
+  </section>`;
+}
+
+function provisionalBadge(document) {
+  if (!isProvisionalRuleset(document?.ruleset)) {
+    return '';
+  }
+  return `<span class="provisional-badge" title="This scenario references a provisional 0.x ruleset version.">Provisional ruleset</span>`;
 }
 
 function inspectorView(document) {
@@ -684,7 +1207,9 @@ function inspectorView(document) {
   const fieldError = (name) =>
     state.fieldErrors[name] ? `<p class="field-error" role="alert">${esc(state.fieldErrors[name])}</p>` : '';
   const invalid = (name) => (state.fieldErrors[name] ? ' aria-invalid="true"' : '');
-  return `<div class="panel"><span class="eyebrow">SCENARIO INSPECTOR</span><h2>Scenario</h2>
+  const unit = selectedUnit();
+  return `<div class="panel">${unit ? `${unitEditorView(document, unit)}<hr class="panel-divider">` : ''}
+    <span class="eyebrow">SCENARIO INSPECTOR</span><h2>Scenario</h2>
     <label class="field">Title (required)<input data-field="title" value="${esc(document.title)}" maxlength="120"${invalid('title')}></label>
     ${fieldError('title')}
     <div class="field-pair">
@@ -692,7 +1217,7 @@ function inspectorView(document) {
       <div><label class="field">Height (m)<input type="number" data-field="height" min="1" max="${MAX_BATTLEFIELD_HEIGHT_M}" step="0.1" value="${esc(size.height)}"${invalid('height')}></label>${fieldError('height')}</div>
     </div>
     <label class="field">Description<textarea data-field="description" rows="3" maxlength="2000" placeholder="Optional plain-text description">${esc(document.description || '')}</textarea></label>
-    <div class="kv"><dt>Forces</dt><dd>${(document.units || []).length} units</dd></div>
+    <div class="kv"><dt>Units</dt><dd>${(document.units || []).length} units</dd></div>
     <div class="kv"><dt>Terrain</dt><dd>${terrainSummary(document)}</dd></div>
     ${document.sides
       .map(
@@ -712,7 +1237,7 @@ function inspectorView(document) {
     <dl>
       <div class="kv"><dt>Identifier</dt><dd class="mono">${esc(document.id)}</dd></div>
       <div class="kv"><dt>Format</dt><dd>${esc(document.kind)} · v${esc(document.formatVersion)}</dd></div>
-      <div class="kv"><dt>Ruleset</dt><dd class="mono">${esc(document.ruleset.id)} ${esc(document.ruleset.version)}</dd></div>
+      <div class="kv"><dt>Ruleset</dt><dd class="mono">${esc(document.ruleset.id)} ${esc(document.ruleset.version)} ${provisionalBadge(document)}</dd></div>
       <div class="kv"><dt>Revision</dt><dd>${state.revision === null ? 'unsaved' : `rev. ${state.revision}`}</dd></div>
       <div class="kv"><dt>Updated</dt><dd>${esc(document.updatedAt)}</dd></div>
     </dl>
@@ -762,6 +1287,7 @@ function editorView() {
   return `<div class="editor-head">
       <button class="btn-quiet" data-action="back">← Library</button>
       <span class="doc-title">${esc(document.title)}</span>
+      ${provisionalBadge(document)}
       <span class="spacer"></span>
       ${isDirty() ? '<span class="dirty-pill" title="The scenario differs from the saved version."><span class="dirty-dot" aria-hidden="true"></span>Unsaved changes</span>' : ''}
       <span class="status${state.statusError ? ' error' : ''}">${esc(state.status || defaultStatus())}</span>
@@ -874,6 +1400,8 @@ async function openScenario(id) {
   state.problems = [];
   state.dirty = false;
   state.conflict = null;
+  state.selectedUnitId = null;
+  state.unitConflictIds = [];
   state.view = 'editor';
   // Fresh camera on the new battlefield; keep the author's grid/tool preference.
   state.mapView = {
@@ -1044,6 +1572,7 @@ async function saveScenario(options = {}) {
     state.problems = [];
     state.dirty = false;
     state.conflict = null;
+    state.unitConflictIds = [];
     state.status = `Saved · rev. ${metadata.revision} · ${new Date(metadata.updatedAt).toLocaleTimeString('en')}`;
     state.statusError = false;
     await refreshLibrary();
@@ -1209,6 +1738,17 @@ async function importScenarioFile(file) {
 }
 
 document.addEventListener('click', async (event) => {
+  const unitNode = event.target?.closest?.('g.unit[data-unit-id]');
+  if (unitNode && state.view === 'editor' && state.document && !state.spaceHeld) {
+    const unitId = unitNode.dataset.unitId;
+    if (unitId && unitById(state.document, unitId)) {
+      state.selectedUnitId = state.selectedUnitId === unitId ? null : unitId;
+      state.fieldErrors = {};
+      state.unitConflictIds = [];
+      render();
+      return;
+    }
+  }
   const element = event.target.closest('[data-action]');
   if (!element || element.disabled) return;
   const { action, id } = element.dataset;
@@ -1230,12 +1770,33 @@ document.addEventListener('click', async (event) => {
     state.savedDocument = null;
     state.history = { past: [], future: [] };
     state.fieldErrors = {};
+    state.selectedUnitId = null;
+    state.unitConflictIds = [];
     state.status = '';
     state.statusError = false;
     state.dirty = false;
     state.conflict = null;
     await refreshLibrary();
     render();
+  }
+  if (action === 'select-unit') {
+    state.selectedUnitId = state.selectedUnitId === id ? null : id;
+    state.fieldErrors = {};
+    state.unitConflictIds = [];
+    render();
+    return;
+  }
+  if (action === 'add-unit') {
+    commitAddUnit(element.dataset.side);
+    return;
+  }
+  if (action === 'duplicate-unit') {
+    commitDuplicateUnit(id);
+    return;
+  }
+  if (action === 'delete-unit') {
+    commitDeleteUnit(id);
+    return;
   }
   if (action === 'save') await saveScenario();
   if (action === 'duplicate') await duplicateScenarioById(id);
@@ -1295,6 +1856,18 @@ document.addEventListener('change', (event) => {
   if (state.view !== 'editor' || !state.document) {
     return;
   }
+  const unitField = event.target.dataset?.unitField;
+  if (unitField) {
+    const unitId = event.target.dataset?.id;
+    if (unitField === 'preset') {
+      if (event.target.value && event.target.value !== 'custom') {
+        commitUnitPreset(unitId, event.target.value);
+      }
+      return;
+    }
+    commitUnitField(unitId, unitField, event.target.value);
+    return;
+  }
   const field = event.target.dataset?.field;
   if (!field) {
     return;
@@ -1322,6 +1895,7 @@ document.addEventListener('keydown', (event) => {
   }
   const target = event.target;
   const field = target?.dataset?.field;
+  const unitField = target?.dataset?.unitField;
   // Text fields commit on Enter (via blur) and revert on Escape. Typing
   // itself stays a draft: it is not a scenario change and is not undoable.
   // (Enter in the description keeps its newline, so only Escape applies.)
@@ -1331,6 +1905,16 @@ document.addEventListener('keydown', (event) => {
     !event.metaKey
   ) {
     if (event.key === 'Enter' && field !== 'description') {
+      event.preventDefault();
+      target.blur();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      target.value = committedFieldValue(target);
+      target.blur();
+    }
+  }
+  if (unitField === 'name' && !event.ctrlKey && !event.metaKey) {
+    if (event.key === 'Enter') {
       event.preventDefault();
       target.blur();
     } else if (event.key === 'Escape') {
