@@ -756,6 +756,22 @@ describe('terrain effects on movement (decision #6 items 14-15)', () => {
     assert.deepEqual(verdict.movement, { availableM: 90, requiredM: 40 + TERRAIN.riverCostM });
   });
 
+  it('bills the river fee once per move across split legs', () => {
+    const battle = terrainBattle([riverAcross()]);
+    const unit = hopliteOf(battle);
+    const result = validateTurn(
+      battle,
+      submissionFor(battle, [moveOrder(unit.id, [
+        { to: { x: 500, y: 580 } },
+        { to: { x: 500, y: 560 } },
+      ])]),
+    );
+    assert.deepEqual(acceptedVerdict(result).movement, {
+      availableM: 90,
+      requiredM: 40 + TERRAIN.riverCostM,
+    });
+  });
+
   it('rejects a swept footprint touching water as forbidden_ground', () => {
     const battle = terrainBattle([groundRect('lake-a', 'water', 490, 570, 510, 590)]);
     const unit = hopliteOf(battle);
@@ -854,8 +870,4 @@ describe('terrain effects on movement (decision #6 items 14-15)', () => {
       'out of column the road is ignored',
     );
   });
-
-  function round1(value) {
-    return Math.round(value * 10) / 10;
-  }
 });
