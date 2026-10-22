@@ -271,12 +271,14 @@ export function isCompatibleScenarioRuleset(reference) {
   if (typeof reference.version !== 'string') {
     return false;
   }
+  const installedMajor = rulesetMajor(RULESET_VERSION);
   if (reference.version.trim() === PROVISIONAL_SCENARIO_VERSION) {
-    return true;
+    // Only `1.x` extends compatibility to the provisional catalogue.
+    return installedMajor === 1;
   }
   const scenarioMajor = rulesetMajor(reference.version);
   if (scenarioMajor === null) {
     return false;
   }
-  return scenarioMajor === rulesetMajor(RULESET_VERSION);
+  return scenarioMajor === installedMajor;
 }

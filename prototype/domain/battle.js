@@ -71,12 +71,15 @@ function hashSeedString(text) {
 
 // Normalise a battle seed to an unsigned 32-bit integer. An integer seed is
 // used as-is; a decimal string is read as an integer; any other non-empty
-// string is hashed; an omitted seed is drawn from `Math.random` (the UI path:
-// the seed is never shown, while tests, fuzzing, and the end-to-end harness
-// always pass an explicit seed). Throws on anything else.
+// string is hashed. The seed is always set programmatically — by tests,
+// fuzzing, and the end-to-end harness, or by the setup screen drawing it
+// before the call — so an omitted seed throws instead of touching ambient
+// randomness and breaking replay. Throws on anything else.
 export function normalizeSeed(seed) {
   if (seed === undefined) {
-    return (Math.random() * 0x100000000) >>> 0;
+    throw new Error(
+      'Starting a battle requires a seed (set programmatically by tests, fuzzing, the harness, or the setup screen).',
+    );
   }
   if (typeof seed === 'number') {
     if (!Number.isInteger(seed)) {
@@ -141,6 +144,21 @@ function describeRuleset(reference) {
   const version =
     typeof reference.version === 'string' && reference.version ? reference.version : 'missing version';
   return `"${id} ${version}"`;
+}
+
+function unitRef(unit, index) {
+  return {
+    unitIndex: index,
+    unitId: typeof unit?.id === 'string' ? unit.id : null,
+    unitName:
+      typeof unit?.name === 'string' && unit.name.trim().length > 0 ? unit.name.trim() : null,
+  };
+}
+
+// Deep clone a JSON-shaped value. `cloneScenario` stays reserved for whole
+// scenario documents; this helper covers units, parameters, and other parts.
+function cloneValue(value) {
+  return JSON.parse(JSON.stringify(value));
 }
 
 function footprintCorners(unit) {
@@ -230,15 +248,11 @@ export function validatePlayability(scenario) {
       return null;
     }
     const label = unitLabel(unit, index);
-    const unitId = typeof unit.id === 'string' ? unit.id : null;
-    const unitName =
-      typeof unit.name === 'string' && unit.name.trim().length > 0 ? unit.name.trim() : null;
+    const ref = unitRef(unit, index);
     if (!isKnownTroopType(unit.troopType)) {
       problems.push({
         code: 'unknown-troop-type',
-        unitIndex: index,
-        unitId,
-        unitName,
+        ...ref,
         side: typeof unit.side === 'string' ? unit.side : null,
         message: `${label}: unknown troop-type key "${String(unit.troopType)}".`,
       });
@@ -251,9 +265,7 @@ export function validatePlayability(scenario) {
           const shown = Number.isFinite(value) ? `${value} m` : String(value);
           problems.push({
             code: 'spacing-out-of-range',
-            unitIndex: index,
-            unitId,
-            unitName,
+            ...ref,
             side: typeof unit.side === 'string' ? unit.side : null,
             message:
               `${label}: ${field} ${shown} is outside the permitted range ` +
@@ -274,14 +286,10 @@ export function validatePlayability(scenario) {
       if (ringsTouch(ring, water.polygon)) {
         problems.push({
           code: 'footprint-in-water',
-          unitIndex: index,
-          unitId: typeof unit.id === 'string' ? unit.id : null,
-          unitName:
-            typeof unit.name === 'string' && unit.name.trim().length > 0 ? unit.name.trim() : null,
+          ...unitRef(unit, index),
           side: typeof unit.side === 'string' ? unit.side : null,
           message: `${unitLabel(unit, index)}: footprint touches water (feature "${water.id}").`,
         });
-        break;
       }
     }
   });
@@ -301,10 +309,7 @@ export function validatePlayability(scenario) {
       if (ringsTouch(footprints[i], footprints[j])) {
         problems.push({
           code: 'opposing-footprints-touch',
-          unitIndex: i,
-          unitId: typeof a.id === 'string' ? a.id : null,
-          unitName:
-            typeof a.name === 'string' && a.name.trim().length > 0 ? a.name.trim() : null,
+          ...unitRef(a, i),
           side: typeof a.side === 'string' ? a.side : null,
           otherUnitIndex: j,
           otherUnitId: typeof b.id === 'string' ? b.id : null,
@@ -402,6 +407,7 @@ export function startBattle(scenario, options = {}) {
   const rng = createRng(seed32);
   const draw = rng.next();
   const sides = scenario.sides;
+  // Structural validation (checked above) guarantees exactly two sides.
   const startingSide = draw < 0.5 ? sides[0].id : sides[1].id;
   const events = [
     {
@@ -416,13 +422,13 @@ export function startBattle(scenario, options = {}) {
     kind: BATTLE_KIND,
     scenario: cloneScenario(scenario),
     ruleset: { id: INSTALLED_RULESET_ID, version: INSTALLED_RULESET_VERSION },
-    parameters: JSON.parse(JSON.stringify(RULESET_PARAMETERS)),
+    parameters: cloneValue(RULESET_PARAMETERS),
     seed: seed32,
     rngState: rng.state,
     startingSide,
     controllers: normalizedControllers,
     round: STARTING_ROUND,
-    units: scenario.units.map((unit) => ({ ...cloneScenario(unit), cohesion: STEADY_COHESION })),
+    units: scenario.units.map((unit) => ({ ...cloneValue(unit), cohesion: STEADY_COHESION })),
     events,
   };
 }

@@ -96,14 +96,17 @@ describe('seeded random generator (engine-owned)', () => {
     assert.equal(normalizeSeed(-1), 4294967295);
     assert.equal(normalizeSeed('meadow'), normalizeSeed('meadow'));
     assert.ok(Number.isInteger(normalizeSeed('meadow')));
-    const drawn = normalizeSeed(undefined);
-    assert.ok(Number.isInteger(drawn) && drawn >= 0 && drawn <= 4294967295);
   });
 
-  it('rejects empty and non-numeric seeds', () => {
+  it('rejects empty and non-numeric seeds, and requires an explicit seed', () => {
     assert.throws(() => normalizeSeed(1.5), /integer or a string/);
     assert.throws(() => normalizeSeed('  '), /non-empty string/);
     assert.throws(() => normalizeSeed(null), /integer or a string/);
+    assert.throws(() => normalizeSeed(undefined), /requires a seed/);
+    assert.throws(
+      () => startBattle(freshPlayable(), { controllers: { 'side-a': 'human', 'side-b': 'random' } }),
+      /requires a seed/,
+    );
   });
 });
 
@@ -186,6 +189,44 @@ describe('playability validation', () => {
     assert.equal(problems[0].unitId, document.units[0].id);
     assert.match(problems[0].message, /First/);
     assert.match(problems[0].message, /lake-west/);
+  });
+
+  it('reports every water feature a footprint touches', () => {
+    const document = freshPlayable();
+    // Two disjoint lakes (sharing only an edge, so structurally valid) that
+    // both touch the same footprint: the left half and the right half.
+    document.terrainFeatures.push(
+      {
+        id: 'lake-west',
+        kind: 'ground',
+        category: 'water',
+        polygon: [
+          { x: 285, y: 580 },
+          { x: 300, y: 580 },
+          { x: 300, y: 610 },
+          { x: 285, y: 610 },
+        ],
+      },
+      {
+        id: 'lake-east',
+        kind: 'ground',
+        category: 'water',
+        polygon: [
+          { x: 300, y: 580 },
+          { x: 315, y: 580 },
+          { x: 315, y: 610 },
+          { x: 300, y: 610 },
+        ],
+      },
+    );
+    assert.deepEqual(validateScenario(document), []);
+    const problems = validatePlayability(document);
+    assert.equal(problems.length, 2);
+    assert.ok(problems.every((entry) => entry.code === 'footprint-in-water'));
+    assert.deepEqual(
+      problems.map((entry) => entry.message.match(/feature "([^"]+)"/)[1]).sort(),
+      ['lake-east', 'lake-west'],
+    );
   });
 
   it('refuses opposing footprints touching but allows friendly contact', () => {
