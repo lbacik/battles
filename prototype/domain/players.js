@@ -86,6 +86,54 @@ export function createPassivePlayer() {
   };
 }
 
+// --- Random player (test player) ----------------------------------------------
+// The Random test player of #8 item 4. In this slice only Hold exists, so
+// there is nothing to randomise yet: it commits no orders through the shared
+// contract exactly like the Passive player, and the engine alone decides
+// legality. Later slices give it real choices; the `kind` already records
+// which test player was chosen.
+export function createRandomPlayer() {
+  return {
+    kind: 'random',
+    async decide({ view, availableActions: actions, validate }) {
+      if (!isRecord(view) || !isRecord(actions) || typeof validate !== 'function') {
+        throw new Error('The Random player needs { view, availableActions, validate }.');
+      }
+      const submission = {
+        formatVersion: SUBMISSION_FORMAT_VERSION,
+        battleId: view.battleId,
+        turnNumber: view.turnNumber,
+        side: view.activeSide,
+        orders: [],
+      };
+      const result = validate(submission);
+      if (!result || result.ok !== true) {
+        throw new Error(
+          `The Random player's empty submission was refused: ${result?.message ?? 'no verdict'}.`,
+        );
+      }
+      return { type: 'commit', submission };
+    },
+  };
+}
+
+// Build the player for a battle controller name. `human` has no automated
+// player (the battle UI drafts the empty commit through the same contract),
+// while `random`, `passive`, and the generic ADR 0005 `automated` name all
+// resolve through the runner. Throws for an unknown controller.
+export function createPlayerForController(controller) {
+  const name = String(controller ?? '').toLowerCase();
+  if (name === 'passive' || name === 'automated') {
+    return createPassivePlayer();
+  }
+  if (name === 'random') {
+    return createRandomPlayer();
+  }
+  throw new Error(
+    `No automated player for controller "${controller}" (one of: random, passive, automated).`,
+  );
+}
+
 // --- Runner ------------------------------------------------------------------
 
 // Drive one turn: ask the active side's player for a decision and resolve it.

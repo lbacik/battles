@@ -1268,6 +1268,7 @@ function libraryEntryView(entry) {
       <div class="meta">revision ${entry.revision} · updated ${esc(entry.updatedAt)}</div></div>
       <div class="actions">
         <button class="btn-secondary" data-action="open" data-id="${safeId}">Open</button>
+        <button class="btn-primary" data-action="start-battle" data-id="${safeId}">Start battle</button>
         <button class="btn-secondary" data-action="duplicate" data-id="${safeId}">Duplicate</button>
         <button class="btn-secondary" data-action="export" data-id="${safeId}">Export</button>
         <button class="btn-quiet btn-danger" data-action="delete" data-id="${safeId}">Delete</button>
@@ -2072,6 +2073,7 @@ function editorView() {
       <button class="btn-tool" data-action="redo"${canRedo ? '' : ' disabled'} title="Redo (Shift+Ctrl/⌘+Z)">Redo</button>
       <button class="btn-secondary" data-action="export">Export</button>
       <button class="btn-primary" data-action="save">Save</button>
+      <button class="btn-primary" data-action="start-battle-editor"${isDirty() ? ' disabled title="Save before starting a battle."' : ''}>Start battle</button>
     </div>
     <main class="workspace">
       <aside class="left-panel">${leftPanelView(document)}</aside>
@@ -2862,6 +2864,22 @@ document.addEventListener('click', async (event) => {
   if (!element || element.disabled) return;
   const { action, id } = element.dataset;
   if (action === 'open') await openScenario(id);
+  // A battle starts from a saved scenario: the setup screen loads the stored
+  // document by id. From the editor the button is disabled while there are
+  // unsaved changes, and the guard below refuses the navigation as well.
+  if (action === 'start-battle') {
+    location.href = `battle.html?id=${encodeURIComponent(id)}`;
+    return;
+  }
+  if (action === 'start-battle-editor') {
+    if (isDirty()) {
+      toast('Save before starting a battle: the setup screen starts from the saved scenario.');
+      return;
+    }
+    if (!state.document) return;
+    location.href = `battle.html?id=${encodeURIComponent(state.document.id)}`;
+    return;
+  }
   if (action === 'undo') {
     undoEdit('[data-action="undo"]');
     return;
