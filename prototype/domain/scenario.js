@@ -31,6 +31,8 @@
 // path polyline plus width in metres).
 
 import {
+  clipPathToRect,
+  clipPolygonToRect,
   deriveFootprint,
   isSimplePolygon,
   locatePoint,
@@ -628,6 +630,114 @@ export function assertValidScenario(document) {
   if (errors.length > 0) {
     throw new Error(`Invalid scenario: ${errors.join('; ')}`);
   }
+}
+
+// Completeness warnings (non-blocking): a scenario can be structurally
+// valid yet incomplete — in this release, a side fielding no units. Warnings
+// never block saving; only the errors from validateScenario do. Pure.
+export function collectWarnings(document) {
+  const warnings = [];
+  if (!document || typeof document !== 'object') {
+    return warnings;
+  }
+  if (!Array.isArray(document.sides)) {
+    return warnings;
+  }
+  const units = Array.isArray(document.units) ? document.units : [];
+  for (const side of document.sides) {
+    const count = units.filter((unit) => unit && unit.side === side?.id).length;
+    if (count === 0) {
+      const name = isNonEmptyString(side?.name)
+        ? side.name.trim()
+        : String(side?.id ?? 'unknown');
+      warnings.push(`Side "${name}" has no units`);
+    }
+  }
+  return warnings;
+}
+
+// Clip one terrain feature to the given bounds. Returns the clipped feature,
+// or null when nothing of it survives (fully outside, or left degenerate:
+// fewer than three polygon points, no positive area, fewer than two path
+// points). Never mutates its input.
+export function clipTerrainFeatureToBounds(feature, width, height) {
+  if (!feature || typeof feature !== 'object') {
+    return null;
+  }
+  if (Array.isArray(feature.polygon)) {
+    const clipped = clipPolygonToRect(feature.polygon, width, height);
+    if (clipped.length < 3 || !(polygonArea(clipped) > 0)) {
+      return null;
+    }
+    return { ...feature, polygon: clipped };
+  }
+  if (Array.isArray(feature.path)) {
+    const clipped = clipPathToRect(feature.path, width, height);
+    if (clipped.length < 2) {
+      return null;
+    }
+    return { ...feature, path: clipped };
+  }
+  return { ...feature };
+}
+
+// Resize the battlefield of a scenario: growing keeps every feature, while
+// shrinking clips terrain geometry to the new bounds (features left fully
+// outside are dropped). Shrinking past a unit is refused — the error names
+// every unit whose footprint would fall outside — because unit positions are
+// never silently moved. Dimensions are rounded to 0.1 m and must stay
+// within the application limit. Returns a new document; the input is never
+// mutated. Throws when the dimensions are invalid or a unit would fall out.
+export function resizeBattlefield(document, width, height) {
+  if (!document || typeof document !== 'object') {
+    throw new Error('Cannot resize the battlefield: the scenario must be an object.');
+  }
+  const nextWidth = round1(Number(width));
+  const nextHeight = round1(Number(height));
+  for (const [value, dimension, limit] of [
+    [nextWidth, 'width', MAX_BATTLEFIELD_WIDTH_M],
+    [nextHeight, 'height', MAX_BATTLEFIELD_HEIGHT_M],
+  ]) {
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new Error(`Battlefield ${dimension} must be a positive number of metres.`);
+    }
+    if (value > limit) {
+      throw new Error(
+        `Battlefield ${dimension} must not exceed the application limit of ${limit} m.`,
+      );
+    }
+  }
+  const units = Array.isArray(document.units) ? document.units : [];
+  const outside = [];
+  units.forEach((unit, index) => {
+    if (!unit || typeof unit !== 'object') {
+      return;
+    }
+    if (
+      !Number.isFinite(unit.lateralInterval) ||
+      !Number.isFinite(unit.rankDepth) ||
+      !Number.isFinite(unit.position?.x) ||
+      !Number.isFinite(unit.position?.y) ||
+      !Number.isFinite(unit.facing)
+    ) {
+      return;
+    }
+    const footprint = deriveFootprint(unit);
+    if (!pointsWithinBounds(footprint.corners, nextWidth, nextHeight)) {
+      outside.push(unitLabel(unit, index));
+    }
+  });
+  if (outside.length > 0) {
+    throw new Error(
+      `Cannot shrink the battlefield: ${outside.join(', ')} would fall outside the new bounds.`,
+    );
+  }
+  const copy = cloneScenario(document);
+  copy.battlefield = { width: nextWidth, height: nextHeight };
+  copy.terrainFeatures = (copy.terrainFeatures || [])
+    .map((feature) => clipTerrainFeatureToBounds(feature, nextWidth, nextHeight))
+    .filter(Boolean);
+  return roundScenarioToTenth(copy);
 }
 
 export function isUuid(value) {

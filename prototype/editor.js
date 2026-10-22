@@ -8,6 +8,8 @@ import {
   MAX_BATTLEFIELD_HEIGHT_M,
   MAX_BATTLEFIELD_WIDTH_M,
   clampMapZoom,
+  cloneScenario,
+  collectWarnings,
   createScenario,
   deriveFootprint,
   exportScenario,
@@ -16,6 +18,7 @@ import {
   mapViewBox,
   niceScaleBarMetres,
   panMapViewByPixels,
+  resizeBattlefield,
   toScreenPoint,
   unitFacingDeg,
   unitFootprint,
@@ -36,10 +39,20 @@ const state = {
   library: [],
   view: 'library',
   document: null,
+  // The last saved version of the open scenario: the unsaved-changes
+  // indicator compares the working document against it. Timestamps are
+  // ignored by the comparison (saving refreshes them).
+  savedDocument: null,
   revision: null,
   status: '',
   statusError: false,
-  problems: [],
+  // Rejected form values, keyed by field: the value is never committed to
+  // the document, the field reverts, and the message is shown inline.
+  fieldErrors: {},
+  // Undo history for the editing session: snapshots of the document before
+  // each committed change. Unbounded, never saved, reset on every open.
+  // View navigation and selection are not recorded (the map has neither).
+  history: { past: [], future: [] },
   persistent: null,
   newTitle: '',
   mapView: null,
@@ -83,6 +96,202 @@ function setStatus(message, isError = false) {
     element.textContent = message;
     element.classList.toggle('error', isError);
   }
+}
+
+// --- Editing session ------------------------------------------------------
+// Every scenario change goes through commitEdit, which pushes the previous
+// document onto the undo stack and clears the redo stack. Undo and redo
+// restore whole-document snapshots, so every tool that plugs into
+// commitEdit later (terrain, units) is undoable with no extra work.
+
+function comparisonCopy(document) {
+  const copy = cloneScenario(document);
+  delete copy.updatedAt;
+  return copy;
+}
+
+function documentsMatch(left, right) {
+  if (!left || !right) {
+    return left === right;
+  }
+  return JSON.stringify(comparisonCopy(left)) === JSON.stringify(comparisonCopy(right));
+}
+
+// The scenario differs from the last saved version.
+function isDirty() {
+  return (
+    !!state.document && !!state.savedDocument && !documentsMatch(state.document, state.savedDocument)
+  );
+}
+
+function commitEdit(nextDocument, refocusSelector) {
+  if (!state.document) {
+    return;
+  }
+  state.fieldErrors = {};
+  if (documentsMatch(nextDocument, state.document)) {
+    render();
+    return;
+  }
+  state.history.past.push(cloneScenario(state.document));
+  state.history.future = [];
+  state.document = nextDocument;
+  state.status = '';
+  state.statusError = false;
+  render(refocusSelector);
+}
+
+function undoEdit(refocusSelector) {
+  if (!state.document || state.history.past.length === 0) {
+    return;
+  }
+  state.history.future.push(cloneScenario(state.document));
+  state.document = state.history.past.pop();
+  state.fieldErrors = {};
+  // Undoing back to the saved version clears the transient message so the
+  // header falls back to the saved state; anything else stays marked dirty.
+  state.status = isDirty() ? 'Undone.' : '';
+  state.statusError = false;
+  render(refocusSelector);
+}
+
+function redoEdit(refocusSelector) {
+  if (!state.document || state.history.future.length === 0) {
+    return;
+  }
+  state.history.past.push(cloneScenario(state.document));
+  state.document = state.history.future.pop();
+  state.fieldErrors = {};
+  state.status = isDirty() ? 'Redone.' : '';
+  state.statusError = false;
+  render(refocusSelector);
+}
+
+// Reject a form value: it is never committed, the field reverts on render,
+// and the reason is shown in the status line and under the field.
+function failCommit(field, message) {
+  state.fieldErrors = { [field]: message };
+  state.status = message;
+  state.statusError = true;
+  render();
+}
+
+function defaultStatus() {
+  if (!state.document || isDirty()) {
+    return '';
+  }
+  return state.revision === null ? '' : `Saved · rev. ${state.revision}`;
+}
+
+// --- Field commits (invalid values never reach the document) --------------
+
+function commitTitle(raw) {
+  const value = String(raw ?? '');
+  if (!value.trim()) {
+    failCommit('title', 'Scenario title is required.');
+    return;
+  }
+  if (value.trim() === state.document.title) {
+    state.fieldErrors = {};
+    render();
+    return;
+  }
+  const next = cloneScenario(state.document);
+  next.title = value.trim();
+  commitEdit(next);
+}
+
+function commitDescription(raw) {
+  const value = String(raw ?? '');
+  if (value === (state.document.description || '')) {
+    state.fieldErrors = {};
+    render();
+    return;
+  }
+  const next = cloneScenario(state.document);
+  next.description = value;
+  commitEdit(next);
+}
+
+function commitDimension(dimension, raw) {
+  if (String(raw ?? '').trim() === '' || !Number.isFinite(Number(raw))) {
+    failCommit(dimension, `Battlefield ${dimension} must be a number of metres.`);
+    return;
+  }
+  let next;
+  try {
+    next = resizeBattlefield(
+      state.document,
+      dimension === 'width' ? Number(raw) : state.document.battlefield.width,
+      dimension === 'height' ? Number(raw) : state.document.battlefield.height,
+    );
+  } catch (error) {
+    failCommit(dimension, error.message);
+    return;
+  }
+  commitEdit(next, `[data-field="${dimension}"]`);
+}
+
+function commitSideName(index, raw) {
+  const field = `side-name-${index}`;
+  const side = state.document.sides[index];
+  if (!side) {
+    return;
+  }
+  const value = String(raw ?? '');
+  if (!value.trim()) {
+    failCommit(field, `Side ${index + 1} name is required.`);
+    return;
+  }
+  const other = state.document.sides.find((_, otherIndex) => otherIndex !== index);
+  if (other && value.trim().toLowerCase() === String(other.name || '').trim().toLowerCase()) {
+    failCommit(field, 'Side names must be unique.');
+    return;
+  }
+  if (value.trim() === side.name) {
+    state.fieldErrors = {};
+    render();
+    return;
+  }
+  const next = cloneScenario(state.document);
+  next.sides[index].name = value.trim();
+  commitEdit(next);
+}
+
+function commitSideColor(index, raw) {
+  const field = `side-color-${index}`;
+  const side = state.document.sides[index];
+  if (!side) {
+    return;
+  }
+  const value = String(raw || '').toLowerCase();
+  const other = state.document.sides.find((_, otherIndex) => otherIndex !== index);
+  if (other && value === String(other.color || '').toLowerCase()) {
+    failCommit(field, 'Sides must have distinct colours.');
+    return;
+  }
+  if (value === String(side.color || '').toLowerCase()) {
+    state.fieldErrors = {};
+    render();
+    return;
+  }
+  const next = cloneScenario(state.document);
+  next.sides[index].color = value;
+  commitEdit(next, `[data-field="side-color"][data-index="${index}"]`);
+}
+
+function committedFieldValue(input) {
+  const index = Number(input.dataset.index);
+  if (input.dataset.field === 'title') {
+    return state.document.title;
+  }
+  if (input.dataset.field === 'description') {
+    return state.document.description || '';
+  }
+  if (input.dataset.field === 'side-name') {
+    return state.document.sides[index]?.name ?? '';
+  }
+  return input.value;
 }
 
 // --- Map rendering (ADR 0001) -------------------------------------------
@@ -397,18 +606,18 @@ function orderOfBattleView(document) {
 
 function inspectorView(document) {
   const size = document.battlefield;
+  const errors = validateScenario(document);
+  const warnings = collectWarnings(document);
+  const issueCount = errors.length + warnings.length;
+  const fieldError = (name) =>
+    state.fieldErrors[name] ? `<p class="field-error" role="alert">${esc(state.fieldErrors[name])}</p>` : '';
+  const invalid = (name) => (state.fieldErrors[name] ? ' aria-invalid="true"' : '');
   return `<div class="panel"><span class="eyebrow">SCENARIO INSPECTOR</span><h2>Scenario</h2>
-    ${state.problems.length ? `<p class="validation">${state.problems.map(esc).join('<br>')}</p>` : ''}
-    <dl>
-      <div class="kv"><dt>Identifier</dt><dd class="mono">${esc(document.id)}</dd></div>
-      <div class="kv"><dt>Format</dt><dd>${esc(document.kind)} · v${esc(document.formatVersion)}</dd></div>
-      <div class="kv"><dt>Ruleset</dt><dd class="mono">${esc(document.ruleset.id)} ${esc(document.ruleset.version)}</dd></div>
-      <div class="kv"><dt>Revision</dt><dd>${state.revision === null ? 'unsaved' : `rev. ${state.revision}`}</dd></div>
-      <div class="kv"><dt>Updated</dt><dd>${esc(document.updatedAt)}</dd></div>
-    </dl>
+    <label class="field">Title (required)<input data-field="title" value="${esc(document.title)}" maxlength="120"${invalid('title')}></label>
+    ${fieldError('title')}
     <div class="field-pair">
-      <label class="field">Width (m)<input type="number" data-field="width" min="1" max="${MAX_BATTLEFIELD_WIDTH_M}" value="${esc(size.width)}"></label>
-      <label class="field">Height (m)<input type="number" data-field="height" min="1" max="${MAX_BATTLEFIELD_HEIGHT_M}" value="${esc(size.height)}"></label>
+      <div><label class="field">Width (m)<input type="number" data-field="width" min="1" max="${MAX_BATTLEFIELD_WIDTH_M}" step="0.1" value="${esc(size.width)}"${invalid('width')}></label>${fieldError('width')}</div>
+      <div><label class="field">Height (m)<input type="number" data-field="height" min="1" max="${MAX_BATTLEFIELD_HEIGHT_M}" step="0.1" value="${esc(size.height)}"${invalid('height')}></label>${fieldError('height')}</div>
     </div>
     <label class="field">Description<textarea data-field="description" rows="3" maxlength="2000" placeholder="Optional plain-text description">${esc(document.description || '')}</textarea></label>
     <div class="kv"><dt>Forces</dt><dd>${(document.units || []).length} units</dd></div>
@@ -416,11 +625,25 @@ function inspectorView(document) {
     ${document.sides
       .map(
         (side, index) => `<div class="field-pair">
-        <label class="field">Side ${index + 1} name<input data-field="side-name" data-index="${index}" value="${esc(side.name)}" maxlength="60"></label>
-        <label class="field">Colour<input type="color" data-field="side-color" data-index="${index}" value="${esc(side.color)}"></label>
+        <div><label class="field">Side ${index + 1} name<input data-field="side-name" data-index="${index}" value="${esc(side.name)}" maxlength="60"${invalid(`side-name-${index}`)}></label>${fieldError(`side-name-${index}`)}</div>
+        <div><label class="field">Colour<input type="color" data-field="side-color" data-index="${index}" value="${esc(side.color)}"${invalid(`side-color-${index}`)}></label>${fieldError(`side-color-${index}`)}</div>
       </div>`,
       )
       .join('')}
+    <p class="readonly-note">Two sides, always: sides cannot be added or removed.</p>
+    <section class="issues" aria-label="Issues">
+      <h3>Issues${issueCount ? ` <span class="issue-count">${issueCount}</span>` : ''}</h3>
+      ${errors.map((problem) => `<p class="issue issue-error">${esc(problem)}</p>`).join('')}
+      ${warnings.map((warning) => `<p class="issue issue-warning">${esc(warning)}</p>`).join('')}
+      ${issueCount === 0 ? '<p class="issues-empty">No issues.</p>' : '<p class="issues-note">Warnings never block saving; errors must be fixed before saving.</p>'}
+    </section>
+    <dl>
+      <div class="kv"><dt>Identifier</dt><dd class="mono">${esc(document.id)}</dd></div>
+      <div class="kv"><dt>Format</dt><dd>${esc(document.kind)} · v${esc(document.formatVersion)}</dd></div>
+      <div class="kv"><dt>Ruleset</dt><dd class="mono">${esc(document.ruleset.id)} ${esc(document.ruleset.version)}</dd></div>
+      <div class="kv"><dt>Revision</dt><dd>${state.revision === null ? 'unsaved' : `rev. ${state.revision}`}</dd></div>
+      <div class="kv"><dt>Updated</dt><dd>${esc(document.updatedAt)}</dd></div>
+    </dl>
   </div>`;
 }
 
@@ -462,11 +685,16 @@ function editorView() {
   const document = state.document;
   const { width, height } = document.battlefield;
   ensureMapView(document);
+  const canUndo = state.history.past.length > 0;
+  const canRedo = state.history.future.length > 0;
   return `<div class="editor-head">
       <button class="btn-quiet" data-action="back">← Library</button>
-      <input data-field="title" value="${esc(document.title)}" maxlength="120" aria-label="Scenario title">
+      <span class="doc-title">${esc(document.title)}</span>
       <span class="spacer"></span>
-      <span class="status${state.statusError ? ' error' : ''}">${esc(state.status)}</span>
+      ${isDirty() ? '<span class="dirty-pill" title="The scenario differs from the saved version."><span class="dirty-dot" aria-hidden="true"></span>Unsaved changes</span>' : ''}
+      <span class="status${state.statusError ? ' error' : ''}">${esc(state.status || defaultStatus())}</span>
+      <button class="btn-tool" data-action="undo"${canUndo ? '' : ' disabled'} title="Undo (Ctrl/⌘+Z)">Undo</button>
+      <button class="btn-tool" data-action="redo"${canRedo ? '' : ' disabled'} title="Redo (Shift+Ctrl/⌘+Z)">Redo</button>
       <button class="btn-secondary" data-action="export">Export</button>
       <button class="btn-primary" data-action="save">Save</button>
     </div>
@@ -488,8 +716,11 @@ function editorView() {
     </main>`;
 }
 
-function render() {
+function render(refocusSelector) {
   $('#app').innerHTML = state.view === 'editor' ? editorView() : libraryView();
+  if (refocusSelector) {
+    document.querySelector(refocusSelector)?.focus();
+  }
   if (state.view === 'library') {
     const input = $('input[name="title"]');
     input?.addEventListener('input', () => {
@@ -519,8 +750,12 @@ async function openScenario(id) {
   }
   const entry = (await state.store.list()).find((item) => item.id === id);
   state.document = document;
+  // A reopened scenario starts with a clean slate: the saved version for
+  // the unsaved-changes indicator and an empty undo history.
+  state.savedDocument = cloneScenario(document);
   state.revision = entry ? entry.revision : null;
-  state.problems = [];
+  state.history = { past: [], future: [] };
+  state.fieldErrors = {};
   state.view = 'editor';
   // Fresh camera on the new battlefield; keep the author's grid/tool preference.
   state.mapView = {
@@ -649,8 +884,10 @@ function setStatusAfterRender(message) {
 }
 
 async function saveScenario() {
-  state.problems = validateScenario(state.document);
-  if (state.problems.length) {
+  // Structural errors block saving; completeness warnings (the issues
+  // panel) never do: a scenario with warnings still saves.
+  const errors = validateScenario(state.document);
+  if (errors.length) {
     state.status = 'Cannot save: fix the highlighted problems.';
     state.statusError = true;
     render();
@@ -659,8 +896,9 @@ async function saveScenario() {
   try {
     const metadata = await state.store.save(state.document);
     state.document = await state.store.load(metadata.id);
+    state.savedDocument = cloneScenario(state.document);
     state.revision = metadata.revision;
-    state.problems = [];
+    state.fieldErrors = {};
     state.status = `Saved · rev. ${metadata.revision} · ${new Date(metadata.updatedAt).toLocaleTimeString('en')}`;
     state.statusError = false;
     render();
@@ -719,9 +957,25 @@ document.addEventListener('click', async (event) => {
   if (!element || element.disabled) return;
   const { action, id } = element.dataset;
   if (action === 'open') await openScenario(id);
+  if (action === 'undo') {
+    undoEdit('[data-action="undo"]');
+    return;
+  }
+  if (action === 'redo') {
+    redoEdit('[data-action="redo"]');
+    return;
+  }
   if (action === 'back') {
+    if (isDirty() && !window.confirm('You have unsaved changes. Leave the editor without saving?')) {
+      return;
+    }
     state.view = 'library';
     state.document = null;
+    state.savedDocument = null;
+    state.history = { past: [], future: [] };
+    state.fieldErrors = {};
+    state.status = '';
+    state.statusError = false;
     await refreshLibrary();
     render();
   }
@@ -753,31 +1007,9 @@ document.addEventListener('submit', async (event) => {
   }
 });
 
-document.addEventListener('input', (event) => {
-  const field = event.target.dataset?.field;
-  if (!field || !state.document) return;
-  if (field === 'title') {
-    state.document.title = event.target.value;
-    state.status = state.document.title.trim() ? 'Unsaved changes' : 'Title is required';
-    state.statusError = !state.document.title.trim();
-    const statusElement = $('.status');
-    if (statusElement) {
-      statusElement.textContent = state.status;
-      statusElement.classList.toggle('error', state.statusError);
-    }
-  }
-  if (field === 'description') {
-    state.document.description = event.target.value;
-    state.status = 'Unsaved changes';
-    state.statusError = false;
-    const statusElement = $('.status');
-    if (statusElement) {
-      statusElement.textContent = state.status;
-      statusElement.classList.toggle('error', false);
-    }
-  }
-});
-
+// Form values commit on change (blur, Enter, picker close): typing never
+// touches the document, so every committed change is one undo step and an
+// invalid value can be refused before it lands.
 document.addEventListener('change', (event) => {
   if (event.target && event.target.id === 'import-file') {
     const [file] = event.target.files || [];
@@ -786,33 +1018,72 @@ document.addEventListener('change', (event) => {
     }
     return;
   }
+  if (state.view !== 'editor' || !state.document) {
+    return;
+  }
   const field = event.target.dataset?.field;
-  if (!field || !state.document) return;
+  if (!field) {
+    return;
+  }
+  if (field === 'title') {
+    commitTitle(event.target.value);
+  }
+  if (field === 'description') {
+    commitDescription(event.target.value);
+  }
   if (field === 'width' || field === 'height') {
-    state.document.battlefield[field] = Math.round(Number(event.target.value) * 10) / 10;
-    state.problems = validateScenario(state.document).filter((problem) =>
-      problem.includes(`battlefield.${field}`),
-    );
-    state.status = 'Unsaved changes';
-    state.statusError = false;
-    render();
+    commitDimension(field, event.target.value);
   }
   if (field === 'side-name') {
-    const side = state.document.sides[Number(event.target.dataset.index)];
-    if (side) {
-      side.name = event.target.value;
-      state.problems = validateScenario(state.document);
-      render();
-    }
+    commitSideName(Number(event.target.dataset.index), event.target.value);
   }
   if (field === 'side-color') {
-    const side = state.document.sides[Number(event.target.dataset.index)];
-    if (side) {
-      side.color = event.target.value;
-      state.status = 'Unsaved changes';
-      state.statusError = false;
-      render();
+    commitSideColor(Number(event.target.dataset.index), event.target.value);
+  }
+});
+
+document.addEventListener('keydown', (event) => {
+  if (state.view !== 'editor' || !state.document) {
+    return;
+  }
+  const target = event.target;
+  const field = target?.dataset?.field;
+  // Text fields commit on Enter (via blur) and revert on Escape. Typing
+  // itself stays a draft: it is not a scenario change and is not undoable.
+  // (Enter in the description keeps its newline, so only Escape applies.)
+  if (
+    (field === 'title' || field === 'side-name' || field === 'description') &&
+    !event.ctrlKey &&
+    !event.metaKey
+  ) {
+    if (event.key === 'Enter' && field !== 'description') {
+      event.preventDefault();
+      target.blur();
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      target.value = committedFieldValue(target);
+      target.blur();
     }
+  }
+  // Unlimited session undo/redo. Native text undo keeps working inside
+  // text fields and textareas; everywhere else the shortcut is the
+  // scenario history, which never includes view or selection state.
+  const modifier = event.ctrlKey || event.metaKey;
+  if (!modifier || event.altKey) {
+    return;
+  }
+  const key = String(event.key || '').toLowerCase();
+  const tag = target?.tagName;
+  const inTextField =
+    tag === 'TEXTAREA' ||
+    (tag === 'INPUT' && (target.type === 'text' || target.type === 'search')) ||
+    !!target?.isContentEditable;
+  if (key === 'z' && !event.shiftKey && !inTextField) {
+    event.preventDefault();
+    undoEdit();
+  } else if ((key === 'y' || (key === 'z' && event.shiftKey)) && !inTextField) {
+    event.preventDefault();
+    redoEdit();
   }
 });
 
@@ -871,6 +1142,14 @@ window.addEventListener('resize', () => {
 
 async function init() {
   const params = new URLSearchParams(location.search);
+  // Leaving (reload, close, navigate) with unsaved changes asks for
+  // confirmation; the in-editor back button confirms on its own.
+  window.addEventListener('beforeunload', (event) => {
+    if (state.view === 'editor' && isDirty()) {
+      event.preventDefault();
+      event.returnValue = '';
+    }
+  });
   state.persistent = await ensurePersistentStorage();
   await refreshLibrary();
   if (params.get('id')) {

@@ -2,6 +2,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  clipPathToRect,
+  clipPolygonToRect,
+  dedupePoints,
   deriveFootprint,
   isSimplePolygon,
   locatePoint,
@@ -170,5 +173,96 @@ describe('polygon predicates', () => {
     assert.equal(pointsWithinBounds([{ x: 0, y: 0 }, { x: 100, y: 50 }], 100, 50), true);
     assert.equal(pointsWithinBounds([{ x: -0.5, y: 0 }], 100, 50), false);
     assert.equal(pointsWithinBounds([{ x: 100.5, y: 0 }], 100, 50), false);
+  });
+});
+
+describe('dedupePoints', () => {
+  it('removes consecutive duplicates and a repeated closing point', () => {
+    assert.deepEqual(
+      dedupePoints([
+        { x: 0, y: 0 },
+        { x: 0, y: 0 },
+        { x: 10, y: 0 },
+        { x: 10, y: 10 },
+        { x: 0, y: 0 },
+      ]),
+      [
+        { x: 0, y: 0 },
+        { x: 10, y: 0 },
+        { x: 10, y: 10 },
+      ],
+    );
+  });
+});
+
+describe('clipPolygonToRect', () => {
+  const rect = (x, y, w, h) => [
+    { x, y },
+    { x: x + w, y },
+    { x: x + w, y: y + h },
+    { x, y: y + h },
+  ];
+
+  it('keeps a fully inside polygon unchanged', () => {
+    const ring = rect(100, 100, 50, 40);
+    assert.deepEqual(clipPolygonToRect(ring, 1200, 800), ring);
+  });
+
+  it('clips a partially overlapping polygon to the bounds', () => {
+    const clipped = clipPolygonToRect(rect(-50, 100, 200, 100), 1200, 800);
+    assert.deepEqual(clipped, rect(0, 100, 150, 100));
+    assert.ok(
+      clipped.every((point) => point.x >= 0 && point.x <= 1200 && point.y >= 0 && point.y <= 800),
+    );
+  });
+
+  it('returns an empty ring for a fully outside polygon', () => {
+    assert.deepEqual(clipPolygonToRect(rect(5000, 5000, 50, 50), 1200, 800), []);
+  });
+
+  it('keeps the clipped polygon simple with a positive area', () => {
+    const clipped = clipPolygonToRect(rect(1100, 700, 200, 200), 1200, 800);
+    assert.ok(clipped.length >= 3);
+    assert.ok(polygonArea(clipped) > 0);
+    assert.equal(isSimplePolygon(clipped), true);
+  });
+});
+
+describe('clipPathToRect', () => {
+  it('clamps path points into the bounds', () => {
+    assert.deepEqual(
+      clipPathToRect(
+        [
+          { x: -10, y: 100 },
+          { x: 600, y: 900 },
+          { x: 1300, y: 400 },
+        ],
+        1200,
+        800,
+      ),
+      [
+        { x: 0, y: 100 },
+        { x: 600, y: 800 },
+        { x: 1200, y: 400 },
+      ],
+    );
+  });
+
+  it('collapses points that clamp onto each other', () => {
+    assert.deepEqual(
+      clipPathToRect(
+        [
+          { x: -5, y: -5 },
+          { x: -1, y: -1 },
+          { x: 100, y: 100 },
+        ],
+        1200,
+        800,
+      ),
+      [
+        { x: 0, y: 0 },
+        { x: 100, y: 100 },
+      ],
+    );
   });
 });

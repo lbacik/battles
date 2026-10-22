@@ -82,7 +82,11 @@ left, map in the centre, inspector on the right). No dependencies, no build step
   in-memory implementation for tests.
 - `prototype/library/idb.js` — the IndexedDB implementation used by the editor.
 - `prototype/editor.html` — the application: library → new scenario → empty
-  battlefield → save → reload → reopen. Viewports narrower than 1280 px show a
+  battlefield → save → reload → reopen. The inspector edits the title,
+  description, battlefield size (shrinking clips terrain to the new bounds),
+  and both sides; every change is undoable within the session, unsaved
+  changes are marked, and the issues panel warns when a side fields no
+  units. Viewports narrower than 1280 px show a
   notice instead of a broken layout.
 - `prototype/e2e.html` — browser end-to-end test: create → save → reload →
   reopen against a separate IndexedDB test database.

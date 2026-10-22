@@ -290,3 +290,110 @@ export function pointsWithinBounds(points, width, height) {
       point.y <= height + EPS,
   );
 }
+
+// --- Clipping to the battlefield bounds ------------------------------------
+// Used when the battlefield shrinks: terrain geometry overlapping the new
+// bounds is clipped to them instead of refusing the resize. Clipping every
+// feature to the same rectangle preserves containment, so nested elevation
+// stays nested and disjoint ground cover stays disjoint. Features left empty
+// or degenerate by the clip are dropped by the caller.
+
+// Remove consecutive duplicate points (and a repeated closing point) so
+// clipped rings stay simple. Exported for the scenario layer, which drops
+// features left degenerate by the clip.
+export function dedupePoints(points) {
+  const clean = [];
+  for (const point of points) {
+    const last = clean[clean.length - 1];
+    if (
+      !last ||
+      Math.abs(last.x - point.x) > EPS ||
+      Math.abs(last.y - point.y) > EPS
+    ) {
+      clean.push({ x: point.x, y: point.y });
+    }
+  }
+  if (clean.length > 1) {
+    const [first] = clean;
+    const last = clean[clean.length - 1];
+    if (Math.abs(first.x - last.x) <= EPS && Math.abs(first.y - last.y) <= EPS) {
+      clean.pop();
+    }
+  }
+  return clean;
+}
+
+// Clip a polygon ring to the rectangle [0, width] x [0, height] with the
+// Sutherland-Hodgman algorithm. A fully outside ring clips to an empty ring;
+// a fully inside ring keeps its vertices. The rectangle is convex, so the
+// clip of a simple ring stays simple.
+export function clipPolygonToRect(ring, width, height) {
+  if (!Array.isArray(ring) || ring.length === 0) {
+    return [];
+  }
+  const bounds = [
+    {
+      inside: (point) => point.x >= 0,
+      cross: (a, b) => ({ x: 0, y: a.y + ((b.y - a.y) * (0 - a.x)) / (b.x - a.x) }),
+    },
+    {
+      inside: (point) => point.x <= width,
+      cross: (a, b) => ({
+        x: width,
+        y: a.y + ((b.y - a.y) * (width - a.x)) / (b.x - a.x),
+      }),
+    },
+    {
+      inside: (point) => point.y >= 0,
+      cross: (a, b) => ({ x: a.x + ((b.x - a.x) * (0 - a.y)) / (b.y - a.y), y: 0 }),
+    },
+    {
+      inside: (point) => point.y <= height,
+      cross: (a, b) => ({
+        x: a.x + ((b.x - a.x) * (height - a.y)) / (b.y - a.y),
+        y: height,
+      }),
+    },
+  ];
+  let output = ring.map((point) => ({ x: point.x, y: point.y }));
+  for (const bound of bounds) {
+    const input = output;
+    output = [];
+    if (input.length === 0) {
+      break;
+    }
+    let start = input[input.length - 1];
+    for (const end of input) {
+      const endInside = bound.inside(end);
+      const startInside = bound.inside(start);
+      if (endInside) {
+        if (!startInside) {
+          output.push(bound.cross(start, end));
+        }
+        output.push(end);
+      } else if (startInside) {
+        output.push(bound.cross(start, end));
+      }
+      start = end;
+    }
+  }
+  return dedupePoints(output);
+}
+
+// Clamp a polyline path into the rectangle [0, width] x [0, height].
+// Clamping (rather than splitting at the boundary) keeps the feature a
+// single path: a stretch running outside and back follows the boundary.
+// Points collapsing onto each other are removed; the caller drops a path
+// left with fewer than two points.
+export function clipPathToRect(path, width, height) {
+  if (!Array.isArray(path) || path.length === 0) {
+    return [];
+  }
+  const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+  return dedupePoints(
+    path.map((point) => ({
+      x: clamp(point.x, 0, width),
+      y: clamp(point.y, 0, height),
+    })),
+  );
+}
