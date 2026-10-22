@@ -186,8 +186,9 @@ async function phaseUnitPlacement() {
   if (!(after.frontage > before.frontage && after.depth > before.depth)) {
     throw new Error('spacing preset change did not reshape the footprint');
   }
-  // Rotation to 30 degrees through the same proposal the handle drag uses.
-  const rotated = proposeUnitPatch(document, peltasts.id, { facing: 30 });
+  // Rotation through the same proposal the handle drag uses: the snapped
+  // handle value for a 33° pointer angle is 30°.
+  const rotated = proposeUnitPatch(document, peltasts.id, { facing: snapFacing(33) });
   if (!rotated.ok || rotated.document.units.find((unit) => unit.id === peltasts.id).facing !== 30) {
     throw new Error('rotation to 30 degrees was refused on open ground');
   }
@@ -207,6 +208,7 @@ async function phaseUnitPlacement() {
   );
 
   logStep('acceptance step 6: overlapping drops are refused, touching is accepted', 'running');
+  const droppedSnapshot = JSON.stringify(document);
   const overlapped = proposeUnitPatch(document, peltasts.id, { position: { ...taxis.position } });
   if (overlapped.ok) {
     throw new Error('dropping a unit onto another was accepted');
@@ -214,12 +216,24 @@ async function phaseUnitPlacement() {
   if (!overlapped.conflictIds.includes(taxis.id) || !overlapped.conflictIds.includes(peltasts.id)) {
     throw new Error('refused drop does not highlight both units');
   }
+  if (JSON.stringify(document) !== droppedSnapshot) {
+    throw new Error('a refused drop mutated the document');
+  }
   // Edge to edge: the peltasts (18 m frontage) east of the taxis (16 m).
   const touching = proposeUnitPatch(document, peltasts.id, {
     position: { x: taxis.position.x + (16 + 18) / 2, y: taxis.position.y },
   });
   if (!touching.ok) {
     throw new Error(`touching edge to edge was refused: ${touching.errors.join('; ')}`);
+  }
+  for (const unit of document.units) {
+    if (unit.id === peltasts.id) {
+      continue;
+    }
+    const kept = touching.document.units.find((entry) => entry.id === unit.id);
+    if (JSON.stringify(kept) !== JSON.stringify(unit)) {
+      throw new Error(`a successful patch touched uninvolved unit "${unit.name}"`);
+    }
   }
   // Selection uses the real footprint: inside hits, empty ground misses.
   if (pickUnitIdAtPoint(document, { x: 500, y: 608 }, 0) !== taxis.id) {

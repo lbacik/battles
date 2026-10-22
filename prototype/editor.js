@@ -754,27 +754,34 @@ function commitUnitField(unitId, field, raw) {
   }
 }
 
-// Commit a map drag or rotation handle move. A refused drop or rotation is
-// never committed: the unit returns to its stored values and every unit the
-// refused placement would conflict with is highlighted. Every committed move
-// goes through commitEdit, so placement and rotation are undoable like any
-// other scenario change.
-function commitUnitGeometry(unitId, patch) {
+// Propose a geometry change (map drag, rotation handle, or inspector field)
+// through proposeUnitPatch. A refused change is never committed: the unit
+// returns to its stored values and every unit the refused placement would
+// conflict with is highlighted. Every committed change goes through
+// commitEdit, so placement and rotation are undoable like any other scenario
+// change. Returns true when the proposal was committed.
+function commitGeometryProposal(unitId, patch, options = {}) {
   if (!state.document) {
-    return;
-  }
-  const unit = unitById(state.document, unitId);
-  if (!unit) {
-    return;
+    return false;
   }
   const proposal = proposeUnitPatch(state.document, unitId, patch);
   if (!proposal.ok) {
     const field = patch.position !== undefined ? `unit-position-${unitId}` : `unit-facing-${unitId}`;
-    failUnitCommit(field, proposal.errors[0] || 'This placement is not allowed.', proposal.conflictIds);
-    toast(proposal.errors[0] || 'This placement is not allowed.');
-    return;
+    const message = proposal.errors[0] || 'This placement is not allowed.';
+    failUnitCommit(field, message, proposal.conflictIds);
+    if (options.announceRefusal) {
+      toast(message);
+    }
+    return false;
   }
-  commitEdit(proposal.document);
+  commitEdit(proposal.document, options.refocus || undefined);
+  return true;
+}
+
+// Commit a map drag or rotation handle move, announcing a refusal with a
+// toast as well as the field error and conflict highlight.
+function commitUnitGeometry(unitId, patch) {
+  return commitGeometryProposal(unitId, patch, { announceRefusal: true });
 }
 
 function commitUnitPreset(unitId, presetKey) {
@@ -2215,13 +2222,14 @@ function bindMap() {
     if (event.button !== 0 || !state.document || state.mapView.tool !== 'select') return;
     const handle = event.target?.closest?.('[data-rotate-handle]');
     const handleId = handle?.dataset?.rotateHandle;
-    if (handleId && unitById(state.document, handleId)?.position) {
+    const handleUnit = handleId ? unitById(state.document, handleId) : null;
+    if (handleUnit?.position) {
       event.preventDefault();
       activePointerDrag = {
         kind: 'rotate',
-        unitId: handleId,
+        unitId: handleUnit.id,
         startClient: { clientX: event.clientX, clientY: event.clientY },
-        origin: { ...unitById(state.document, handleId).position },
+        origin: { ...handleUnit.position },
         moved: false,
         previewFacing: undefined,
       };
@@ -2231,14 +2239,15 @@ function bindMap() {
     const cursor = svgToMap(svg, event.clientX, event.clientY);
     if (!cursor) return;
     const picked = pickUnitIdAtPoint(state.document, cursor, currentMpp() * UNIT_PICK_TOLERANCE_PX);
-    if (!picked || !unitById(state.document, picked)?.position) return;
+    const pickedUnit = picked ? unitById(state.document, picked) : null;
+    if (!pickedUnit?.position) return;
     event.preventDefault();
     activePointerDrag = {
       kind: 'move',
-      unitId: picked,
+      unitId: pickedUnit.id,
       startClient: { clientX: event.clientX, clientY: event.clientY },
       startMap: cursor,
-      origin: { ...unitById(state.document, picked).position },
+      origin: { ...pickedUnit.position },
       moved: false,
       preview: undefined,
     };

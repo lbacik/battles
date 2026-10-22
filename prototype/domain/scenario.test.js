@@ -21,6 +21,7 @@ import {
   clampMapZoom,
   cloneScenario,
   collectWarnings,
+  createHistory,
   createScenario,
   defaultFacingForSide,
   exportScenario,
@@ -30,6 +31,9 @@ import {
   footprintHitTest,
   fromScreenPoint,
   generateId,
+  historyCommit,
+  historyRedo,
+  historyUndo,
   importScenarioDocument,
   isProvisionalRuleset,
   isProvisionalRulesetVersion,
@@ -1141,5 +1145,40 @@ describe('unit placement and rotation on the map', () => {
     assert.equal(blockers[0].index, 0);
     assert.deepEqual(unitsBlockingResize(document, 1400, 900), []);
     assert.deepEqual(unitsBlockingResize(document, 0, 800), []);
+  });
+
+  it('skips units without an id when picking', () => {
+    const document = freshDocument();
+    document.units.push(placed({ id: undefined, name: 'Ghost' }));
+    document.units.push(placed({ name: 'Lower' }));
+    const [, lower] = document.units;
+    assert.equal(pickUnitIdAtPoint(document, { x: 600, y: 395 }, 0), lower.id);
+    const ghostsOnly = freshDocument();
+    ghostsOnly.units.push(placed({ id: undefined, name: 'Ghost' }));
+    assert.equal(pickUnitIdAtPoint(ghostsOnly, { x: 600, y: 395 }, 0), null);
+  });
+
+  it('round-trips a placement patch through commit, undo, and redo', () => {
+    const before = freshDocument();
+    before.units.push(placed({ name: 'First' }));
+    const proposal = proposeUnitPatch(before, before.units[0].id, { position: { x: 620, y: 400 } });
+    assert.equal(proposal.ok, true);
+    let history = createHistory();
+    history = historyCommit(history, cloneScenario(before));
+    let current = proposal.document;
+    assert.deepEqual(current.units[0].position, { x: 620, y: 400 });
+    const undone = historyUndo(history, cloneScenario(current));
+    assert.ok(undone, 'expected an undo step');
+    history = undone.history;
+    current = undone.document;
+    assert.deepEqual(current.units[0].position, { x: 600, y: 400 });
+    const redone = historyRedo(history, cloneScenario(current));
+    assert.ok(redone, 'expected a redo step');
+    current = redone.document;
+    assert.deepEqual(current.units[0].position, { x: 620, y: 400 });
+    const undoneAgain = historyUndo(redone.history, cloneScenario(current));
+    assert.ok(undoneAgain, 'expected undo to be available after redo');
+    assert.deepEqual(undoneAgain.document.units[0].position, { x: 600, y: 400 });
+    assert.equal(historyUndo(createHistory(), cloneScenario(current)), null);
   });
 });
