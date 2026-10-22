@@ -299,8 +299,8 @@ export function pointsWithinBounds(points, width, height) {
 // or degenerate by the clip are dropped by the caller.
 
 // Remove consecutive duplicate points (and a repeated closing point) so
-// clipped rings stay simple. Exported for the scenario layer, which drops
-// features left degenerate by the clip.
+// clipped rings stay simple. Exported for unit tests; the clip functions
+// dedupe their own output internally.
 export function dedupePoints(points) {
   const clean = [];
   for (const point of points) {

@@ -708,7 +708,7 @@ export function resizeBattlefield(document, width, height) {
     }
   }
   const units = Array.isArray(document.units) ? document.units : [];
-  const outside = [];
+  const unitsOutside = [];
   units.forEach((unit, index) => {
     if (!unit || typeof unit !== 'object') {
       return;
@@ -724,12 +724,12 @@ export function resizeBattlefield(document, width, height) {
     }
     const footprint = deriveFootprint(unit);
     if (!pointsWithinBounds(footprint.corners, nextWidth, nextHeight)) {
-      outside.push(unitLabel(unit, index));
+      unitsOutside.push(unitLabel(unit, index));
     }
   });
-  if (outside.length > 0) {
+  if (unitsOutside.length > 0) {
     throw new Error(
-      `Cannot shrink the battlefield: ${outside.join(', ')} would fall outside the new bounds.`,
+      `Cannot shrink the battlefield: ${unitsOutside.join(', ')} would fall outside the new bounds.`,
     );
   }
   const copy = cloneScenario(document);

@@ -294,6 +294,39 @@ function committedFieldValue(input) {
   return input.value;
 }
 
+// Whether a form field holds edits not yet committed to the document.
+// Undo and redo skip such fields so the shortcut never destroys a draft.
+function fieldHasDraft(input) {
+  if (!input || !input.dataset || !input.dataset.field || !state.document) {
+    return false;
+  }
+  const field = input.dataset.field;
+  const index = Number(input.dataset.index);
+  const value = input.value ?? '';
+  if (field === 'title') {
+    return value !== state.document.title;
+  }
+  if (field === 'description') {
+    return value !== (state.document.description || '');
+  }
+  if (field === 'width' || field === 'height') {
+    if (String(value).trim() === '' || !Number.isFinite(Number(value))) {
+      return true;
+    }
+    return Number(value) !== state.document.battlefield[field];
+  }
+  if (field === 'side-name') {
+    return value !== (state.document.sides[index]?.name ?? '');
+  }
+  if (field === 'side-color') {
+    return (
+      String(value).toLowerCase() !==
+      String(state.document.sides[index]?.color || '').toLowerCase()
+    );
+  }
+  return false;
+}
+
 // --- Map rendering (ADR 0001) -------------------------------------------
 // The model uses map coordinates (origin south-west, x east, y north,
 // metres). Only rendering flips the vertical axis for the screen, through
@@ -1065,23 +1098,24 @@ document.addEventListener('keydown', (event) => {
       target.blur();
     }
   }
-  // Unlimited session undo/redo. Native text undo keeps working inside
-  // text fields and textareas; everywhere else the shortcut is the
-  // scenario history, which never includes view or selection state.
+  // Unlimited session undo/redo over the scenario history, which never
+  // includes view or selection state. The shortcut works from anywhere in
+  // the editor except inside an uncommitted draft: a field holding edits
+  // not yet committed keeps the keystroke (native behavior), because
+  // undoing would rebuild every input from the committed document and
+  // destroy the draft.
   const modifier = event.ctrlKey || event.metaKey;
   if (!modifier || event.altKey) {
     return;
   }
+  if (fieldHasDraft(target)) {
+    return;
+  }
   const key = String(event.key || '').toLowerCase();
-  const tag = target?.tagName;
-  const inTextField =
-    tag === 'TEXTAREA' ||
-    (tag === 'INPUT' && (target.type === 'text' || target.type === 'search')) ||
-    !!target?.isContentEditable;
-  if (key === 'z' && !event.shiftKey && !inTextField) {
+  if (key === 'z' && !event.shiftKey) {
     event.preventDefault();
     undoEdit();
-  } else if ((key === 'y' || (key === 'z' && event.shiftKey)) && !inTextField) {
+  } else if (key === 'y' || (key === 'z' && event.shiftKey)) {
     event.preventDefault();
     redoEdit();
   }
