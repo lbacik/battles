@@ -226,6 +226,12 @@ input[aria-invalid="true"], textarea[aria-invalid="true"] { border-color: #b76e5
 .map-viewport { position: relative; flex: 1; min-height: 0; touch-action: none; }
 .map-viewport.tool-hand #battle-svg, .map-viewport.space-pan #battle-svg { cursor: grab; }
 .map-viewport.panning #battle-svg { cursor: grabbing; }
+.map-viewport.unit-dragging #battle-svg { cursor: grabbing; }
+#battle-svg g.unit { cursor: move; }
+#battle-svg .rotate-hit { cursor: grab; pointer-events: all; }
+#battle-svg .rotate-grip { cursor: grab; pointer-events: all; }
+#battle-svg .rotate-stem { pointer-events: none; }
+.unit.conflict .unit-footprint { stroke-dasharray: 7 4; }
 .map-status {
   position: absolute; left: 14px; bottom: 12px; z-index: 3;
   display: flex; align-items: center; gap: 12px;
