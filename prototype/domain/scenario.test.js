@@ -17,6 +17,7 @@ import {
   SCENARIO_KIND,
   ScenarioImportError,
   UNIT_PICK_TOLERANCE_PX,
+  addElevationFeature,
   addGroundCoverFeature,
   clampMapZoom,
   cloneScenario,
@@ -47,6 +48,7 @@ import {
   parseScenarioImport,
   pickUnitIdAtPoint,
   proposeUnitPatch,
+  removeElevationFeature,
   removeGroundCoverFeature,
   resizeBattlefield,
   roundScenarioToTenth,
@@ -58,7 +60,9 @@ import {
   unitFootprint,
   unitPosition,
   unitsBlockingResize,
+  updateElevationFeature,
   updateGroundCoverFeature,
+  validateElevationCandidate,
   validateGroundCoverCandidate,
   validateScenario,
   zoomViewAroundCursor,
@@ -1180,5 +1184,151 @@ describe('unit placement and rotation on the map', () => {
     assert.ok(undoneAgain, 'expected undo to be available after redo');
     assert.deepEqual(undoneAgain.document.units[0].position, { x: 600, y: 400 });
     assert.equal(historyUndo(createHistory(), cloneScenario(current)), null);
+  });
+});
+
+describe('elevation editing', () => {
+  it('derives level 1 outside every other and level 2 wholly inside level 1', () => {
+    let document = addElevationFeature(freshDocument(), { polygon: square(100, 400, 200) });
+    assert.equal(document.terrainFeatures.length, 1);
+    assert.equal(document.terrainFeatures[0].kind, 'elevation');
+    assert.equal(document.terrainFeatures[0].level, 1);
+    assert.ok(isUuid(document.terrainFeatures[0].id));
+    assert.deepEqual(validateScenario(document), []);
+
+    document = addElevationFeature(document, { polygon: square(150, 450, 60) });
+    const levels = document.terrainFeatures.map((feature) => feature.level).sort();
+    assert.deepEqual(levels, [1, 2]);
+    assert.deepEqual(validateScenario(document), []);
+    // The input document is never mutated.
+    assert.equal(document.terrainFeatures.length, 2);
+  });
+
+  it('rounds vertices to 0.1 m and clips a partly-outside hill to the battlefield', () => {
+    const document = freshDocument();
+    const candidate = validateElevationCandidate(document, [
+      { x: -50.04, y: 100.06 },
+      { x: 200.04, y: 100.06 },
+      { x: 200.04, y: 300.06 },
+      { x: -50.04, y: 300.06 },
+    ]);
+    assert.equal(candidate.ok, true);
+    assert.equal(candidate.level, 1);
+    assert.ok(candidate.ring.every((point) => point.x >= 0 && point.y >= 0));
+    assert.ok(candidate.ring.some((point) => point.x === 0));
+    const added = addElevationFeature(document, {
+      polygon: [
+        { x: -50.04, y: 100.06 },
+        { x: 200.04, y: 100.06 },
+        { x: 200.04, y: 300.06 },
+        { x: -50.04, y: 300.06 },
+      ],
+    });
+    assert.deepEqual(added.terrainFeatures[0].polygon, candidate.ring);
+    assert.equal(added.terrainFeatures[0].level, 1);
+    assert.deepEqual(validateScenario(added), []);
+  });
+
+  it('refuses a self-intersecting hill with a highlight ring', () => {
+    const bowtie = [
+      { x: 100, y: 100 },
+      { x: 200, y: 200 },
+      { x: 200, y: 100 },
+      { x: 100, y: 200 },
+    ];
+    const candidate = validateElevationCandidate(freshDocument(), bowtie);
+    assert.equal(candidate.ok, false);
+    assert.match(candidate.reason, /self-intersection/);
+    assert.ok(Array.isArray(candidate.ring) && candidate.ring.length >= 3);
+    assert.throws(() => addElevationFeature(freshDocument(), { polygon: bowtie }), /self-intersection/);
+  });
+
+  it('refuses a hill crossing a sibling with a highlight and a conflict', () => {
+    let document = addElevationFeature(freshDocument(), { polygon: square(100, 100, 200) });
+    const candidate = validateElevationCandidate(document, square(200, 200, 200));
+    assert.equal(candidate.ok, false);
+    assert.match(candidate.reason, /cross/);
+    assert.equal(candidate.conflictId, document.terrainFeatures[0].id);
+    assert.ok(Array.isArray(candidate.ring) && candidate.ring.length >= 3);
+    assert.throws(
+      () => addElevationFeature(document, { polygon: square(200, 200, 200) }),
+      /cross/,
+    );
+  });
+
+  it('refuses a hill straddling a parent boundary (only partly inside)', () => {
+    let document = addElevationFeature(freshDocument(), { polygon: square(100, 100, 300) });
+    const candidate = validateElevationCandidate(document, square(250, 250, 200));
+    assert.equal(candidate.ok, false);
+    assert.match(candidate.reason, /wholly inside|cross/);
+    assert.ok(Array.isArray(candidate.ring) && candidate.ring.length >= 3);
+    assert.throws(
+      () => addElevationFeature(document, { polygon: square(250, 250, 200) }),
+      /wholly inside|cross/,
+    );
+  });
+
+  it('refuses a vertex edit that would break nesting', () => {
+    let document = addElevationFeature(freshDocument(), { polygon: square(100, 100, 300) });
+    document = addElevationFeature(document, { polygon: square(150, 150, 60) });
+    const peakId = document.terrainFeatures.find((feature) => feature.level === 2).id;
+    const candidate = validateElevationCandidate(document, square(250, 250, 200), {
+      ignoreId: peakId,
+    });
+    assert.equal(candidate.ok, false);
+    assert.throws(
+      () => updateElevationFeature(document, peakId, { polygon: square(250, 250, 200) }),
+      /wholly inside|cross/,
+    );
+    assert.throws(() => updateElevationFeature(document, 'missing-id', {}), /no hill/);
+  });
+
+  it('moves a vertex within its parent without conflicting with itself', () => {
+    let document = addElevationFeature(freshDocument(), { polygon: square(100, 100, 300) });
+    document = addElevationFeature(document, { polygon: square(150, 150, 60) });
+    const peakId = document.terrainFeatures.find((feature) => feature.level === 2).id;
+    const moved = updateElevationFeature(document, peakId, {
+      polygon: [
+        { x: 150, y: 150 },
+        { x: 220, y: 150 },
+        { x: 210, y: 210 },
+        { x: 150, y: 210 },
+      ],
+    });
+    assert.deepEqual(validateScenario(moved), []);
+    assert.equal(moved.terrainFeatures.find((feature) => feature.id === peakId).level, 2);
+  });
+
+  it('promotes nested children when a parent level is deleted', () => {
+    let document = addElevationFeature(freshDocument(), { polygon: square(100, 100, 300) });
+    document = addElevationFeature(document, { polygon: square(150, 150, 60) });
+    const parentId = document.terrainFeatures.find((feature) => feature.level === 1).id;
+    const childId = document.terrainFeatures.find((feature) => feature.level === 2).id;
+    document = removeElevationFeature(document, parentId);
+    assert.equal(document.terrainFeatures.length, 1);
+    assert.equal(document.terrainFeatures[0].id, childId);
+    assert.equal(document.terrainFeatures[0].level, 1);
+    assert.deepEqual(validateScenario(document), []);
+    assert.throws(() => removeElevationFeature(document, parentId), /no hill/);
+  });
+
+  it('bumps existing hills down when an outer ring is drawn around them', () => {
+    let document = addElevationFeature(freshDocument(), { polygon: square(150, 150, 60) });
+    document = addElevationFeature(document, { polygon: square(100, 100, 300) });
+    assert.deepEqual(
+      document.terrainFeatures.map((feature) => feature.level).sort(),
+      [1, 2],
+    );
+    assert.deepEqual(validateScenario(document), []);
+  });
+
+  it('treats elevation as independent of ground cover', () => {
+    let document = addGroundCoverFeature(freshDocument(), {
+      category: 'forest',
+      polygon: square(100, 100),
+    });
+    document = addElevationFeature(document, { polygon: square(100, 100) });
+    assert.equal(document.terrainFeatures.filter((feature) => feature.kind === 'elevation')[0].level, 1);
+    assert.deepEqual(validateScenario(document), []);
   });
 });
