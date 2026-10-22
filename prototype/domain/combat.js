@@ -39,8 +39,11 @@
 //   contact. Depth (ranks beyond the first, up to a cap, for troop types with
 //   the depth trait) multiplies the strain down and never increases losses
 //   inflicted. A unit in several fights adds its strains up; the total is kept
-//   on `unit.cohesionStrain` and steps the state down (never up) at the
-//   Disordered and Routed thresholds.
+//   on `unit.cohesionStrain` and steps the numeric cohesion value down (never
+//   up — only Rally restores it) through the Steady/Disordered/Routed
+//   thresholds (see `./cohesion.js`). Routing, flights, and removals belong to
+//   the Cohesion slice: reaching 0 routs at once, losing a flank or rear fight
+//   tests rout by chance, and a Routed unit that is attacked is destroyed.
 // - Losses come off the rear: soldiers drop while files stay, so ranks shrink
 //   while the front edge (the position front midpoint) and the frontage stay.
 //   When soldiers fall below files, files become equal to soldiers and the
@@ -57,6 +60,16 @@
 import { EPS, isFinitePoint, ringsTouch } from './geometry.js';
 import { createRng } from './battle.js';
 import { getTroopType } from './polis-classical.js';
+import {
+  breakEngagements,
+  cohesionParamsOf,
+  cohesionStateForValue,
+  flightOutcomeFor,
+  isActiveUnit,
+  nearestEnemyOf,
+  unitCohesionState,
+  unitCohesionValue,
+} from './cohesion.js';
 import {
   footprintAt,
   groundCoverAt,
@@ -359,9 +372,13 @@ function round3(value) {
 
 // Resolve the Combat phase against the mutable battle: every engaged pair
 // fights once, on both sides, drawing from the engine generator. Mutates the
-// units (soldiers, files, cohesion, strain, fresh-charge flags), the generator
-// state, and the events. No fights means no draws and no events, apart from
-// clearing spent fresh-charge flags.
+// units (soldiers, files, numeric cohesion and its state, strain, fresh-charge
+// flags, routed flights, destroyed/fled removals), the generator state, and
+// the events. No fights means no draws and no events, apart from clearing
+// spent fresh-charge flags. A Routed unit that is attacked is destroyed
+// outright; a unit reaching 0 cohesion routs, and a unit that lost a flank or
+// rear fight tests rout by chance — routing breaks engagements and flees at
+// once by the flight distance.
 export function resolveCombatPhase(battle) {
   if (!battle || typeof battle !== 'object' || Array.isArray(battle)) {
     throw new Error('Combat needs a battle state object.');
@@ -370,8 +387,14 @@ export function resolveCombatPhase(battle) {
     throw new Error('Combat needs a battle with units and events.');
   }
   const params = combatParamsOf(battle.parameters);
+  const cohesion = cohesionParamsOf(battle.parameters);
   const features = battle.scenario?.terrainFeatures || [];
-  const pairs = collectEngagedPairs(battle.units);
+  const pairs = collectEngagedPairs(battle.units).filter((pair) => {
+    const a = battle.units.find((unit) => unit?.id === pair.aId);
+    const b = battle.units.find((unit) => unit?.id === pair.bId);
+    const alive = (unit) => !unit || unit.status === undefined || unit.status === null || unit.status === 'active';
+    return alive(a) && alive(b);
+  });
   if (pairs.length === 0) {
     for (const unit of battle.units) {
       if (unit && typeof unit === 'object' && unit.freshCharge) {
@@ -403,6 +426,8 @@ export function resolveCombatPhase(battle) {
       strain: Number.isFinite(unit.cohesionStrain) && unit.cohesionStrain > 0
         ? unit.cohesionStrain
         : 0,
+      cohesionValue: unitCohesionValue(unit, cohesion),
+      cohesionState: unitCohesionState(unit, cohesion),
     });
     let corners = null;
     try {
@@ -430,9 +455,71 @@ export function resolveCombatPhase(battle) {
     battle.events.push({ seq: battle.events.length, ...fields });
   };
   const strainAdded = new Map();
+  const flankedLosses = new Map();
+
+  const destroyUnit = (unit, reason, extra = {}) => {
+    if (!unit || unit.status === 'destroyed') {
+      return;
+    }
+    unit.status = 'destroyed';
+    breakEngagements(battle, unit.id);
+    pushEvent({
+      type: 'unit-destroyed',
+      turnNumber: battle.turnNumber,
+      side: unit.side ?? null,
+      unitId: unit.id,
+      reason,
+      ...extra,
+    });
+  };
+
+  const fleeRouted = (unit, threat, cause) => {
+    const outcome = flightOutcomeFor(unit, threat, battle, battle.parameters);
+    if (outcome.outcome === 'fled') {
+      unit.status = 'fled';
+      breakEngagements(battle, unit.id);
+      pushEvent({
+        type: 'unit-fled',
+        turnNumber: battle.turnNumber,
+        side: unit.side ?? null,
+        unitId: unit.id,
+        cause,
+        position: { ...unit.position },
+      });
+    } else if (outcome.outcome === 'destroyed') {
+      destroyUnit(unit, 'flight-blocked', {
+        cause,
+        blockedBy: outcome.blockedBy ?? null,
+        at: outcome.destination,
+      });
+    } else if (outcome.destination) {
+      unit.position = { ...outcome.destination };
+      pushEvent({
+        type: 'unit-routed',
+        turnNumber: battle.turnNumber,
+        side: unit.side ?? null,
+        unitId: unit.id,
+        cause,
+        position: { ...unit.position },
+        flightM: cohesion.flightM,
+      });
+    }
+    return outcome;
+  };
 
   for (const pair of pairs) {
     const sides = [pair.aId, pair.bId];
+    // A Routed unit that is attacked is destroyed outright: no fight, no
+    // draws for the pair — the threat ends the unit where it stands.
+    const routedSides = sides.filter((id) => snapshot.get(id)?.cohesionState === 'Routed');
+    if (routedSides.length > 0) {
+      for (const id of routedSides) {
+        const victim = byId.get(id);
+        const attackerId = id === pair.aId ? pair.bId : pair.aId;
+        destroyUnit(victim, 'attacked-while-routed', { byUnitId: attackerId });
+      }
+      continue;
+    }
     const results = new Map();
     for (const side of sides) {
       const opponent = side === pair.aId ? pair.bId : pair.aId;
@@ -451,6 +538,7 @@ export function resolveCombatPhase(battle) {
         pair.frontageM,
         totalFrontageOf(side),
       );
+      const state = snapshot.get(side)?.cohesionState;
       const { strength, modifiers } = strengthOf({
         files,
         combatFactor,
@@ -459,7 +547,7 @@ export function resolveCombatPhase(battle) {
         elevationHigher: (levelOf.get(side) ?? 0) > (levelOf.get(opponent) ?? 0),
         terrainFactor: coverFactor,
         rivered: riverOf.get(side) === true,
-        disordered: unit?.cohesion === 'Disordered' || unit?.cohesion === 'Routed',
+        disordered: state === 'Disordered' || state === 'Routed',
         params,
       });
       const value = rng.next();
@@ -490,17 +578,26 @@ export function resolveCombatPhase(battle) {
       const result = results.get(side);
       const edge = side === pair.aId ? pair.edgeA : pair.edgeB;
       const flanker = (pair.aspect === 'flank' || pair.aspect === 'rear') && edge === 'front';
+      const flankedAspect = !flanker && (pair.aspect === 'flank' || pair.aspect === 'rear')
+        ? pair.aspect
+        : null;
       const strain = strainOf({
         taken: result.taken ?? 0,
         inflicted: result.dealt ?? 0,
         ranks: snapshot.get(side).ranks,
         depthTrait: getTroopType(unit?.troopType)?.depthEndures === true,
-        flankedAspect: !flanker && (pair.aspect === 'flank' || pair.aspect === 'rear')
-          ? pair.aspect
-          : null,
+        flankedAspect,
         params,
       });
       strainAdded.set(side, (strainAdded.get(side) ?? 0) + strain);
+      if (flankedAspect && (result.taken ?? 0) > (result.dealt ?? 0)) {
+        flankedLosses.set(side, {
+          aspect: flankedAspect,
+          opponentId: opponent,
+          taken: result.taken ?? 0,
+          inflicted: result.dealt ?? 0,
+        });
+      }
       pushEvent({
         type: 'random-draw',
         purpose: 'combat-loss',
@@ -539,31 +636,111 @@ export function resolveCombatPhase(battle) {
     });
   }
 
-  // Cohesion steps down (never up) once per phase, after every pair has
-  // fought, so simultaneous fights share one threshold check.
+  // Cohesion falls by the accumulated strain (never below 0) once per phase,
+  // after every pair has fought, so simultaneous fights share one check. The
+  // numeric value maps to Steady/Disordered/Routed through the cohesion
+  // thresholds; every state change is recorded.
+  const routedThisPhase = new Set();
   for (const [id, added] of strainAdded) {
     const unit = byId.get(id);
-    if (!unit || !(added > 0)) {
+    if (!unit || unit.status === 'destroyed' || unit.status === 'fled') {
       continue;
     }
-    const before = unit.cohesion;
-    const total = round3((snapshot.get(id)?.strain ?? 0) + added);
+    const snap = snapshot.get(id);
+    const beforeState = snap?.cohesionState ?? unitCohesionState(unit, cohesion);
+    const beforeValue = snap?.cohesionValue ?? unitCohesionValue(unit, cohesion);
+    const total = round3((snap?.strain ?? 0) + added);
     unit.cohesionStrain = total;
-    if (total >= params.routedAt) {
-      unit.cohesion = 'Routed';
-    } else if (total >= params.disorderedAt && unit.cohesion === 'Steady') {
-      unit.cohesion = 'Disordered';
+    if (!(added > 0)) {
+      continue;
     }
-    if (unit.cohesion !== before) {
+    const afterValue = Math.max(0, Math.round((beforeValue - added) * 1000) / 1000);
+    unit.cohesionValue = afterValue;
+    // Derive the state from the numeric value (never up except via Rally).
+    const afterState = cohesionStateForValue(afterValue, cohesion);
+    unit.cohesion = afterState;
+    unit.cohesionState = afterState;
+    if (afterState !== beforeState) {
       pushEvent({
         type: 'unit-cohesion',
         turnNumber: battle.turnNumber,
         side: unit.side ?? null,
         unitId: id,
-        cohesionBefore: before,
-        cohesionAfter: unit.cohesion,
+        cohesionBefore: beforeState,
+        cohesionAfter: afterState,
+        valueBefore: beforeValue,
+        valueAfter: afterValue,
         strain: total,
       });
+    }
+    if (afterValue <= 0 && beforeState !== 'Routed') {
+      routedThisPhase.add(id);
+    }
+  }
+
+  // Units at 0 cohesion rout: break engagements and flee at once.
+  for (const id of [...routedThisPhase]) {
+    const unit = byId.get(id);
+    if (!unit || unit.status === 'destroyed' || unit.status === 'fled') {
+      continue;
+    }
+    if (unitCohesionState(unit, cohesion) !== 'Routed') {
+      continue;
+    }
+    breakEngagements(battle, id);
+    const { enemy } = nearestEnemyOf(battle, unit);
+    const threat = enemy ? { ...enemy.position } : null;
+    fleeRouted(unit, threat, 'cohesion-zero');
+  }
+
+  // Losers of a flank or rear fight test rout by chance. The test runs after
+  // the cohesion fall so a unit already Routed at 0 never draws twice.
+  for (const [id, info] of flankedLosses) {
+    const unit = byId.get(id);
+    if (!unit || unit.status === 'destroyed' || unit.status === 'fled') {
+      continue;
+    }
+    if (unitCohesionState(unit, cohesion) === 'Routed') {
+      continue;
+    }
+    const value = rng.next();
+    battle.rngState = rng.state;
+    const passed = value < cohesion.flankRoutPassChance;
+    pushEvent({
+      type: 'random-draw',
+      purpose: 'rout-test',
+      turnNumber: battle.turnNumber,
+      side: unit.side ?? null,
+      unitId: id,
+      opponentId: info.opponentId,
+      aspect: info.aspect,
+      value,
+      result: passed ? 'passed' : 'failed',
+    });
+    if (!passed) {
+      const beforeState = unitCohesionState(unit, cohesion);
+      const beforeValue = unitCohesionValue(unit, cohesion);
+      unit.cohesionValue = 0;
+      unit.cohesion = 'Routed';
+      unit.cohesionState = 'Routed';
+      pushEvent({
+        type: 'unit-cohesion',
+        turnNumber: battle.turnNumber,
+        side: unit.side ?? null,
+        unitId: id,
+        cohesionBefore: beforeState,
+        cohesionAfter: 'Routed',
+        valueBefore: beforeValue,
+        valueAfter: 0,
+        strain: unit.cohesionStrain ?? 0,
+        cause: 'flank-test',
+      });
+      breakEngagements(battle, id);
+      const threatUnit = byId.get(info.opponentId);
+      const threat = threatUnit && isFinitePoint(threatUnit.position)
+        ? { ...threatUnit.position }
+        : nearestEnemyOf(battle, unit).enemy?.position ?? null;
+      fleeRouted(unit, threat ? { ...threat } : null, 'flank-test');
     }
   }
 

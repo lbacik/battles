@@ -12,7 +12,28 @@
   },
   "cohesion": {
     "start": "Steady",
-    "states": ["Steady", "Disordered", "Routed"]
+    "states": [
+      "Steady",
+      "Disordered",
+      "Routed"
+    ],
+    "maxByTroop": {
+      "hoplite": 12,
+      "peltast": 8,
+      "archer": 6,
+      "slinger": 6,
+      "light_cavalry": 8,
+      "cavalry": 10
+    },
+    "disorderedBelow": 4,
+    "rallyRegain": 2,
+    "rallyTo": 2,
+    "rallyChance": 0.5,
+    "rallyClearM": 100,
+    "flightM": 60,
+    "flankRoutPassChance": 0.5,
+    "terrainLoss": 1,
+    "destructionShare": 0.25
   },
   "movement": {
     "maxLegs": 3,

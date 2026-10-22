@@ -473,15 +473,19 @@ describe('Random player', () => {
     }
   });
 
-  it('drops whatever validate rejects: a routed unit holds by omission', async () => {
+  it('drops whatever validate rejects: a routed unit rallies or holds by omission', async () => {
     const battle = freshBattle();
     const unit = battle.units.find((entry) => entry.id === HOPLITE_A);
     unit.cohesion = 'Routed';
+    unit.cohesionState = 'Routed';
+    unit.cohesionValue = 0;
     const decision = await decideWith(battle, createRandomPlayer({ seed: 3 }));
     assert.equal(validateTurn(battle, decision.submission).ok, true);
     assert.ok(
-      decision.submission.orders.every((order) => order.unitId !== HOPLITE_A),
-      'the unsupported Rally for the routed unit is dropped, not committed',
+      decision.submission.orders.every(
+        (order) => order.unitId !== HOPLITE_A || order.kind === 'Rally',
+      ),
+      'the routed unit either rallies or holds by omission (only Rally is permitted)',
     );
   });
 

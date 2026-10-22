@@ -594,6 +594,14 @@ describe('withdraw', () => {
       assert.equal(draw.result, 'failed');
       assert.equal(draw.cohesionBefore, start);
       assert.equal(draw.cohesionAfter, end);
+      const cohesionEvent = next.events.find(
+        (entry) => entry.type === 'unit-cohesion' && entry.cause === 'withdraw',
+      );
+      assert.ok(cohesionEvent, 'a withdraw cohesion event is recorded on failure');
+      assert.equal(cohesionEvent.unitId, unit.id);
+      assert.equal(cohesionEvent.cohesionBefore, start);
+      assert.equal(cohesionEvent.cohesionAfter, end);
+      assert.equal(cohesionEvent.cause, 'withdraw');
     }
   });
 

@@ -46,6 +46,23 @@ export const RULESET_PARAMETERS = Object.freeze({
   cohesion: Object.freeze({
     start: 'Steady',
     states: Object.freeze(['Steady', 'Disordered', 'Routed']),
+    maxByTroop: Object.freeze({
+      hoplite: 12,
+      peltast: 8,
+      archer: 6,
+      slinger: 6,
+      light_cavalry: 8,
+      cavalry: 10,
+    }),
+    disorderedBelow: 4,
+    rallyRegain: 2,
+    rallyTo: 2,
+    rallyChance: 0.5,
+    rallyClearM: 100,
+    flightM: 60,
+    flankRoutPassChance: 0.5,
+    terrainLoss: 1,
+    destructionShare: 0.25,
   }),
   // Manoeuvre on open ground (Engine I slice). A unit marches with 1-3 legs
   // per Move; displacements within `forwardArcDeg` of the facing bill at the
@@ -128,9 +145,11 @@ export const RULESET_PARAMETERS = Object.freeze({
   // inflicted fewer losses, plus `flankStrain` or `rearStrain` for the flanked
   // side; ranks beyond the first, up to `depthCap`, multiply the strain down
   // by `depthReduction` each for troop types with the depth trait. Strain
-  // accumulates on the unit and steps Steady to Disordered at
-  // `disorderedAt`, and to Routed at `routedAt`. Initial values for this
-  // slice.
+  // accumulates on the unit and steps its numeric cohesion value down through
+  // the Steady/Disordered/Routed thresholds (see `./cohesion.js`); the
+  // `disorderedAt`/`routedAt` entries below are the retired Engine I strain
+  // thresholds, kept only so older snapshots still parse. Initial values for
+  // this slice.
   combat: Object.freeze({
     lethality: 0.06,
     chargeBonus: 1.5,
@@ -169,6 +188,7 @@ const TROOP_TYPES = {
     displayName: 'Hoplites',
     role: 'close spacing, strong frontal fighter, depth endures',
     combatFactor: 3,
+    cohesionMax: 12,
     depthEndures: true,
     presets: {
       close: { lateralInterval: 0.9, rankDepth: 0.9 },
@@ -187,6 +207,7 @@ const TROOP_TYPES = {
     displayName: 'Peltasts',
     role: 'open spacing, javelins, good in rough ground and forest',
     combatFactor: 1.5,
+    cohesionMax: 8,
     presets: {
       close: { lateralInterval: 0.9, rankDepth: 0.9 },
       normal: { lateralInterval: 1.5, rankDepth: 1.5 },
@@ -204,6 +225,7 @@ const TROOP_TYPES = {
     displayName: 'Archers',
     role: 'long range, very weak in melee',
     combatFactor: 0.6,
+    cohesionMax: 6,
     presets: {
       close: { lateralInterval: 0.9, rankDepth: 0.9 },
       normal: { lateralInterval: 1.5, rankDepth: 1.5 },
@@ -221,6 +243,7 @@ const TROOP_TYPES = {
     displayName: 'Slingers',
     role: 'medium range, weak in melee',
     combatFactor: 0.6,
+    cohesionMax: 6,
     presets: {
       close: { lateralInterval: 0.9, rankDepth: 0.9 },
       normal: { lateralInterval: 1.5, rankDepth: 1.5 },
@@ -238,6 +261,7 @@ const TROOP_TYPES = {
     displayName: 'Light cavalry',
     role: 'fast, javelins, avoids a hoplite front',
     combatFactor: 1.5,
+    cohesionMax: 8,
     presets: {
       close: { lateralInterval: 1.2, rankDepth: 2.0 },
       normal: { lateralInterval: 2.0, rankDepth: 3.0 },
@@ -255,6 +279,7 @@ const TROOP_TYPES = {
     displayName: 'Cavalry',
     role: 'fast, charge bonus, poor in forest, rough ground, and settlement',
     combatFactor: 2.5,
+    cohesionMax: 10,
     presets: {
       close: { lateralInterval: 1.0, rankDepth: 2.0 },
       normal: { lateralInterval: 1.8, rankDepth: 2.8 },
