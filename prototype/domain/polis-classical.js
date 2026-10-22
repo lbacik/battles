@@ -7,8 +7,10 @@
 // version.
 //
 // Parameters live in the versioned data file
-// `./polis-classical-parameters-1.0.json` (initial values; the Engine II gate
-// tunes them). The `RULESET_PARAMETERS` constant below mirrors that file
+// `./polis-classical-parameters-1.0.json` (tuned by the Engine II gate so Random
+// vs Random fuzzing on the reference scenarios reaches an end condition in
+// every battle; no balance beyond battles ending is claimed). The
+// `RULESET_PARAMETERS` constant below mirrors that file
 // so the browser build and the engine share one snapshot without file access;
 // unit tests assert the two stay identical. Battle start snapshots the
 // parameters and records the version actually used.
@@ -36,8 +38,8 @@ export const RULESET_PARAMETERS_FILE = 'polis-classical-parameters-1.0.json';
 
 export const RULESET_PARAMETERS = Object.freeze({
   ruleset: Object.freeze({ id: 'polis-classical', version: '1.0' }),
-  status: 'placeholder',
-  note: 'Placeholder values. Battle start only snapshots them; the Engine II gate sets them.',
+  status: 'tuned',
+  note: 'Tuned values (Engine II gate): Random vs Random fuzzing on the reference scenarios reaches an end condition in every battle. No balance beyond battles ending is claimed.',
   battle: Object.freeze({
     roundLimit: 12,
     breakLossShare: 0.5,
@@ -148,10 +150,11 @@ export const RULESET_PARAMETERS = Object.freeze({
   // accumulates on the unit and steps its numeric cohesion value down through
   // the Steady/Disordered/Routed thresholds (see `./cohesion.js`); the
   // `disorderedAt`/`routedAt` entries below are the retired Engine I strain
-  // thresholds, kept only so older snapshots still parse. Initial values for
-  // this slice.
+  // thresholds, kept only so older snapshots still parse. Tuned values for
+  // the Engine II gate: fights are decisive enough that engaged battles break
+  // within the round limit.
   combat: Object.freeze({
-    lethality: 0.06,
+    lethality: 0.3,
     chargeBonus: 1.5,
     flankFactor: 1.5,
     rearFactor: 2.0,
@@ -159,7 +162,7 @@ export const RULESET_PARAMETERS = Object.freeze({
     disorderedFactor: 0.7,
     riverFactor: 0.7,
     terrainFactor: Object.freeze({ open: 1, rough: 0.9, forest: 0.75, settlement: 0.9 }),
-    cohesionPerCasualty: 0.08,
+    cohesionPerCasualty: 0.3,
     loserFactor: 1.5,
     flankStrain: 1.0,
     rearStrain: 2.0,
@@ -176,13 +179,14 @@ export const RULESET_PARAMETERS = Object.freeze({
   // `disorderedFactor` while the shooter is Disordered or Routed. Cohesion
   // strain is casualties × `cohesionPerCasualty` and steps Steady to
   // Disordered at `disorderedAt`, and to Routed at `routedAt`, exactly as in
-  // combat. Initial values for this slice.
+  // combat. Tuned values for the Engine II gate: missile fire softens targets
+  // at range instead of scratching them.
   shooting: Object.freeze({
-    lethality: 0.02,
+    lethality: 0.06,
     openSpacingFactor: 0.6,
     coverFactor: Object.freeze({ forest: 0.5, settlement: 0.6 }),
     disorderedFactor: 0.7,
-    cohesionPerCasualty: 0.2,
+    cohesionPerCasualty: 0.5,
     disorderedAt: 2.0,
     routedAt: 4.0,
   }),
