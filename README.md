@@ -48,3 +48,61 @@ The prototype source is in `prototype/`. It remains a disposable experiment; the
 ## Verification
 
 Manual browser checks cover formation creation, map selection, movement planning by clicking and dragging, turn execution, river drawing, and state preservation across all three variants. Layouts have been inspected at desktop and narrow widths. JavaScript syntax has been checked; in keeping with the prototype's scope, it has no automated test suite or dependencies.
+
+## Tracer bullet: scenario library and editor
+
+The first editor-first slice (layout A from the prototype: order of battle on the
+left, map in the centre, inspector on the right). No dependencies, no build step:
+
+- `prototype/domain/scenario.js` — framework-free scenario model (imports
+  nothing from React or Next.js): generated immutable UUIDs, required titles,
+  a default 1200 × 800 m battlefield within the 2000 m application limit, two
+  sides with default names and distinct colours, and the `polis-classical 0.1`
+  ruleset reference. Stored documents carry kind `scenario` and integer format
+  version 1; the revision counter stays in library metadata (ADR 0003). Map
+  coordinates follow ADR 0001 (origin south-west, x east, y north, metres);
+  only rendering flips the vertical axis.
+- `prototype/domain/store.js` — the narrow scenario store interface with an
+  in-memory implementation for tests.
+- `prototype/library/idb.js` — the IndexedDB implementation used by the editor.
+- `prototype/editor.html` — the application: library → new scenario → empty
+  battlefield → save → reload → reopen. Viewports narrower than 1280 px show a
+  notice instead of a broken layout.
+- `prototype/e2e.html` — browser end-to-end test: create → save → reload →
+  reopen against a separate IndexedDB test database.
+
+Deliberately not Next.js yet: this repository ships a dependency-free browser
+prototype with no build step, so the tracer is implemented in that same style.
+The seams the Next.js application needs are already in place — client-only
+modules, a framework-free domain package, and storage behind the narrow store
+interface — so a Next.js shell can adopt them without changing the model.
+
+### Run the application
+
+```sh
+npm run prototype
+```
+
+Open <http://localhost:4173/prototype/editor.html>. Create a scenario with a
+title, see its empty battlefield in the editor, save it, reload the browser,
+and reopen it from the library.
+
+### Run the unit tests
+
+```sh
+npm test
+```
+
+Covers scenario defaults and structural validation, the map convention, the
+store interface (save → list → load, revision kept apart from the document, id
+immutability), and framework independence of the domain package.
+
+### Run the end-to-end test
+
+```sh
+npm run prototype
+```
+
+Open <http://localhost:4173/prototype/e2e.html?autostart=1>. The page creates a
+scenario, saves it to IndexedDB, reloads itself, reopens the scenario, and
+reports PASS/FAIL with the compared values (also logged to the console).

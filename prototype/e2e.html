@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="PÓLIS tracer bullet: browser end-to-end test (create, save, reload, reopen).">
+  <title>PÓLIS — end-to-end test</title>
+  <style>
+    body { font-family: 'DM Sans', -apple-system, sans-serif; background: #f5f4ed; color: #303a32; margin: 0; }
+    main { max-width: 760px; margin: 0 auto; padding: 40px 24px 80px; }
+    h1 { font-family: Georgia, serif; font-weight: 400; }
+    .lede { color: #8a8d80; line-height: 1.8; }
+    ol#steps { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+    ol#steps li { background: #faf9f4; border: 1px solid #e1e1d5; border-radius: 6px; padding: 12px 16px; }
+    ol#steps li.pass { border-left: 5px solid #4e6047; }
+    ol#steps li.fail { border-left: 5px solid #a46c5b; }
+    ol#steps li.running { border-left: 5px solid #9c853c; }
+    #verdict { font-size: 20px; font-weight: 600; margin-top: 24px; }
+    #verdict.pass { color: #4e6047; }
+    #verdict.fail { color: #a46c5b; }
+    pre { background: #faf9f4; border: 1px solid #e1e1d5; border-radius: 6px; padding: 16px; overflow: auto; font-size: 12px; }
+    button { font: inherit; cursor: pointer; background: #4e6047; color: #f8f9f0; border: 0; border-radius: 4px; padding: 10px 18px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>End-to-end test: create → save → reload → reopen</h1>
+    <p class="lede">Drives the real domain model and the real IndexedDB scenario store
+      in this browser, reloads the page mid-run, then reopens the scenario and
+      checks every value. Add <code>?autostart=1</code> to run on load.</p>
+    <button id="run">Run end-to-end test</button>
+    <ol id="steps"></ol>
+    <div id="verdict" role="status"></div>
+    <pre id="details"></pre>
+  </main>
+  <script type="module" src="e2e.js"></script>
+</body>
+</html>
