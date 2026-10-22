@@ -1,0 +1,206 @@
+/* PÓLIS tracer bullet — battle player (setup, Begin, and turn play).
+   Structural basis: prototype layout A (order of battle left, map centre,
+   turn panel right) with a permanent turn bar. The visual style is not decided. */
+:root {
+  --bg: #f5f4ed;
+  --panel: #faf9f4;
+  --paper: #fffef9;
+  --ink: #303a32;
+  --muted: #8a8d80;
+  --line: #e1e1d5;
+  --green: #4e6047;
+  --green-deep: #394b34;
+  --radius: 6px;
+  font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+  font-size: 14px;
+}
+* { box-sizing: border-box; }
+body { margin: 0; color: var(--ink); }
+button, input, select { font: inherit; }
+button {
+  cursor: pointer; display: inline-flex; justify-content: center; align-items: center;
+  gap: 8px; border: 0; background: none; color: inherit; font-weight: 550;
+}
+button:disabled { opacity: .36; cursor: default; }
+button:focus-visible, input:focus-visible, select:focus-visible {
+  outline: 2px solid #9c853c; outline-offset: 3px;
+}
+
+#narrow-notice { display: none; }
+.app { min-height: 100dvh; display: flex; flex-direction: column; }
+
+@media (max-width: 1279px) {
+  .app { display: none; }
+  #narrow-notice {
+    display: block; max-width: 560px; margin: 12dvh auto; padding: 32px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  }
+  #narrow-notice h1 { font-family: Georgia, serif; font-weight: 400; margin: 0 0 12px; }
+  #narrow-notice p { line-height: 1.8; color: var(--muted); margin: 0; }
+  #narrow-notice strong { color: var(--ink); }
+}
+
+.topbar {
+  display: flex; align-items: center; gap: 16px; padding: 14px 28px;
+  background: var(--panel); border-bottom: 1px solid var(--line);
+}
+.brand { font-family: Georgia, serif; letter-spacing: 4px; font-size: 22px; }
+.brand small {
+  display: block; font-family: 'DM Sans', sans-serif; font-size: 9px;
+  letter-spacing: 2px; color: var(--muted); margin-top: 4px;
+}
+.topbar .spacer { flex: 1; }
+.status { font-size: 12px; color: var(--muted); }
+.status.error { color: #a46c5b; }
+.btn-primary {
+  background: var(--green); color: #f8f9f0; border: 1px solid var(--green);
+  border-radius: 4px; min-height: 40px; padding: 9px 16px;
+}
+.btn-primary:not(:disabled):hover { background: var(--green-deep); }
+.btn-secondary {
+  border: 1px solid var(--line); border-radius: 4px; min-height: 40px;
+  padding: 9px 16px; background: var(--paper);
+}
+.btn-quiet { font-size: 12px; padding: 8px; color: #777e70; }
+.btn-danger { color: #a46c5b; }
+
+/* Setup screen: side rows (read-only names and colours) plus the controller
+   choice per side, the ruleset version, Begin, and the refusal list. */
+.setup { max-width: 860px; margin: 0 auto; padding: 40px 24px 80px; width: 100%; }
+.setup h1 { font-family: Georgia, serif; font-weight: 400; font-size: 30px; margin: 0; }
+.setup .lede { color: var(--muted); line-height: 1.8; margin: 10px 0 28px; }
+.setup-card {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 20px; margin-bottom: 16px;
+}
+.setup-card h2 { font-size: 17px; margin: 0 0 6px; font-weight: 550; }
+.setup-meta { font-size: 12px; color: var(--muted); margin: 0 0 16px; line-height: 1.7; }
+.side-row {
+  display: flex; align-items: center; gap: 12px; padding: 12px 4px;
+  border-top: 1px solid var(--line);
+}
+.side-row .swatch { width: 16px; height: 16px; border-radius: 50%; flex-shrink: 0; border: 1px solid #0003; }
+.side-row .side-name { font-weight: 650; font-size: 14px; }
+.side-row .side-id { font-size: 11px; color: var(--muted); font-family: ui-monospace, monospace; }
+.side-row label { margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.side-row select {
+  height: 38px; border: 1px solid #dce0d1; border-radius: 4px;
+  padding: 8px 10px; background: var(--paper); color: var(--ink);
+}
+.setup-actions { display: flex; gap: 10px; align-items: center; margin-top: 18px; flex-wrap: wrap; }
+.refusal {
+  background: var(--panel); border: 1px solid #b76e5a; border-radius: var(--radius);
+  padding: 20px; margin-top: 16px;
+}
+.refusal h2 { font-size: 16px; margin: 0 0 8px; color: #8a4636; }
+.refusal p { font-size: 13px; line-height: 1.7; color: #4c5545; }
+.problem-list { margin: 12px 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; }
+.problem-list li {
+  font-size: 12px; line-height: 1.6; padding: 8px 10px; border-radius: 4px;
+  background: #f9e9e4; border-left: 3px solid #b76e5a; color: #8a4636;
+}
+.announcement {
+  background: #eef2e4; border: 1px solid var(--green); border-radius: var(--radius);
+  padding: 14px 18px; margin-bottom: 16px; font-size: 14px; line-height: 1.6;
+}
+.announcement strong { font-weight: 650; }
+
+/* Battle screen: layout A with a permanent turn bar. The map is read-only;
+   only the navigation toolbar edits the camera (display-only). */
+.turnbar {
+  display: flex; align-items: center; gap: 16px; padding: 12px 28px;
+  background: #334a36; color: #f2f5e7; font-size: 13px;
+}
+.turnbar .round { font-weight: 650; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.turnbar .active-side { display: inline-flex; align-items: center; gap: 8px; font-weight: 650; }
+.turnbar .active-side .swatch { width: 12px; height: 12px; border-radius: 50%; border: 1px solid #ffffff88; }
+.turnbar .phase { font-size: 12px; opacity: .85; }
+.turnbar .spacer { flex: 1; }
+.workspace {
+  flex: 1; display: grid; grid-template-columns: 264px minmax(0, 1fr) 300px;
+  margin: 20px 24px; border: 1px solid #daddcd; border-radius: 6px;
+  overflow: hidden; min-height: 560px; height: calc(100dvh - 260px);
+}
+.left-panel, .right-panel { background: var(--panel); overflow-y: auto; padding: 20px 18px; }
+.left-panel { border-right: 1px solid var(--line); }
+.right-panel { border-left: 1px solid var(--line); }
+.eyebrow {
+  font-size: 9px; letter-spacing: 1.55px; font-weight: 650;
+  color: var(--muted); display: block; margin-bottom: 6px;
+}
+.panel h2 { font-size: 17px; margin: 0 0 14px; font-weight: 550; }
+.side { margin-bottom: 18px; }
+.side-name { display: flex; align-items: center; gap: 8px; font-weight: 550; font-size: 13px; }
+.swatch { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; border: 1px solid #0003; }
+.side-count { font-size: 12px; color: var(--muted); margin: 6px 0 8px 20px; }
+.unit-row { display: flex; gap: 8px; align-items: flex-start; margin: 0 0 10px 20px; }
+.unit-row .swatch { margin-top: 3px; }
+.unit-name { font-weight: 550; font-size: 13px; }
+.unit-detail { font-size: 11px; color: var(--muted); margin-top: 2px; line-height: 1.6; }
+.readonly-note { font-size: 11px; color: var(--muted); line-height: 1.7; border-top: 1px solid var(--line); padding-top: 12px; }
+.kv { display: grid; grid-template-columns: 130px 1fr; gap: 8px; font-size: 12px; margin-bottom: 10px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; overflow-wrap: anywhere; }
+.mono { font-family: ui-monospace, monospace; font-size: 11px; }
+.map-panel { position: relative; background: #e8e5d5; min-width: 0; display: flex; flex-direction: column; }
+.map-panel svg { width: 100%; height: 100%; display: block; }
+.map-caption {
+  position: absolute; top: 12px; left: 14px; font-size: 11px; letter-spacing: .4px;
+  background: #f4f3e9d9; border: 1px solid #d9dccb; border-radius: 4px; padding: 6px 10px;
+  z-index: 3;
+}
+.map-toolbar {
+  position: absolute; top: 12px; right: 14px; z-index: 3;
+  display: flex; align-items: center; gap: 6px;
+  background: #f4f3e9d9; border: 1px solid #d9dccb; border-radius: 6px; padding: 6px;
+}
+.map-tool {
+  font-size: 12px; font-weight: 550; padding: 6px 10px; border-radius: 4px;
+  border: 1px solid transparent; color: #4c554a;
+}
+.map-tool:hover { border-color: var(--line); background: #ffffff88; }
+.map-tool.active { background: var(--green); border-color: var(--green); color: #f8f9f0; }
+.map-zoom-group { display: flex; align-items: center; gap: 4px; }
+#zoom-level { font-size: 12px; min-width: 44px; text-align: center; color: #4c554a; font-variant-numeric: tabular-nums; }
+.map-viewport { position: relative; flex: 1; min-height: 0; touch-action: none; }
+.map-viewport.tool-hand #battle-svg { cursor: grab; }
+.map-viewport.panning #battle-svg { cursor: grabbing; }
+.map-status {
+  position: absolute; left: 14px; bottom: 12px; z-index: 3;
+  display: flex; align-items: center; gap: 12px;
+  background: #f4f3e9d9; border: 1px solid #d9dccb; border-radius: 4px; padding: 6px 10px;
+  font-size: 11px; color: #4c554a; font-variant-numeric: tabular-nums;
+}
+.scale-bar { display: inline-flex; align-items: center; gap: 8px; }
+#scale-bar { display: inline-block; height: 5px; border: 2px solid #4c554a; border-top: 0; min-width: 8px; }
+.cursor-coords.outside { color: #a46c5b; }
+.map-hint {
+  margin: 0; padding: 8px 14px; font-size: 11px; color: #777e70;
+  background: #f4f3e9d9; border-top: 1px solid #d9dccb;
+}
+.unit-label { fill: #303a32; paint-order: stroke; stroke: #f4f3e9; stroke-width: 3px; font-weight: 600; }
+.unit-dims { fill: #5c665a; paint-order: stroke; stroke: #f4f3e9; stroke-width: 3px; }
+.handoff {
+  background: #faf3dd; border: 1px solid #e5d9b5; border-radius: var(--radius);
+  padding: 14px; margin: 14px 0;
+}
+.handoff p { font-size: 12px; line-height: 1.7; color: #6b5518; margin: 0 0 10px; }
+.confirm-box {
+  background: #f9e9e4; border: 1px solid #b76e5a; border-radius: var(--radius);
+  padding: 14px; margin: 14px 0;
+}
+.confirm-box p { font-size: 12px; line-height: 1.7; color: #8a4636; margin: 0 0 10px; }
+.confirm-actions, .handoff-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.log-list { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow-y: auto; }
+.log-list li { font-size: 11px; line-height: 1.6; color: var(--muted); font-family: ui-monospace, monospace; }
+.panel-divider { border: 0; border-top: 1px solid var(--line); margin: 16px 0; }
+.field-error { color: #a46c5b; font-size: 12px; line-height: 1.5; margin: 0 0 12px; }
+
+#toast {
+  position: fixed; top: 90px; left: 50%; transform: translate(-50%, -10px);
+  background: #334a36; color: #f2f5e7; padding: 12px 20px; border-radius: 5px;
+  font-size: 12px; z-index: 50; opacity: 0; pointer-events: none; transition: opacity .2s;
+}
+#toast.visible { opacity: 1; transform: translate(-50%, 0); }

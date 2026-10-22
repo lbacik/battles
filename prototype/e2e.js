@@ -34,6 +34,14 @@ import {
   validateScenario,
 } from './domain/scenario.js';
 import { collectUnknownTroopTypeWarnings } from './domain/polis-classical.js';
+import { BattleStartError, startBattle, validatePlayability } from './domain/battle.js';
+import {
+  SUBMISSION_FORMAT_VERSION,
+  buildPlayerView,
+  resolveTurn,
+  validateTurn,
+} from './domain/turn.js';
+import { createPassivePlayer, runTurn } from './domain/players.js';
 import { IndexedDBScenarioStore } from './library/idb.js';
 
 const DB_NAME = 'polis-scenarios-e2e';
@@ -441,6 +449,8 @@ async function phaseReopen(phase) {
 
   await phasePersistenceStep6(store);
 
+  await phaseBattleTurns();
+
   details.textContent = JSON.stringify(
     {
       document: reopened,
@@ -506,6 +516,137 @@ async function phasePersistenceStep6(store) {
     throw new Error(`the reopened scenario is invalid: ${validateScenario(reopened).join('; ')}`);
   }
   logStep('persistence step 6: save it and reopen with the key intact', 'pass', `rev. ${metadata.revision}`);
+}
+
+// Battle acceptance: Human vs Passive for two turns through the engine,
+// plus the playability refusal path. The human side commits an empty turn
+// (validated by the engine, then resolved); the Passive side resolves through
+// the runner at once. The seed is fixed in code — the UI never shows it —
+// and the player view carries neither the seed nor the generator state.
+async function phaseBattleTurns() {
+  logStep('battle: Human vs Passive plays two turns', 'running');
+  const document = createScenario({ title: 'Battle probe' });
+  const [first, second] = document.sides;
+  let counter = 1;
+  const probeId = () => `00000000-0000-4000-8000-${String(counter++).padStart(12, '0')}`;
+  document.units.push(
+    {
+      id: probeId(),
+      name: 'Probe taxis',
+      side: first.id,
+      troopType: 'hoplite',
+      soldiers: 100,
+      files: 10,
+      lateralInterval: 1,
+      rankDepth: 1,
+      position: { x: 400, y: 600 },
+      facing: 180,
+    },
+    {
+      id: probeId(),
+      name: 'Probe mora',
+      side: second.id,
+      troopType: 'hoplite',
+      soldiers: 100,
+      files: 10,
+      lateralInterval: 1,
+      rankDepth: 1,
+      position: { x: 400, y: 200 },
+      facing: 0,
+    },
+  );
+  if (validateScenario(document).length > 0) {
+    throw new Error(`battle probe is invalid: ${validateScenario(document).join('; ')}`);
+  }
+  if (validatePlayability(document).length > 0) {
+    throw new Error(
+      `battle probe is unplayable: ${validatePlayability(document).map((problem) => problem.message).join('; ')}`,
+    );
+  }
+  const controllers = { [first.id]: 'human', [second.id]: 'passive' };
+  let battle = startBattle(document, { seed: 2026, controllers });
+  const starter = battle.activeSide;
+  if (![first.id, second.id].includes(starter)) {
+    throw new Error(`starting side is unknown: ${starter}`);
+  }
+  const viewKeys = new Set();
+  JSON.stringify(buildPlayerView(battle), (key, value) => {
+    viewKeys.add(key);
+    return value;
+  });
+  if (viewKeys.has('seed') || viewKeys.has('rngState')) {
+    throw new Error('the player view leaks the seed or the generator state');
+  }
+  logStep(
+    'battle: Human vs Passive plays two turns',
+    'pass',
+    `seed set in code, ${starter === first.id ? first.name : second.name} begins`,
+  );
+
+  for (let turn = 0; turn < 2; turn += 1) {
+    const active = battle.activeSide;
+    const label = active === first.id ? first.name : second.name;
+    logStep(`battle: turn ${battle.turnNumber} (${label}) resolves`, 'running');
+    if (controllers[active] === 'human') {
+      const submission = {
+        formatVersion: SUBMISSION_FORMAT_VERSION,
+        battleId: battle.id,
+        turnNumber: battle.turnNumber,
+        side: active,
+        orders: [],
+      };
+      const verdict = validateTurn(battle, submission);
+      if (!verdict.ok) {
+        throw new Error(`the human empty commit was refused: ${verdict.message}`);
+      }
+      battle = resolveTurn(battle, { type: 'commit', submission });
+    } else {
+      const step = await runTurn(battle, {
+        [first.id]: createPassivePlayer(),
+        [second.id]: createPassivePlayer(),
+      });
+      battle = step.battle;
+    }
+    logStep(`battle: turn ${battle.turnNumber - 1} (${label}) resolves`, 'pass', `now turn ${battle.turnNumber}`);
+  }
+  if (battle.turnNumber !== 3) {
+    throw new Error(`expected turn 3 after two turns, got turn ${battle.turnNumber}`);
+  }
+  if (battle.round !== 2) {
+    throw new Error(`expected round 2 after two turns, got round ${battle.round}`);
+  }
+  if (battle.status !== 'ongoing') {
+    throw new Error(`expected the battle to stay ongoing, got "${battle.status}"`);
+  }
+  const resolved = battle.events.filter((event) => event.type === 'turn-resolved');
+  if (resolved.length !== 2) {
+    throw new Error(`expected 2 turn-resolved events, got ${resolved.length}`);
+  }
+
+  logStep('battle: an unplayable scenario is refused with every problem', 'running');
+  const broken = cloneScenario(document);
+  broken.units = broken.units.filter((unit) => unit.side === first.id);
+  const problems = validatePlayability(broken);
+  if (problems.length === 0) {
+    throw new Error('a side without units was accepted as playable');
+  }
+  let refused = null;
+  try {
+    startBattle(broken, { seed: 1, controllers });
+  } catch (error) {
+    refused = error;
+  }
+  if (!(refused instanceof BattleStartError)) {
+    throw new Error('an unplayable scenario did not raise BattleStartError (no battle may be created)');
+  }
+  if (refused.problems.length !== problems.length) {
+    throw new Error('the refusal does not carry every problem');
+  }
+  logStep(
+    'battle: an unplayable scenario is refused with every problem',
+    'pass',
+    refused.problems[0].message,
+  );
 }
 
 async function run() {
