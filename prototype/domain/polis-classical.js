@@ -52,8 +52,37 @@ export const RULESET_PARAMETERS = Object.freeze({
   // full rate, steeper, sideways, and backward steps bill
   // `1 / restrictedRateFactor` per metre, and a facing change about the front
   // midpoint bills `frontageM * angleRad * wheelFactor` metres. `allowanceM`
-  // is the distance one turn buys, per troop type. Initial values for the
+  // is the distance one turn buys on open ground, per troop type. `terrain`
+  // adjusts that billing for ground cover (see below). Initial values for the
   // manoeuvre slice; the Engine II gate sets the fighting parameters.
+  //
+  // Terrain and movement (decision #6 items 14-15). The terrain that applies
+  // to a unit is the worst ground cover its footprint touches, ranked
+  // open < rough < forest = settlement < water. Water is impassable; any other
+  // cover bills a factor per metre marched or wheeled: open bills 1, rough
+  // bills `roughFactor`, forest and settlement bill `forestFactor`. A road
+  // bills `roadFactor` instead, but only for units in column (files at or
+  // below `columnMaxFiles`); out of column the road is ignored and the ground
+  // cover decides. A river is crossable everywhere: a move whose swept
+  // footprint touches a river feature adds `riverCostM` once per feature
+  // touched, on top of the factored distance, however many legs the crossing
+  // is split across. Elevation imposes no movement penalty and is never
+  // consulted here.
+  //
+  // How cost accumulates along a leg that crosses terrain boundaries: a march
+  // is split into 1 m subsegments and each subsegment bills
+  // `(length / directionalRate) * factorAtMidpoint`, where `directionalRate`
+  // is 1 inside the frontal arc and `restrictedRateFactor` outside it, and
+  // `factorAtMidpoint` is the worst-cover factor (or the road factor, when
+  // eligible) of the footprint centred on that subsegment's midpoint. A wheel
+  // bills `frontageM * angleRad * wheelFactor * factorAtStart`, with the
+  // factor read from the footprint before the rotation. The required total is
+  // rounded to 0.1 m and billed against the open-ground `allowanceM`; the
+  // movement allowance shown in the available actions is the open-ground
+  // allowance divided by the factor at the unit's current footprint
+  // (`base / factor`, rounded to 0.1 m, 0 on water), so a unit standing in
+  // rough ground shows less reach. The flat river fee is not part of that
+  // allowance: it is added per move at validation time.
   movement: Object.freeze({
     maxLegs: 3,
     forwardArcDeg: 45,
@@ -66,6 +95,13 @@ export const RULESET_PARAMETERS = Object.freeze({
       slinger: 110,
       light_cavalry: 240,
       cavalry: 200,
+    }),
+    terrain: Object.freeze({
+      roughFactor: 1.5,
+      forestFactor: 2.5,
+      roadFactor: 0.7,
+      columnMaxFiles: 4,
+      riverCostM: 30,
     }),
   }),
 });
