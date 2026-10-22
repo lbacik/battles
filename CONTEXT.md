@@ -44,6 +44,10 @@ _Avoid_: Column, width
 A line of soldiers standing side by side; the number of ranks follows from the soldiers and files and sets the unit's depth.
 _Avoid_: Row, depth (for the count)
 
+**Spacing**:
+How far apart a unit's soldiers stand, across files and in depth. Its class (close, normal, or open) follows from the unit's lateral interval and the troop type's thresholds.
+_Avoid_: Order (for the spacing class), such as "close order"
+
 **Footprint**:
 The true-scale ground a body of troops occupies on the battlefield. What is drawn is what counts: the footprint is never enlarged for display.
 _Avoid_: Symbol, base, counter
@@ -52,6 +56,10 @@ _Avoid_: Symbol, base, counter
 The edge of a footprint that faces the enemy; it determines the facing, and with it the rear and flanks.
 _Avoid_: Heading (for the edge itself)
 
+**Engaged**:
+The state of two opposing units in contact: the charger's front lies flush against an edge of the other's footprint, and the touched edge (front, flank, or rear) decides how the contact counts. Engaged units fight every turn until one routs, withdraws, or is destroyed.
+_Avoid_: Melee (for the state), touching (touching friendly footprints is not contact)
+
 **Elevation level**:
 A discrete step of height above the base ground, used to tell which position stands higher. Height is not modelled continuously.
 _Avoid_: Altitude, height in metres
@@ -59,6 +67,22 @@ _Avoid_: Altitude, height in metres
 **Battle**:
 A particular playthrough of a scenario, whose current situation changes as players act under the ruleset.
 _Avoid_: Scenario
+
+**Cohesion**:
+A unit's steadiness during a battle, worn down by losses and adverse combat and restored by rallying. Its thresholds place the unit in one of three states: Steady, Disordered, or Routed. Every unit starts a battle Steady.
+_Avoid_: Morale (for the per-unit value), fatigue
+
+**Order**:
+An instruction a player gives one of their side's units for the current turn, such as move, charge, or hold. The ruleset accepts or rejects it; a player never resolves it.
+_Avoid_: Command, action (for the instruction itself)
+
+**Turn**:
+The part of a battle in which one side gives its orders and has them resolved. The sides take turns alternately.
+_Avoid_: Round (for one side's part), move
+
+**Round**:
+A pair of turns, one for each side. A battle's length is counted in rounds.
+_Avoid_: Turn (for the pair)
 
 **Ruleset**:
 The system that defines permitted actions and how a battle is resolved. This product develops one ruleset with configurable parameters.
