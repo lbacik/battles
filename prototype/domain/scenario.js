@@ -42,6 +42,7 @@ import {
   polygonsOverlapPositiveArea,
   pointsWithinBounds,
   round1,
+  segmentsProperlyCross,
   shrinkFootprint,
 } from './geometry.js';
 
@@ -952,7 +953,7 @@ function elevationList(document, ignoreId = null) {
 }
 
 // Derive the level of every elevation feature from containment depth: level 1
-// for polygons containing no other elevation polygon, level n + 1 for polygons
+// for polygons contained by no other elevation polygon, level n + 1 for polygons
 // wholly inside a level n polygon. Mutates the passed feature array in place;
 // callers pass a fresh clone. Assumes the set is laminar (checked separately
 // by validateElevationCandidate and validateScenario).
@@ -1043,11 +1044,7 @@ export function validateElevationCandidate(document, points, options = {}) {
       for (let j = 0; j < other.polygon.length; j += 1) {
         const c = other.polygon[j];
         const d = other.polygon[(j + 1) % other.polygon.length];
-        const o1 = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
-        const o2 = (b.x - a.x) * (d.y - a.y) - (b.y - a.y) * (d.x - a.x);
-        const o3 = (d.x - c.x) * (a.y - c.y) - (d.y - c.y) * (a.x - c.x);
-        const o4 = (d.x - c.x) * (b.y - c.y) - (d.y - c.y) * (b.x - c.x);
-        if (o1 * o2 < 0 && o3 * o4 < 0) {
+        if (segmentsProperlyCross(a, b, c, d)) {
           crosses = true;
           break;
         }

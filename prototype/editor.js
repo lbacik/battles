@@ -1516,13 +1516,6 @@ function elevationFeatures(document) {
   );
 }
 
-function selectedElevationFeature(document) {
-  if (!state.selectedTerrainId) return null;
-  return (
-    elevationFeatures(document).find((feature) => feature.id === state.selectedTerrainId) || null
-  );
-}
-
 // Any selected terrain polygon (ground or hill): vertex handles, the vertex
 // list, and the Delete key all key off this.
 function selectedTerrainFeature(document) {
