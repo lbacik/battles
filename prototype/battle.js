@@ -31,6 +31,13 @@ import {
   validateTurn,
 } from './domain/turn.js';
 import { createPlayerForController, runTurn } from './domain/players.js';
+import {
+  changedUnitsForTurn,
+  describeBattleEvent,
+  groupLogEvents,
+  lastResolvedTurnNumber,
+  summarizeTurn,
+} from './domain/battle-log.js';
 import { isBattleFinished } from './domain/battles.js';
 import { generateId } from './domain/scenario.js';
 import {
@@ -733,10 +740,16 @@ function battleUnitSvg(document, unit, mapView, mpp, flags = {}) {
   if (flags.conflict) classes.push('conflict');
   if (flags.candidateCharge) classes.push('candidate-charge');
   if (flags.candidateShoot) classes.push('candidate-shoot');
+  const changedReasons = Array.isArray(flags.changedReasons) ? flags.changedReasons : [];
+  if (changedReasons.length > 0) classes.push('changed');
   const outline = flags.conflict ? '#b91c1c'
+    : changedReasons.length > 0 ? '#b45309'
     : flags.candidateCharge ? '#9c853c'
       : flags.candidateShoot ? '#2f6f8f'
         : esc(color);
+  const changedNote = changedReasons.length > 0
+    ? ` · changed last turn (${esc(changedReasons.join(', '))})`
+    : '';
   const candidateNote = flags.candidateCharge && flags.candidateShoot
     ? ' · charge/shoot candidate — click to draft'
     : flags.candidateCharge
@@ -753,7 +766,7 @@ function battleUnitSvg(document, unit, mapView, mpp, flags = {}) {
     </g>
     <text x="0" y="${depthH + 8 * mpp + labelSize * 0.9}" text-anchor="middle" font-size="${labelSize}" class="unit-label">${esc(name)}</text>
     <text x="0" y="${depthH + 8 * mpp + labelSize * 0.9 + dimsSize * 1.25}" text-anchor="middle" font-size="${dimsSize}" class="unit-dims">${esc(dims)}</text>
-    <title>${esc(name)} · ${esc(dims)}${candidateNote}</title>
+    <title>${esc(name)} · ${esc(dims)}${candidateNote}${changedNote}</title>
   </g>`;
 }
 
@@ -826,8 +839,11 @@ function battleMapSvg(document, mapView) {
   const conflicts = conflictUnitIds();
   const drafting = canDraftOrders();
   const activeDraft = state.selectedUnitId ? draftForUnit(state.selectedUnitId) : null;
-  // Charge and shoot candidates for the selected unit, highlighted on the map
-  // (see `battleUnitSvg`); clicking one drafts the order.
+  // After resolution the changed units of the turn just resolved are
+  // highlighted on the map at once with the new state: losses, cohesion
+  // changes, routs, and fled or destroyed units (see `./domain/battle-log.js`).
+  const lastResolved = state.battle ? lastResolvedTurnNumber(state.battle) : null;
+  const changedByUnit = changedByUnitMap(state.battle, lastResolved);
   const selectedCharge = new Map();
   const selectedShoot = new Set();
   if (drafting && state.selectedUnitId) {
@@ -904,7 +920,7 @@ function battleMapSvg(document, mapView) {
     <rect x="0" y="0" width="${widthM}" height="${heightM}" fill="none" stroke="#6f7a65" stroke-width="2" vector-effect="non-scaling-stroke"/>
     ${xLabels}${yLabels}
     <g id="map-drafts-group">${draftSvg}</g>
-    <g id="map-units-group">${placed.map((unit) => battleUnitSvg(document, unit, mapView, mpp, { selected: unit?.id === state.selectedUnitId, conflict: conflicts.has(unit?.id), drafting: drafting && unit?.id === state.selectedUnitId && !!activeDraft, candidateCharge: selectedCharge.has(unit?.id), candidateEdge: selectedCharge.get(unit?.id)?.edge, candidateShoot: selectedShoot.has(unit?.id) })).join('')}</g>
+    <g id="map-units-group">${placed.map((unit) => battleUnitSvg(document, unit, mapView, mpp, { selected: unit?.id === state.selectedUnitId, conflict: conflicts.has(unit?.id), drafting: drafting && unit?.id === state.selectedUnitId && !!activeDraft, candidateCharge: selectedCharge.has(unit?.id), candidateEdge: selectedCharge.get(unit?.id)?.edge, candidateShoot: selectedShoot.has(unit?.id), changedReasons: changedByUnit.get(unit?.id) || [] })).join('')}</g>
     <circle cx="${origin.x}" cy="${origin.y}" r="${5 * mpp}" fill="#4e6047"/>
     <text x="${origin.x + 10 * mpp}" y="${origin.y - 10 * mpp}" font-size="${axisSize}" fill="#4e6047">origin (0, 0) · SW</text>
     ${battleUnits.length === 0 ? `<text x="${centre.x}" y="${centre.y}" text-anchor="middle" font-size="${17 / zoom}" fill="#9aa08b">Empty battlefield — no units yet</text>` : ''}
@@ -1131,6 +1147,8 @@ function orderOfBattleView(document) {
   const unitsOf = (sideId) => units.filter((unit) => unit?.side === sideId);
   const conflicts = conflictUnitIds();
   const drafting = battle ? canDraftOrders() : false;
+  const lastResolved = battle ? lastResolvedTurnNumber(battle) : null;
+  const changedByUnit = changedByUnitMap(battle, lastResolved);
   return `<div class="panel"><span class="eyebrow">FORCES IN THE FIELD</span><h2>Order of battle</h2>
     ${(document.sides || [])
       .map((side) => {
@@ -1143,10 +1161,12 @@ function orderOfBattleView(document) {
           ${sideUnits
             .map((unit) => {
               const hasDraft = state.drafts.some((draft) => draft.unitId === unit?.id);
+              const changed = changedByUnit.get(unit?.id) || [];
               const classes = ['unit-row', own && drafting ? 'selectable' : 'readonly'];
               if (unit?.id === state.selectedUnitId) classes.push('selected');
               if (conflicts.has(unit?.id)) classes.push('conflict');
-              const detail = `${esc(troopDisplayName(unit?.troopType))} · ${esc(unit?.soldiers)} soldiers · ${esc(unit?.cohesion || '')}${unit?.engaged?.unitId ? ` · Engaged (${esc(unit.engaged.aspect || unit.engaged.edge || '')})` : ''}${hasDraft ? ' · has draft' : ''}`;
+              if (changed.length > 0) classes.push('changed');
+              const detail = `${esc(troopDisplayName(unit?.troopType))} · ${esc(unit?.soldiers)} soldiers · ${esc(unit?.cohesion || '')}${unit?.status && unit.status !== 'active' ? ` · ${esc(unit.status)}` : ''}${unit?.engaged?.unitId ? ` · Engaged (${esc(unit.engaged.aspect || unit.engaged.edge || '')})` : ''}${hasDraft ? ' · has draft' : ''}${changed.length > 0 ? ` · changed: ${esc(changed.join(', '))}` : ''}`;
               if (own && drafting) {
                 return `<button class="${classes.join(' ')}" data-action="select-unit" data-id="${esc(unit?.id || '')}" aria-pressed="${String(unit?.id === state.selectedUnitId)}" data-testid="oob-${esc(unit?.id || '')}"><span class="swatch" style="background:${esc(side.color)}"></span><span><span class="unit-name">${esc(unit?.name || 'Unit')}</span><span class="unit-detail">${detail}</span></span></button>`;
               }
@@ -1328,16 +1348,158 @@ function draftEditorView() {
   </section>`;
 }
 
+// --- Turn result and battle log ------------------------------------------------
+// After resolution the new state appears at once: the whole battle object is
+// replaced in one render, with no phase-by-phase animation. The turn result
+// panel summarises the turn just resolved (losses, cohesion changes, routs,
+// and contacts, each with its chance outcome), the map highlights the changed
+// units, and the scrollable battle log tells the whole battle in readable
+// English from the engine's events, grouped by round, turn, and phase. Both
+// players read the same log: it derives purely from `battle.events`, so a
+// resumed battle shows the identical, complete log.
+
+function unitDisplayNameOf(document, battle, unitId) {
+  const unit = (battle?.units || []).find((entry) => entry?.id === unitId);
+  if (unit?.name) return unit.name;
+  const scenarioUnit = (document?.units || []).find((entry) => entry?.id === unitId);
+  return scenarioUnit?.name || unitId;
+}
+
+function lossLine(document, battle, loss) {
+  const name = esc(unitDisplayNameOf(document, battle, loss.unitId));
+  const span = loss.before !== null && loss.before !== undefined
+    ? ` (${loss.before} → ${loss.after})`
+    : '';
+  const by = loss.byUnitId ? ` — by ${esc(unitDisplayNameOf(document, battle, loss.byUnitId))}` : '';
+  const how = loss.kind === 'shot' ? 'shot' : 'in combat';
+  return `<li><strong>${name}</strong> lost ${loss.losses} ${how}${span}${by}</li>`;
+}
+
+function drawLine(battle, event) {
+  return `<li class="chance">${esc(describeBattleEvent(event, battle))}</li>`;
+}
+
+// One result list: the item lines, or a single empty line when there is
+// nothing to report. Every section of the turn result shares this shape.
+function resultItems(lines, emptyText) {
+  return lines.length > 0 ? lines.join('') : `<li class="empty-result">${esc(emptyText)}</li>`;
+}
+
+// The changed units of a turn as a unit-id → reasons map for the map and the
+// order of battle highlights. A null turn means no resolved turn yet: nothing
+// is highlighted.
+function changedByUnitMap(battle, turnNumber) {
+  if (!battle || turnNumber === null || turnNumber === undefined) return new Map();
+  return new Map(
+    changedUnitsForTurn(battle, turnNumber).map((entry) => [entry.unitId, entry.reasons]),
+  );
+}
+
+// The result of the turn just resolved: contacts, losses, cohesion changes,
+// and routs/removals, each with its chance outcome, plus the runner's fallback
+// events for non-human players (salvaged orders, holds on timeout). When no
+// turn has resolved yet there is no result to show.
+function turnResultView() {
+  const battle = state.battle;
+  const document = state.scenario;
+  const turnNumber = battle ? lastResolvedTurnNumber(battle) : null;
+  if (turnNumber === null) return '';
+  const summary = summarizeTurn(battle, turnNumber);
+  const sideLabel = summary.side ? sideName(document, summary.side) : '—';
+  const drawsFor = (purposes, unitIds) => summary.draws.filter(
+    (event) => purposes.includes(event.purpose)
+      && (!unitIds || unitIds.includes(event.unitId) || unitIds.includes(event.targetId) || unitIds.includes(event.opponentId)),
+  );
+  const lossUnits = summary.losses.map((loss) => loss.unitId);
+  const lossDraws = drawsFor(['shooting-loss', 'combat-loss'], lossUnits);
+  const cohesionUnits = summary.cohesion.map((entry) => entry.unitId);
+  const cohesionDraws = drawsFor(['rally', 'withdraw-cohesion'], cohesionUnits);
+  const routUnits = summary.routs.map((entry) => entry.unitId);
+  // Each rout shows its chance outcome: the rout-test draw that decided it.
+  const routDraws = drawsFor(['rout-test'], routUnits);
+  const orderLines = resultItems(
+    summary.orders.map((event) => `<li>${esc(describeBattleEvent(event, battle))}</li>`),
+    'No orders: every unit held.',
+  );
+  const contactLines = resultItems(
+    summary.contacts.map((event) => `<li>${esc(describeBattleEvent(event, battle))}</li>`),
+    'No new contacts.',
+  );
+  const lossLines = resultItems(
+    [
+      ...summary.losses.map((loss) => lossLine(document, battle, loss)),
+      ...lossDraws.map((event) => drawLine(battle, event)),
+    ],
+    'No losses.',
+  );
+  const cohesionLines = resultItems(
+    [
+      ...summary.cohesion.map((event) => `<li>${esc(describeBattleEvent(event, battle))}</li>`),
+      ...cohesionDraws.map((event) => drawLine(battle, event)),
+    ],
+    'No cohesion changes.',
+  );
+  const routLines = resultItems(
+    [
+      ...summary.routs.map((event) => `<li>${esc(describeBattleEvent(event, battle))}</li>`),
+      ...routDraws.map((event) => drawLine(battle, event)),
+    ],
+    'No routs, flights, or destroyed units.',
+  );
+  const fallbackLines = summary.fallbacks.length > 0
+    ? `<dt>Substitutions</dt><dd><ul class="result-list">${summary.fallbacks.map((event) => `<li>${esc(describeBattleEvent(event, battle))}</li>`).join('')}</ul></dd>`
+    : '';
+  const endedLines = summary.ended
+    ? `<dt>Battle end</dt><dd><ul class="result-list"><li>${esc(describeBattleEvent(summary.ended, battle))}</li></ul></dd>`
+    : '';
+  return `<hr class="panel-divider">
+    <section aria-label="Turn result" data-testid="turn-result">
+      <span class="eyebrow">TURN ${turnNumber} RESULT · ${esc(sideLabel).toUpperCase()}</span>
+      <dl class="result">
+        <dt>Contacts</dt><dd><ul class="result-list">${contactLines}</ul></dd>
+        <dt>Losses</dt><dd><ul class="result-list">${lossLines}</ul></dd>
+        <dt>Cohesion</dt><dd><ul class="result-list">${cohesionLines}</ul></dd>
+        <dt>Routs &amp; removals</dt><dd><ul class="result-list">${routLines}</ul></dd>
+        <dt>Orders carried out</dt><dd><ul class="result-list">${orderLines}</ul></dd>
+        ${fallbackLines}
+        ${endedLines}
+      </dl>
+    </section>`;
+}
+
+// The whole battle in readable English from the engine's events, grouped by
+// round, turn, and phase. Runner fallback events (salvaged orders, holds on
+// timeout) appear in the Orders phase of their turn, so both players read the
+// same substitutions. Scrollable; the newest turn sits at the bottom.
+function battleLogView() {
+  const battle = state.battle;
+  if (!battle) return '';
+  const groups = groupLogEvents(battle);
+  const items = groups.map((group) => {
+    if (group.turnNumber === 0) {
+      const lines = group.events.map((event) => `<li>${esc(describeBattleEvent(event, battle))}</li>`).join('');
+      return `<li class="log-turn"><span class="log-turn-head">Battle start</span><ul class="log-lines">${lines}</ul></li>`;
+    }
+    const head = `<span class="log-turn-head">Round ${group.round} · Turn ${group.turnNumber} — ${esc(group.side ? sideName(state.scenario, group.side) : '—')}</span>`;
+    const sections = (group.sections || []).map((section) => {
+      const lines = section.events.map((event) => `<li>${esc(describeBattleEvent(event, battle))}</li>`).join('');
+      return `<li class="log-phase"><span class="log-phase-head">${esc(section.phase)}</span><ul class="log-lines">${lines}</ul></li>`;
+    }).join('');
+    return `<li class="log-turn">${head}<ul class="log-phases">${sections}</ul></li>`;
+  }).join('');
+  return `<hr class="panel-divider">
+    <span class="eyebrow">BATTLE LOG</span>
+    <div class="battle-log-scroll">
+      <ol class="log-list log-grouped" data-testid="battle-log">${items}</ol>
+    </div>`;
+}
+
 function turnPanelView() {
   const battle = state.battle;
   const document = state.scenario;
   const finished = isBattleFinished(battle);
-  const events = (battle.events || []).slice(-8).reverse();
-  const logList = `<hr class="panel-divider">
-    <span class="eyebrow">BATTLE LOG</span>
-    <ol class="log-list" data-testid="battle-log">
-      ${events.map((event) => `<li>${esc(event.type)} · turn ${esc(event.turnNumber ?? '—')} · ${esc(event.side ?? event.result ?? '')}</li>`).join('')}
-    </ol>`;
+  const logList = battleLogView();
+  const turnResult = turnResultView();
   // Finished battles stay on the list as read-only: no orders, no commits,
   // only the outcome and the log. Deletion happens from the library.
   if (finished) {
@@ -1355,6 +1517,7 @@ function turnPanelView() {
     <div class="handoff" data-testid="battle-finished">
       <p>This battle is finished and read-only. It stays on the Battles list; delete it from the library.</p>
     </div>
+    ${turnResult}
     ${logList}
   </div>`;
   }
@@ -1433,6 +1596,7 @@ function turnPanelView() {
     <div class="kv"><dt>Phase</dt><dd data-testid="phase">${esc(battle.phase)}</dd></div>
     ${ordersSummary}
     ${actionBox}
+    ${turnResult}
     ${logList}
   </div>`;
 }
@@ -1463,7 +1627,7 @@ function battleView() {
     <main class="workspace">
       <aside class="left-panel">${orderOfBattleView(document)}</aside>
       <section class="map-panel">
-        <div class="map-caption">${metres(document.battlefield.width)} × ${metres(document.battlefield.height)} · origin south-west · metres · ${canDraftOrders() ? 'click a unit, then draft from the inspector' : 'read-only'}</div>
+        <div class="map-caption">${metres(document.battlefield.width)} × ${metres(document.battlefield.height)} · origin south-west · metres · ${canDraftOrders() ? 'click a unit, then draft from the inspector' : 'read-only'}${lastResolvedTurnNumber(battle) !== null ? ' · amber outlines mark the units the last turn changed' : ''}</div>
         <div class="map-toolbar" role="toolbar" aria-label="Map navigation">
           <button class="map-tool" data-action="zoom-out" aria-label="Zoom out (−)">−</button>
           <span id="zoom-level">${Math.round(clampMapZoom(state.mapView?.zoom) * 100)}%</span>
