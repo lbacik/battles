@@ -180,3 +180,28 @@ describe('MemoryScenarioStore', () => {
     assert.deepEqual(await store.list(), []);
   });
 });
+
+describe('ruleset mismatch repair (decision #5 item 13)', () => {
+  it('saves and reloads a unit with an unknown troop-type key verbatim', async () => {
+    const store = new MemoryScenarioStore();
+    const scenario = createScenario({ title: 'Repair probe' });
+    scenario.units.push({
+      id: '00000000-0000-4000-8000-000000000001',
+      name: 'Strangers',
+      side: 'side-a',
+      troopType: 'cataphract',
+      soldiers: 100,
+      files: 10,
+      lateralInterval: 1,
+      rankDepth: 1,
+      position: { x: 600, y: 400 },
+      facing: 0,
+    });
+    await store.save(scenario);
+    const reloaded = await store.load(scenario.id);
+    assert.equal(reloaded.units[0].troopType, 'cataphract');
+    // An unreassigned key is still preserved verbatim after saving again.
+    await store.save(reloaded);
+    assert.equal((await store.load(scenario.id)).units[0].troopType, 'cataphract');
+  });
+});

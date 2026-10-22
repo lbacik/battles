@@ -1289,6 +1289,18 @@ export function parseScenarioImport(text) {
       `Import failed: unknown ruleset "${isNonEmptyString(rulesetId) ? rulesetId : 'missing'}". This editor supports "${RULESET_ID}".`,
     );
   }
+  // An older version of the same ruleset opens (keys resolve against the
+  // current catalogue; an explicit Save rebinds the reference). A newer
+  // version is refused, and the library is left unchanged.
+  if (isNonEmptyString(data.ruleset?.version)) {
+    const classification = classifyRulesetReference(data.ruleset);
+    if (classification.status === 'newer') {
+      throw new ScenarioImportError(
+        'unsupported-ruleset-version',
+        `Import failed: ruleset ${data.ruleset.id} ${data.ruleset.version} is newer than the installed ${RULESET_VERSION}.`,
+      );
+    }
+  }
   const normalized = roundScenarioToTenth(cloneScenario(data));
   const errors = validateScenario(normalized);
   if (errors.length > 0) {
@@ -1579,6 +1591,131 @@ export function isProvisionalRulesetVersion(version) {
 
 export function isProvisionalRuleset(ruleset) {
   return !!ruleset && isProvisionalRulesetVersion(ruleset?.version);
+}
+
+// --- Ruleset reference compatibility (decision #5 items 10-13) ----------------
+// A scenario records only a reference to its ruleset ({ identifier, version });
+// it never embeds the catalogue. The installed catalogue is the current
+// `RULESET_ID` at `RULESET_VERSION`. These helpers are pure and catalogue-free
+// (they compare references only, never troop-type membership), so they live in
+// the domain model next to the reference itself.
+
+// Compare two dotted version strings numerically per chunk (`0.10` is newer
+// than `0.2`; a missing chunk is 0, so `0.1` equals `0.1.0`). Non-numeric
+// chunks compare lexically and sort after numeric ones. Returns -1, 0, or 1.
+export function compareRulesetVersions(left, right) {
+  const chunks = (value) =>
+    String(value ?? '')
+      .trim()
+      .split('.')
+      .map((chunk) => chunk.trim());
+  const leftChunks = chunks(left);
+  const rightChunks = chunks(right);
+  const length = Math.max(leftChunks.length, rightChunks.length);
+  for (let index = 0; index < length; index += 1) {
+    const leftChunk = leftChunks[index] ?? '0';
+    const rightChunk = rightChunks[index] ?? '0';
+    if (leftChunk === rightChunk) {
+      continue;
+    }
+    const leftNumber = Number(leftChunk);
+    const rightNumber = Number(rightChunk);
+    const leftNumeric = leftChunk !== '' && Number.isInteger(leftNumber) && leftNumber >= 0;
+    const rightNumeric = rightChunk !== '' && Number.isInteger(rightNumber) && rightNumber >= 0;
+    if (leftNumeric && rightNumeric) {
+      return leftNumber < rightNumber ? -1 : 1;
+    }
+    if (leftNumeric !== rightNumeric) {
+      return leftNumeric ? -1 : 1;
+    }
+    return leftChunk < rightChunk ? -1 : 1;
+  }
+  return 0;
+}
+
+// Classify a scenario's ruleset reference against the installed catalogue.
+// Statuses: 'current' (same identifier and version), 'older' (same
+// identifier, older version: opens, keys resolve against the current
+// catalogue, an explicit Save rebinds), 'newer' (same identifier, newer
+// version: not opened), 'unknown-ruleset' (another identifier: not opened),
+// 'invalid' (the reference is missing or malformed). Never throws.
+export function classifyRulesetReference(ruleset, options = {}) {
+  const current =
+    options.current && typeof options.current === 'object'
+      ? options.current
+      : { id: RULESET_ID, version: RULESET_VERSION };
+  const currentId = current.id;
+  const currentVersion = current.version;
+  if (!ruleset || typeof ruleset !== 'object' || Array.isArray(ruleset)) {
+    return { status: 'invalid', cause: 'ruleset reference is required' };
+  }
+  if (!isNonEmptyString(ruleset.id) || !isNonEmptyString(ruleset.version)) {
+    return { status: 'invalid', cause: 'ruleset reference must hold an identifier and a version' };
+  }
+  if (!KNOWN_RULESET_IDS.includes(ruleset.id) || ruleset.id !== currentId) {
+    return {
+      status: 'unknown-ruleset',
+      cause: `unknown ruleset "${ruleset.id}" (this editor supports "${currentId}")`,
+    };
+  }
+  const comparison = compareRulesetVersions(ruleset.version, currentVersion);
+  if (comparison === 0) {
+    return { status: 'current', cause: null };
+  }
+  if (comparison < 0) {
+    return {
+      status: 'older',
+      cause:
+        `this scenario was written for ${ruleset.id} ${ruleset.version}; ` +
+        `the installed catalogue is ${currentVersion}`,
+    };
+  }
+  return {
+    status: 'newer',
+    cause:
+      `this scenario needs ruleset ${ruleset.id} ${ruleset.version}, ` +
+      `newer than the installed ${currentVersion}; the stored data was left untouched`,
+  };
+}
+
+// True when the reference opens in this editor: the current version or an
+// older version of the same ruleset. Unknown identifiers, newer versions, and
+// malformed references never open.
+export function isOpenableRulesetReference(ruleset, options = {}) {
+  const { status } = classifyRulesetReference(ruleset, options);
+  return status === 'current' || status === 'older';
+}
+
+// The informational issues-panel entry for a scenario whose ruleset reference
+// is older than the installed catalogue, or null when no entry applies. The
+// editor shows it alongside warnings; an explicit Save rebinds the reference.
+export function rulesetCompatibilityNotice(ruleset, options = {}) {
+  const classification = classifyRulesetReference(ruleset, options);
+  if (classification.status !== 'older') {
+    return null;
+  }
+  const current =
+    options.current && typeof options.current === 'object'
+      ? options.current
+      : { id: RULESET_ID, version: RULESET_VERSION };
+  return (
+    `This scenario was written for ${ruleset.id} ${ruleset.version}; ` +
+    `the installed catalogue is ${current.version}. Troop types resolve against ` +
+    `the current catalogue. Saving rebinds the scenario to ${current.version}.`
+  );
+}
+
+// Return a copy of the document whose ruleset reference is rebound to the
+// installed catalogue. Used only on an explicit Save of a scenario whose
+// reference is older; opening never rebinds. Never mutates its input.
+export function rebindRulesetToCurrent(document, options = {}) {
+  const current =
+    options.current && typeof options.current === 'object'
+      ? options.current
+      : { id: RULESET_ID, version: RULESET_VERSION };
+  const copy = cloneScenario(document);
+  copy.ruleset = { id: current.id, version: current.version };
+  return copy;
 }
 
 // Suggest a unit name that is unique across the document (case-insensitive on

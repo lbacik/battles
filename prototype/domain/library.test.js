@@ -286,3 +286,58 @@ describe('framework independence', () => {
     assert.ok(!/from\s+['"]next/.test(source), 'library.js imports next');
   });
 });
+
+describe('ruleset reference mismatch (decision #5 item 12)', () => {
+  it('lists an older version of the same ruleset as openable', async () => {
+    const store = new MemoryScenarioStore();
+    const document = createScenario({ title: 'Mantinea' });
+    await store.save({ ...document, ruleset: { id: document.ruleset.id, version: '0.0' } });
+    const [entry] = await store.list();
+    assert.equal(entry.status, 'ok');
+    assert.equal(entry.cause, null);
+    // The stored reference is preserved until an explicit Save rebinds it.
+    assert.deepEqual((await store.load(document.id)).ruleset, {
+      id: document.ruleset.id,
+      version: '0.0',
+    });
+  });
+
+  it('lists a newer version of the same ruleset without touching the stored data', async () => {
+    const store = new MemoryScenarioStore();
+    const document = createScenario({ title: 'Future rules' });
+    const newer = cloneScenario(document);
+    newer.ruleset = { id: newer.ruleset.id, version: '99.0' };
+    // Validation alone allows any well-formed reference; the library gate
+    // refuses the newer version.
+    store.records.set(newer.id, {
+      document: newer,
+      metadata: { id: newer.id, title: newer.title, revision: 1, updatedAt: newer.updatedAt },
+    });
+    const before = JSON.parse(JSON.stringify(store.records.get(newer.id)));
+    const entry = (await store.list()).find((item) => item.id === newer.id);
+    assert.equal(entry.status, 'unreadable');
+    assert.match(entry.cause, /newer/);
+    assert.deepEqual(store.records.get(newer.id), before);
+  });
+
+  it('lists an unknown ruleset identifier without touching the stored data', async () => {
+    const store = new MemoryScenarioStore();
+    const document = createScenario({ title: 'Foreign rules' });
+    const foreign = cloneScenario(document);
+    foreign.ruleset = { id: 'other-rules', version: '1.0' };
+    store.records.set(foreign.id, {
+      document: foreign,
+      metadata: {
+        id: foreign.id,
+        title: foreign.title,
+        revision: 1,
+        updatedAt: foreign.updatedAt,
+      },
+    });
+    const before = JSON.parse(JSON.stringify(store.records.get(foreign.id)));
+    const entry = (await store.list()).find((item) => item.id === foreign.id);
+    assert.equal(entry.status, 'unreadable');
+    assert.match(entry.cause, /unknown ruleset/);
+    assert.deepEqual(store.records.get(foreign.id), before);
+  });
+});

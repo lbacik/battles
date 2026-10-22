@@ -104,3 +104,57 @@ describe('polis-classical catalogue', () => {
     }
   });
 });
+
+describe('units whose troop type left the catalogue (decision #5 item 13)', () => {
+  it('finds every unit with an unknown troop-type key in document order', async () => {
+    const { findUnknownTroopTypeUnits, collectUnknownTroopTypeWarnings } = await import(
+      './polis-classical.js'
+    );
+    const { createScenario, generateId } = await import('./scenario.js');
+    const document = createScenario({ title: 'Repair probe' });
+    const unit = (overrides) => ({
+      id: generateId(),
+      name: 'Probe taxis',
+      side: 'side-a',
+      troopType: 'hoplite',
+      soldiers: 100,
+      files: 10,
+      lateralInterval: 1,
+      rankDepth: 1,
+      position: { x: 600, y: 400 },
+      facing: 0,
+      ...overrides,
+    });
+    document.units.push(unit({ name: 'First', troopType: 'hoplite' }));
+    document.units.push(unit({ name: 'Strangers', troopType: 'cataphract' }));
+    document.units.push(unit({ name: 'Old friends', troopType: 'elephant' }));
+    const unknown = findUnknownTroopTypeUnits(document);
+    assert.equal(unknown.length, 2);
+    assert.deepEqual(
+      unknown.map((entry) => entry.troopType),
+      ['cataphract', 'elephant'],
+    );
+    assert.deepEqual(
+      unknown.map((entry) => entry.index),
+      [1, 2],
+    );
+    // Structurally invalid (missing) troop types are not "unknown": they stay
+    // a structural error, reported by validateScenario instead.
+    document.units.push(unit({ name: 'Broken', troopType: '' }));
+    assert.equal(findUnknownTroopTypeUnits(document).length, 2);
+    const warnings = collectUnknownTroopTypeWarnings(document);
+    assert.equal(warnings.length, 2);
+    assert.ok(warnings.every((warning) => /unknown troop type/.test(warning)));
+    assert.ok(warnings.some((warning) => /"Strangers"/.test(warning) && /cataphract/.test(warning)));
+  });
+
+  it('stays silent when every key is known', async () => {
+    const { findUnknownTroopTypeUnits, collectUnknownTroopTypeWarnings } = await import(
+      './polis-classical.js'
+    );
+    const { createScenario } = await import('./scenario.js');
+    assert.deepEqual(findUnknownTroopTypeUnits(createScenario({ title: 'Plain' })), []);
+    assert.deepEqual(collectUnknownTroopTypeWarnings(createScenario({ title: 'Plain' })), []);
+    assert.deepEqual(findUnknownTroopTypeUnits(null), []);
+  });
+});
