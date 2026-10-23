@@ -1225,3 +1225,389 @@ textarea:focus-visible {
 .terrain-refused {
   pointer-events: none;
 }
+
+/* Battle flow (issue #83): setup, refusal, battle screen layout A with a
+   permanent turn bar, battles list. Mirrors prototype/battle.css. */
+.setup {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 40px 24px 80px;
+  width: 100%;
+}
+
+.setup h1 {
+  font-family: Georgia, serif;
+  font-weight: 400;
+  font-size: 30px;
+  margin: 0;
+}
+
+.setup .lede {
+  color: var(--muted);
+  line-height: 1.8;
+  margin: 10px 0 28px;
+}
+
+.setup-card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.setup-card h2 {
+  font-size: 17px;
+  margin: 0 0 6px;
+  font-weight: 550;
+}
+
+.setup-meta {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0 0 16px;
+  line-height: 1.7;
+}
+
+.side-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 4px;
+  border-top: 1px solid var(--line);
+}
+
+.side-row .side-name {
+  font-weight: 650;
+  font-size: 14px;
+}
+
+.side-row .side-id {
+  font-size: 11px;
+  color: var(--muted);
+  font-family: ui-monospace, monospace;
+}
+
+.side-row label {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.side-row select {
+  height: 38px;
+  border: 1px solid #dce0d1;
+  border-radius: 4px;
+  padding: 8px 10px;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.setup-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 18px;
+  flex-wrap: wrap;
+}
+
+.refusal {
+  background: var(--panel);
+  border: 1px solid #b76e5a;
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-top: 16px;
+}
+
+.refusal h2 {
+  font-size: 16px;
+  margin: 0 0 8px;
+  color: #8a4636;
+}
+
+.refusal p {
+  font-size: 13px;
+  line-height: 1.7;
+  color: #4c5545;
+}
+
+.problem-list {
+  margin: 12px 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.problem-list li {
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 8px 10px;
+  border-radius: 4px;
+  background: #f9e9e4;
+  border-left: 3px solid #b76e5a;
+  color: #8a4636;
+}
+
+.battle-workspace {
+  height: calc(100dvh - 280px);
+}
+
+.turnbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 28px;
+  background: #334a36;
+  color: #f2f5e7;
+  font-size: 13px;
+}
+
+.turnbar .round {
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.turnbar .active-side {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 650;
+}
+
+.turnbar .active-side .swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1px solid #ffffff88;
+}
+
+.turnbar .phase {
+  font-size: 12px;
+  opacity: 0.85;
+}
+
+.turnbar .spacer {
+  flex: 1;
+}
+
+.announcement {
+  background: #eef2e4;
+  border: 1px solid var(--green);
+  border-radius: var(--radius);
+  padding: 14px 18px;
+  margin-bottom: 16px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.handoff {
+  background: #faf3dd;
+  border: 1px solid #e5d9b5;
+  border-radius: var(--radius);
+  padding: 14px;
+  margin: 14px 0;
+}
+
+.handoff p {
+  font-size: 12px;
+  line-height: 1.7;
+  color: #6b5518;
+  margin: 0 0 10px;
+}
+
+.confirm-box {
+  background: #f9e9e4;
+  border: 1px solid #b76e5a;
+  border-radius: var(--radius);
+  padding: 14px;
+  margin: 14px 0;
+}
+
+.confirm-box p {
+  font-size: 12px;
+  line-height: 1.7;
+  color: #8a4636;
+  margin: 0 0 10px;
+}
+
+.confirm-actions,
+.handoff-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.commit-hint {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.7;
+  margin: 8px 0;
+}
+
+.empty-inspector {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.battle-log-scroll {
+  max-height: 420px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--paper);
+  padding: 10px 12px;
+  margin-top: 8px;
+}
+
+.log-list.log-grouped {
+  max-height: none;
+  overflow: visible;
+}
+
+.log-turn {
+  margin-bottom: 10px;
+}
+
+.log-turn-head {
+  display: block;
+  font-size: 11px;
+  font-weight: 650;
+  color: var(--ink);
+  margin-bottom: 4px;
+}
+
+.log-phases {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 10px;
+  border-left: 2px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.log-phase-head {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 2px;
+}
+
+.log-lines {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.log-lines li {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--ink);
+  font-family: ui-monospace, monospace;
+}
+
+.result {
+  margin: 12px 0 0;
+}
+
+.result dt {
+  font-size: 10px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 12px 0 4px;
+  font-weight: 650;
+}
+
+.result dd {
+  margin: 0;
+}
+
+.result-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.result-list li {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.result-list li.empty-result {
+  color: var(--muted);
+}
+
+.battles {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 0 24px 80px;
+  width: 100%;
+}
+
+.battles h2 {
+  font-family: Georgia, serif;
+  font-weight: 400;
+  font-size: 24px;
+  margin: 0;
+}
+
+.empty-battles {
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  padding: 28px;
+  color: var(--muted);
+  line-height: 1.8;
+  background: var(--panel);
+  margin-top: 12px;
+}
+
+.battle-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.battle-list li {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+
+.battle-list .title {
+  font-weight: 550;
+}
+
+.battle-list .meta {
+  font-size: 12px;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+.battle-list .actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
