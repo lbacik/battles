@@ -819,3 +819,110 @@ textarea:focus-visible {
   opacity: 1;
   transform: translate(-50%, 0);
 }
+
+.issue-error {
+  background: #f9e9e4;
+  border-left: 3px solid #b76e5a;
+  color: #8a4636;
+}
+
+.issue-info {
+  background: #eef2f6;
+  border-left: 3px solid #5b7fa6;
+  color: #33506e;
+}
+
+.issue-count {
+  font-size: 11px;
+  font-weight: 650;
+  color: #6b5518;
+  background: #faf3dd;
+  border: 1px solid #e5d9b5;
+  border-radius: 999px;
+  padding: 1px 9px;
+}
+
+.unknown-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #4b5563;
+  background: #eef0f2;
+  border: 1px solid #d4d8dd;
+  border-radius: 999px;
+  padding: 1px 9px;
+  margin: 4px 0 6px 20px;
+  white-space: normal;
+  line-height: 1.6;
+}
+
+.provisional-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 650;
+  color: #6b5518;
+  background: #faf3dd;
+  border: 1px solid #e5d9b5;
+  border-radius: 999px;
+  padding: 3px 10px;
+  white-space: nowrap;
+}
+
+.import-label {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+}
+
+.btn-danger {
+  color: #8a4636;
+}
+
+/* Library trust: unreadable entries and the overwrite-or-copy conflict dialog. */
+.library-entry.unreadable {
+  border-style: dashed;
+}
+
+.library-entry.unreadable .meta {
+  color: #a46c5b;
+}
+
+.conflict-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(40, 45, 35, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.conflict-dialog {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 22px 24px;
+  max-width: 480px;
+  margin: 0 16px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.25);
+}
+
+.conflict-dialog h2 {
+  margin: 0 0 10px;
+  font-size: 18px;
+  font-weight: 550;
+}
+
+.conflict-dialog p {
+  font-size: 13px;
+  line-height: 1.7;
+  color: #4c5545;
+  margin: 0;
+}
+
+.conflict-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+  flex-wrap: wrap;
+}
