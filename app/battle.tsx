@@ -74,6 +74,9 @@ interface BattleScreenProps {
   onCommitEmpty: () => void;
   onCommitDraft: (orders: any[]) => void;
   onContinueAutomated: () => void;
+  onConcede: () => void;
+  onRematch: () => void;
+  onOpenScenarioInEditor: () => void;
   onBackToLibrary: () => void;
 }
 
@@ -109,10 +112,17 @@ export default function BattleScreen({
   onCommitEmpty,
   onCommitDraft,
   onContinueAutomated,
+  onConcede,
+  onRematch,
+  onOpenScenarioInEditor,
   onBackToLibrary,
 }: BattleScreenProps) {
   const [selectedUnitId, setSelectedUnitId] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
+  // A concede needs its own confirmation step in the turn bar, separate from
+  // the empty-commit confirmation: requesting it locks drafting until the
+  // player confirms or cancels.
+  const [concedeConfirming, setConcedeConfirming] = useState(false);
   // The ordered turn draft: at most one order draft per unit, of every kind
   // (Move, Charge, Shoot, Reform, Withdraw, Rally). Every mutation rebuilds
   // the turn submission in draft order and re-validates it against the
@@ -135,6 +145,7 @@ export default function BattleScreen({
   // A committed turn cannot be taken back, so no draft survives it.
   useEffect(() => {
     setConfirming(false);
+    setConcedeConfirming(false);
     setDrafts([]);
     setSelectedUnitId(null);
   }, [battle?.turnNumber, battle?.id]);
@@ -159,6 +170,26 @@ export default function BattleScreen({
     battle?.phase === TURN_PHASE_ORDERS &&
     !resolving &&
     !awaitingHandoff;
+
+  // A concede is offered in the turn bar during one's own turn only: the same
+  // gate as drafting (an ongoing battle in the human side's Orders phase, with
+  // no handoff wait, resolution, or open confirmation in the way). While the
+  // concession itself waits for confirmation, drafting locks and the turn bar
+  // shows the confirm step instead.
+  const canConcede =
+    !finished &&
+    !automated &&
+    battle?.phase === TURN_PHASE_ORDERS &&
+    !resolving &&
+    !awaitingHandoff &&
+    !confirming &&
+    !concedeConfirming;
+
+  function requestConcede(): void {
+    if (!canConcede) return;
+    setConfirming(false);
+    setConcedeConfirming(true);
+  }
 
   function ownUnit(unitId: string | null): any {
     if (!unitId) return null;
@@ -1172,6 +1203,23 @@ export default function BattleScreen({
   const result = battle?.result && typeof battle.result === 'object' ? battle.result : null;
   const winnerName = battle?.winner ? sideName(battle, battle.winner) : null;
 
+  // The outcome screen of a finished battle: the winner or the draw, the
+  // reason (an army break naming the broken sides; the round limit with both
+  // lost shares and the margin; a concession naming who conceded), and both
+  // sides' losses. The final map and the battle log stay viewable around it.
+  const lostShares: Record<string, number> =
+    result && typeof result.lostShares === 'object' && result.lostShares !== null
+      ? result.lostShares
+      : {};
+  const sideLosses: Record<string, number> =
+    result && typeof result.losses === 'object' && result.losses !== null ? result.losses : {};
+
+  function percent(share: unknown): string {
+    return typeof share === 'number' && Number.isFinite(share)
+      ? `${(share * 100).toFixed(1)}%`
+      : '—';
+  }
+
   function outcomeReason(): string {
     if (!result || !result.reason) {
       return `This battle ended (${battle?.status}).`;
@@ -1188,9 +1236,29 @@ export default function BattleScreen({
       return 'Round limit reached — the side with the lower lost share wins when the difference exceeds the margin.';
     }
     if (result.reason === 'concede') {
-      return 'Concession.';
+      const conceded = (battle?.events || []).find((event: any) => event?.type === 'turn-conceded');
+      const conceder = conceded?.side ? sideName(battle, conceded.side) : null;
+      return conceder && winnerName
+        ? `Concession — ${conceder} conceded, so ${winnerName} wins.`
+        : 'Concession.';
     }
     return `Ended: ${result.reason}.`;
+  }
+
+  // The round-limit margin line: both lost shares already sit in the losses
+  // list below, and the difference decides against the margin.
+  function outcomeMargin(): string | null {
+    if (!result || result.reason !== 'round-limit') return null;
+    const ids = sides.map((side: any) => side?.id);
+    const difference =
+      ids.length === 2 &&
+      typeof lostShares[ids[0]] === 'number' &&
+      Number.isFinite(lostShares[ids[0]]) &&
+      typeof lostShares[ids[1]] === 'number' &&
+      Number.isFinite(lostShares[ids[1]])
+        ? Math.abs(lostShares[ids[0]] - lostShares[ids[1]])
+        : null;
+    return `Draw margin ${percent(result.margin)} · difference ${difference === null ? '—' : percent(difference)}.`;
   }
 
   return (
@@ -1503,15 +1571,69 @@ export default function BattleScreen({
               <>
                 <span className="eyebrow">BATTLE OVER</span>
                 <h2 data-testid="battle-status">{battle?.status}</h2>
+                <div className="kv">
+                  <dt>Status</dt>
+                  <dd>
+                    {battle?.status}
+                    {winnerName ? ` · winner ${winnerName}` : ' · draw'}
+                  </dd>
+                </div>
                 <section aria-label="Battle outcome" data-testid="battle-outcome">
+                  <span className="eyebrow">OUTCOME</span>
                   <h3 data-testid="outcome-title">
                     {winnerName ? `${winnerName} wins` : 'Draw'}
                   </h3>
                   <p data-testid="outcome-reason">{outcomeReason()}</p>
+                  {outcomeMargin() ? (
+                    <p data-testid="outcome-margin">{outcomeMargin()}</p>
+                  ) : null}
+                  <ul className="outcome-losses" data-testid="outcome-losses">
+                    {sides.map((side: any) => (
+                      <li key={side?.id ?? side?.name}>
+                        <strong>{side?.name ?? side?.id}</strong> —{' '}
+                        {typeof sideLosses[side?.id] === 'number' &&
+                        Number.isFinite(sideLosses[side?.id])
+                          ? `${sideLosses[side?.id]} soldiers lost`
+                          : 'losses unknown'}{' '}
+                        · lost share {percent(lostShares[side?.id])}
+                      </li>
+                    ))}
+                  </ul>
                 </section>
-                <p className="readonly-note">
-                  This battle is finished and read-only. It stays on the Battles list.
-                </p>
+                <div className="handoff" data-testid="battle-finished">
+                  <p>
+                    This battle is finished and read-only. The final map and the battle log stay
+                    viewable; the battle stays on the Battles list.
+                  </p>
+                  <div className="handoff-actions">
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      data-testid="rematch"
+                      onClick={onRematch}
+                    >
+                      Rematch
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      data-testid="back-to-library"
+                      onClick={onBackToLibrary}
+                    >
+                      Back to library
+                    </button>
+                    {battle?.scenario?.id ? (
+                      <button
+                        type="button"
+                        className="btn-secondary"
+                        data-testid="open-scenario-in-editor"
+                        onClick={onOpenScenarioInEditor}
+                      >
+                        Open scenario in editor
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
               </>
             ) : (
               <>
@@ -1915,6 +2037,41 @@ export default function BattleScreen({
           Phase: {battle?.phase}
         </span>
         <span className="spacer" />
+        {finished ? null : concedeConfirming ? (
+          <span className="concede-confirm" data-testid="concede-confirm-box">
+            Concede the battle?
+            <button
+              type="button"
+              className="btn-primary"
+              data-testid="concede-confirm"
+              onClick={() => {
+                setConcedeConfirming(false);
+                onConcede();
+              }}
+            >
+              Yes, concede
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              data-testid="concede-cancel"
+              onClick={() => setConcedeConfirming(false)}
+            >
+              Cancel
+            </button>
+          </span>
+        ) : (
+          <button
+            type="button"
+            className="btn-secondary"
+            data-testid="concede"
+            disabled={!canConcede}
+            title="Concede the battle (only on your own turn)"
+            onClick={requestConcede}
+          >
+            Concede
+          </button>
+        )}
         <button
           type="button"
           className="btn-quiet"

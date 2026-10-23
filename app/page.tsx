@@ -809,6 +809,100 @@ export default function Home() {
     await persistBattle(next, nextDecisions);
   }
 
+  // A concession ends the battle at once with the other side the winner (the
+  // engine records the `turn-conceded` event first, then the uniform
+  // `battle-ended` result). There is no handoff afterwards: the battle is
+  // finished and read-only. The decision is appended to the stored decisions
+  // so the Battles list keeps the full record.
+  async function handleConcede() {
+    if (!battle || resolving) return;
+    if (battle.status !== 'ongoing') return;
+    setResolveError(null);
+    const side = battle.activeSide;
+    let next: any;
+    try {
+      next = resolveTurn(battle, { type: 'concede', side });
+    } catch (concedeError) {
+      setResolveError(
+        concedeError instanceof Error ? concedeError.message : String(concedeError),
+      );
+      return;
+    }
+    const nextDecisions = [...decisions, { type: 'concede', side }];
+    setBattle(next);
+    setDecisions(nextDecisions);
+    setAnnouncement(null);
+    showToast(`${battleSideName(battle, side)} conceded.`);
+    await persistBattle(next, nextDecisions);
+  }
+
+  // A rematch starts a new battle from this battle's scenario snapshot (not
+  // the library's current scenario, which may have changed since) with a
+  // fresh seed and the same controllers. The finished battle stays stored and
+  // read-only.
+  async function handleRematch() {
+    if (!battle || battle.status === 'ongoing') return;
+    const snapshot = battle.scenario;
+    if (!snapshot) {
+      setBattleError('Rematch refused: this battle has no scenario snapshot.');
+      return;
+    }
+    const controllers = { ...(battle.controllers || {}) };
+    const seed = drawBattleSeed();
+    const battleId = generateId();
+    let started: any;
+    try {
+      started = startBattle(snapshot, { seed, controllers, battleId });
+    } catch (rematchError) {
+      if (rematchError instanceof BattleStartError) {
+        setBattleError(`Rematch refused: ${rematchError.problems.length} playability problems.`);
+      } else {
+        setBattleError(rematchError instanceof Error ? rematchError.message : String(rematchError));
+      }
+      return;
+    }
+    const startedDecisions: any[] = [];
+    setBattle(started);
+    setDecisions(startedDecisions);
+    setAnnouncement(
+      `${battleSideName(started, started.startingSide)} begins the rematch — round 1, turn 1.`,
+    );
+    setResolveError(null);
+    setResolving(false);
+    setAwaitingHandoff(false);
+    setHandoffSide(null);
+    setUrlParams({ scenario: null, battle: battleId });
+    await persistBattle(started, startedDecisions);
+    showToast(`${battleSideName(started, started.activeSide)} begins the rematch.`);
+  }
+
+  // "Open scenario in editor" opens the library's current scenario by the same
+  // id — not the battle's snapshot, which never changes after Begin.
+  async function handleOpenBattleScenarioInEditor() {
+    const scenarioId = battle?.scenario?.id;
+    if (!scenarioId) return;
+    setBattleError(null);
+    let stored: unknown = null;
+    try {
+      stored = await getScenarioStore().load(scenarioId);
+    } catch {
+      stored = null;
+    }
+    if (!stored) {
+      showToast('That scenario is no longer in the library.');
+      return;
+    }
+    setBattle(null);
+    setDecisions([]);
+    setAnnouncement(null);
+    setResolveError(null);
+    setResolving(false);
+    setAwaitingHandoff(false);
+    setHandoffSide(null);
+    setUrlParams({ scenario: null, battle: null });
+    await openScenario(scenarioId);
+  }
+
   // An automated side's turn resolves through the runner at once and then
   // waits for "Continue": there is no auto-play.
   async function handleContinueAutomated() {
@@ -970,6 +1064,9 @@ export default function Home() {
             onCommitEmpty={handleCommitEmpty}
             onCommitDraft={handleCommitDraft}
             onContinueAutomated={handleContinueAutomated}
+            onConcede={handleConcede}
+            onRematch={handleRematch}
+            onOpenScenarioInEditor={handleOpenBattleScenarioInEditor}
             onBackToLibrary={handleBackToLibrary}
           />
         ) : setupDocument && setupId ? (

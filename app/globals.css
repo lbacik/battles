@@ -1396,6 +1396,56 @@ textarea:focus-visible {
   flex: 1;
 }
 
+/* Concede sits in the turn bar and is available only on one's own turn:
+   otherwise it renders disabled, and conceding needs confirmation in the
+   turn bar itself. */
+.turnbar .concede-confirm {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.turnbar .concede-confirm .btn-primary,
+.turnbar .concede-confirm .btn-secondary,
+.turnbar [data-testid='concede'] {
+  min-height: 32px;
+  padding: 6px 12px;
+}
+
+/* Battle outcome: winner or draw, the reason, and both sides' losses. The
+   final map and the battle log stay viewable around it. */
+.outcome-losses {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.outcome-losses li {
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.outcome-losses li strong {
+  font-weight: 650;
+}
+
+[data-testid='battle-outcome'] h3 {
+  font-size: 16px;
+  margin: 0 0 6px;
+}
+
+[data-testid='outcome-reason'],
+[data-testid='outcome-margin'] {
+  font-size: 12px;
+  line-height: 1.7;
+  margin: 4px 0;
+}
+
 .announcement {
   background: #eef2e4;
   border: 1px solid var(--green);
