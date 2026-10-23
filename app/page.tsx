@@ -13,13 +13,29 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Editor from './editor';
 import Library from './library';
+import BattleSetup from './battle-setup';
+import BattleScreen from './battle';
+import BattlesList from './battles-list';
 import { documentsMatch, getScenarioStore, type LibraryEntry } from '../lib/store';
+import { getBattleStore, type BattleEntry } from '../lib/battles';
+import {
+  BattleStartError,
+  startBattle,
+  validatePlayability,
+} from '../domain/battle.js';
+import { createPlayerForController, runTurn } from '../domain/players.js';
+import {
+  SUBMISSION_FORMAT_VERSION,
+  resolveTurn,
+  validateTurn,
+} from '../domain/turn.js';
 import {
   classifyRulesetReference,
   cloneScenario,
   createHistory,
   createScenario,
   exportScenario,
+  generateId,
   historyCommit,
   historyRedo,
   historyUndo,
@@ -43,6 +59,53 @@ function scenarioIdFromUrl(): string | null {
   if (typeof window === 'undefined') return null;
   const id = new URLSearchParams(window.location.search).get('scenario');
   return id && id.trim() ? id : null;
+}
+
+function battleIdFromUrl(): string | null {
+  if (typeof window === 'undefined') return null;
+  const id = new URLSearchParams(window.location.search).get('battle');
+  return id && id.trim() ? id : null;
+}
+
+// The seed is drawn at Begin and never shown: there is no seed field in the
+// UI. Tests fix it programmatically through `window.__POLIS_TEST_SEED` or
+// the `?seed=` query parameter.
+function battleSeedOverride(): string | number | null {
+  if (typeof window === 'undefined') return null;
+  const programmatic = (window as any).__POLIS_TEST_SEED;
+  if (typeof programmatic === 'number' || typeof programmatic === 'string') {
+    return programmatic;
+  }
+  const raw = new URLSearchParams(window.location.search).get('seed');
+  if (raw === null || raw.trim() === '') return null;
+  const text = raw.trim();
+  if (/^-?\d+$/.test(text)) return Number(text);
+  return text;
+}
+
+function drawBattleSeed(): number {
+  const bytes = new Uint32Array(1);
+  crypto.getRandomValues(bytes);
+  return bytes[0];
+}
+
+function setUrlParams(params: { scenario?: string | null; battle?: string | null }) {
+  const url = new URL(window.location.href);
+  if (params.scenario === undefined) {
+    // Leave untouched.
+  } else if (params.scenario) {
+    url.searchParams.set('scenario', params.scenario);
+  } else {
+    url.searchParams.delete('scenario');
+  }
+  if (params.battle === undefined) {
+    // Leave untouched.
+  } else if (params.battle) {
+    url.searchParams.set('battle', params.battle);
+  } else {
+    url.searchParams.delete('battle');
+  }
+  window.history.replaceState(null, '', url);
 }
 
 function downloadFile(fileName: string, text: string) {
@@ -92,6 +155,20 @@ export default function Home() {
     loadedRevision: number | null;
     storedRevision: number | null;
   } | null>(null);
+  // Battle flow: the setup screen (scenario plus controller choice), the
+  // playability refusal, the live battle with its committed decisions, and
+  // the stored Battles list. Every committed turn is saved to the battles
+  // collection, so reloading mid-battle resumes the identical state.
+  const [battles, setBattles] = useState<BattleEntry[]>([]);
+  const [setupId, setSetupId] = useState<string | null>(null);
+  const [setupDocument, setSetupDocument] = useState<ScenarioDocument | null>(null);
+  const [setupProblems, setSetupProblems] = useState<{ message: string }[]>([]);
+  const [battle, setBattle] = useState<any | null>(null);
+  const [decisions, setDecisions] = useState<any[]>([]);
+  const [announcement, setAnnouncement] = useState<string | null>(null);
+  const [resolving, setResolving] = useState(false);
+  const [resolveError, setResolveError] = useState<string | null>(null);
+  const [battleError, setBattleError] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [persistent, setPersistent] = useState<boolean | null>(null);
   const persistRequested = useRef(false);
@@ -103,6 +180,16 @@ export default function Home() {
       setError(null);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : String(loadError));
+    }
+  }, []);
+
+  const refreshBattles = useCallback(async () => {
+    try {
+      const list = await getBattleStore().list();
+      setBattles(list as BattleEntry[]);
+      setBattleError(null);
+    } catch (loadError) {
+      setBattleError(loadError instanceof Error ? loadError.message : String(loadError));
     }
   }, []);
 
@@ -178,12 +265,64 @@ export default function Home() {
     [refreshLibrary],
   );
 
+  // Resuming a stored battle reloads the identical state: the battle keeps
+  // its own scenario snapshot, so editing the scenario never changes it.
+  const resumeBattle = useCallback(
+    async (id: string) => {
+      setBattleError(null);
+      try {
+        const stored = await getBattleStore().load(id);
+        if (!stored) {
+          setBattleError('That battle is no longer stored.');
+          await refreshBattles();
+          return;
+        }
+        setBattle(stored.battle);
+        setDecisions(Array.isArray(stored.decisions) ? stored.decisions : []);
+        // The starting-side announcement belongs to the first turn only: a
+        // resumed battle that already resolved a turn shows no announcement.
+        const resolved = (stored.battle?.events || []).some(
+          (event: any) =>
+            event?.type === 'turn-resolved' ||
+            event?.type === 'turn-conceded' ||
+            event?.type === 'battle-ended',
+        );
+        const startedSide = (stored.battle?.scenario?.sides || []).find(
+          (side: any) => side?.id === stored.battle?.startingSide,
+        );
+        setAnnouncement(
+          !resolved && startedSide ? `${startedSide.name} begins — round 1, turn 1.` : null,
+        );
+        setResolveError(null);
+        setResolving(false);
+        setSetupId(null);
+        setSetupDocument(null);
+        setSetupProblems([]);
+        setOpenId(null);
+        setDocument(null);
+        setSavedDocument(null);
+        setUrlParams({ scenario: null, battle: id });
+      } catch (resumeError) {
+        setBattleError(
+          resumeError instanceof Error ? resumeError.message : String(resumeError),
+        );
+      }
+    },
+    [refreshBattles],
+  );
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
       await refreshLibrary();
+      await refreshBattles();
       if (cancelled) return;
       setLoading(false);
+      const battleParam = battleIdFromUrl();
+      if (battleParam) {
+        await resumeBattle(battleParam);
+        return;
+      }
       const id = scenarioIdFromUrl();
       if (id) {
         await openScenario(id);
@@ -192,7 +331,7 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
-  }, [refreshLibrary, openScenario]);
+  }, [refreshLibrary, refreshBattles, resumeBattle, openScenario]);
 
   async function handleCreate(title: string) {
     setCreating(true);
@@ -473,12 +612,232 @@ export default function Home() {
     void refreshLibrary();
   }
 
+  // --- Battle flow ---------------------------------------------------------
+  // A battle starts from a saved scenario: from the library directly, or from
+  // the editor only without unsaved changes (the setup screen always shows the
+  // saved version). Begin runs playability validation; a refusal lists every
+  // problem and creates no battle.
+
+  function battleSideName(battle: any, id: string): string {
+    const side = (battle?.scenario?.sides || []).find((entry: any) => entry?.id === id);
+    return side?.name || id;
+  }
+
+  async function persistBattle(nextBattle: any, nextDecisions: any[]) {
+    try {
+      await getBattleStore().save(nextBattle, nextDecisions);
+      await refreshBattles();
+    } catch (persistError) {
+      showToast(
+        persistError instanceof Error ? persistError.message : String(persistError),
+      );
+    }
+  }
+
+  async function handleStartBattleFromLibrary(id: string) {
+    setBattleError(null);
+    try {
+      const loaded = await getScenarioStore().load(id);
+      if (!loaded) {
+        setBattleError('That scenario is no longer in the library.');
+        await refreshLibrary();
+        return;
+      }
+      setSetupId(id);
+      setSetupDocument(loaded);
+      setSetupProblems([]);
+    } catch (startError) {
+      setBattleError(startError instanceof Error ? startError.message : String(startError));
+    }
+  }
+
+  function handleStartBattleFromEditor() {
+    // The editor button is disabled while dirty, so this always sees the
+    // saved version; guard anyway so a battle never starts from edits.
+    if (dirty || !document || !openId) return;
+    setBattleError(null);
+    setSetupId(openId);
+    setSetupDocument(cloneScenario(document));
+    setSetupProblems([]);
+  }
+
+  async function handleBegin(controllers: Record<string, string>) {
+    if (!setupDocument) return;
+    setBattleError(null);
+    setSetupProblems([]);
+    let problems: { message: string }[] = [];
+    try {
+      problems = validatePlayability(setupDocument);
+    } catch (validationError) {
+      problems = [
+        {
+          message: `Cannot start a battle: ${validationError instanceof Error ? validationError.message : String(validationError)}`,
+        },
+      ];
+    }
+    if (problems.length > 0) {
+      setSetupProblems(problems);
+      return;
+    }
+    const seed = battleSeedOverride() ?? drawBattleSeed();
+    const normalized: Record<string, string> = {};
+    for (const side of setupDocument.sides || []) {
+      normalized[side.id] = controllers[side.id] || 'human';
+    }
+    // The Battles list keys battles by a durable id distinct from the
+    // scenario id, so two battles from one scenario never overwrite each
+    // other. The battle keeps the scenario id inside its snapshot.
+    const battleId = generateId();
+    let started: any;
+    try {
+      started = startBattle(setupDocument, { seed, controllers: normalized, battleId });
+    } catch (startError) {
+      if (startError instanceof BattleStartError) {
+        setSetupProblems(startError.problems);
+        return;
+      }
+      setBattleError(startError instanceof Error ? startError.message : String(startError));
+      return;
+    }
+    const startedDecisions: any[] = [];
+    setBattle(started);
+    setDecisions(startedDecisions);
+    setAnnouncement(`${battleSideName(started, started.startingSide)} begins — round 1, turn 1.`);
+    setResolveError(null);
+    setResolving(false);
+    setSetupId(null);
+    setSetupDocument(null);
+    setSetupProblems([]);
+    setOpenId(null);
+    setDocument(null);
+    setSavedDocument(null);
+    setUrlParams({ scenario: null, battle: battleId });
+    await persistBattle(started, startedDecisions);
+    showToast(`${battleSideName(started, started.activeSide)} begins.`);
+  }
+
+  // The human side commits an empty turn: all units hold. The commit is
+  // validated by the engine before it resolves; a committed turn cannot be
+  // taken back.
+  async function handleCommitEmpty() {
+    if (!battle || resolving) return;
+    if (battle.status !== 'ongoing') return;
+    setResolveError(null);
+    const submission = {
+      formatVersion: SUBMISSION_FORMAT_VERSION,
+      battleId: battle.id,
+      turnNumber: battle.turnNumber,
+      side: battle.activeSide,
+      orders: [],
+    };
+    const verdict = validateTurn(battle, submission);
+    if (!verdict.ok) {
+      setResolveError(`Commit refused: ${verdict.message} (${verdict.code}).`);
+      return;
+    }
+    let next: any;
+    try {
+      next = resolveTurn(battle, { type: 'commit', submission });
+    } catch (resolveFailure) {
+      setResolveError(
+        resolveFailure instanceof Error ? resolveFailure.message : String(resolveFailure),
+      );
+      return;
+    }
+    const nextDecisions = [...decisions, { type: 'commit', submission }];
+    setBattle(next);
+    setDecisions(nextDecisions);
+    setAnnouncement(null);
+    showToast(`Turn ${battle.turnNumber} resolved.`);
+    await persistBattle(next, nextDecisions);
+  }
+
+  // An automated side's turn resolves through the runner at once and then
+  // waits for "Continue": there is no auto-play.
+  async function handleContinueAutomated() {
+    if (!battle || resolving) return;
+    if (battle.status !== 'ongoing') return;
+    setResolving(true);
+    setResolveError(null);
+    try {
+      const players: Record<string, any> = {};
+      for (const [side, controller] of Object.entries(battle.controllers || {})) {
+        if (controller !== 'human') {
+          players[side] = createPlayerForController(controller as string);
+        }
+      }
+      if (!players[battle.activeSide]) {
+        players[battle.activeSide] = createPlayerForController(
+          battle.controllers?.[battle.activeSide] || 'passive',
+        );
+      }
+      const step = await runTurn(battle, players);
+      const nextDecisions = [...decisions, step.decision];
+      setBattle(step.battle);
+      setDecisions(nextDecisions);
+      setAnnouncement(null);
+      showToast(`Turn ${battle.turnNumber} resolved.`);
+      await persistBattle(step.battle, nextDecisions);
+    } catch (automatedError) {
+      setResolveError(
+        automatedError instanceof Error ? automatedError.message : String(automatedError),
+      );
+    } finally {
+      setResolving(false);
+    }
+  }
+
+  function handleBackToLibrary() {
+    setSetupId(null);
+    setSetupDocument(null);
+    setSetupProblems([]);
+    setBattle(null);
+    setDecisions([]);
+    setAnnouncement(null);
+    setResolveError(null);
+    setResolving(false);
+    setUrlParams({ scenario: null, battle: null });
+    void refreshLibrary();
+    void refreshBattles();
+  }
+
+  async function handleOpenSetupInEditor() {
+    if (!setupId) return;
+    const id = setupId;
+    setSetupId(null);
+    setSetupDocument(null);
+    setSetupProblems([]);
+    await openScenario(id);
+  }
+
+  async function handleDeleteBattle(id: string) {
+    if (!window.confirm('Delete this battle?')) return;
+    try {
+      await getBattleStore().remove(id);
+      if (battle?.id === id) {
+        handleBackToLibrary();
+        return;
+      }
+      await refreshBattles();
+      showToast('Battle deleted.');
+    } catch (deleteError) {
+      setBattleError(deleteError instanceof Error ? deleteError.message : String(deleteError));
+    }
+  }
+
   function showToast(message: string) {
     setToast(message);
     window.setTimeout(() => setToast(null), 2400);
   }
 
-  const headerTitle = document && openId ? document.title : 'Scenario library';
+  const headerTitle =
+    battle && battle.scenario
+      ? battle.scenario.title
+      : document && openId
+        ? document.title
+        : setupDocument && setupId
+          ? setupDocument.title
+          : 'Scenario library';
   const dirty = !!document && !!savedDocument && !documentsMatch(document, savedDocument);
   const canUndo = history.past.length > 0;
   const canRedo = history.future.length > 0;

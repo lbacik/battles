@@ -65,6 +65,7 @@ interface EditorProps {
   onSave: () => Promise<void>;
   onExport: () => void;
   onBack: () => void;
+  onStartBattle: () => void;
 }
 
 // A form field that commits on blur (Enter blurs, Escape reverts): typing
@@ -253,6 +254,7 @@ export default function Editor({
   onSave,
   onExport,
   onBack,
+  onStartBattle,
 }: EditorProps) {
   const [mode, setMode] = useState<'battle' | 'map'>('battle');
   // Rejected form values, keyed by field: the value is never committed to
@@ -1332,6 +1334,20 @@ export default function Editor({
           onClick={onExport}
         >
           Export
+        </button>
+        <button
+          type="button"
+          className="btn-secondary"
+          data-testid="start-battle-editor"
+          disabled={dirty}
+          title={
+            dirty
+              ? 'Save the scenario first: a battle starts from the saved version.'
+              : 'Start a battle from this scenario'
+          }
+          onClick={onStartBattle}
+        >
+          Start battle
         </button>
         <button
           type="button"

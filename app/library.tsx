@@ -11,6 +11,7 @@ interface LibraryProps {
   importError: string | null;
   onCreate: (title: string) => Promise<void>;
   onOpen: (id: string) => void;
+  onStartBattle: (id: string) => void;
   onDuplicate: (id: string) => void;
   onDelete: (id: string) => void;
   onExport: (id: string) => void;
@@ -32,6 +33,7 @@ export default function Library({
   importError,
   onCreate,
   onOpen,
+  onStartBattle,
   onDuplicate,
   onDelete,
   onExport,
@@ -143,6 +145,14 @@ export default function Library({
                       onClick={() => onOpen(entry.id as string)}
                     >
                       Open
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      data-testid="start-battle"
+                      onClick={() => onStartBattle(entry.id as string)}
+                    >
+                      Start battle
                     </button>
                     <button
                       type="button"
