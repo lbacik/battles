@@ -11,14 +11,21 @@ import {
   spacingClass,
 } from '../domain/polis-classical.js';
 import {
+  GROUND_COVER_CATEGORIES,
+  addElevationFeature,
+  addGroundCoverFeature,
   collectWarnings,
   createUnit,
   deleteUnit,
   duplicateUnit,
   isProvisionalRuleset,
+  removeElevationFeature,
+  removeGroundCoverFeature,
   resizeBattlefield,
   rulesetCompatibilityNotice,
   unitDerived,
+  updateElevationFeature,
+  updateGroundCoverFeature,
   updateScenarioDescription,
   updateScenarioTitle,
   updateSideColor,
@@ -28,8 +35,11 @@ import {
   updateUnitSide,
   updateUnitSpacing,
   updateUnitTroopType,
+  validateElevationCandidate,
+  validateGroundCoverCandidate,
   validateScenario,
 } from '../domain/scenario.js';
+import { polygonArea, round1 } from '../domain/geometry.js';
 
 type ScenarioDocument = any;
 
@@ -236,6 +246,26 @@ export default function Editor({
   // untouched, so the message lives outside the field errors.
   const [notice, setNotice] = useState<string | null>(null);
 
+  // Terrain mode (Map editor tab): the polygon being drawn, the selected
+  // feature and vertex, and the last refused edit. All display-only: only
+  // committed documents reach onChange, so every terrain change is one undo
+  // step and refusals never touch the document.
+  interface TerrainDraft {
+    kind: 'ground' | 'elevation';
+    category: string;
+    points: { x: number; y: number }[];
+    error: string;
+  }
+  const [terrainDraft, setTerrainDraft] = useState<TerrainDraft | null>(null);
+  const [draftCategory, setDraftCategory] = useState<string>('forest');
+  const [selectedTerrainId, setSelectedTerrainId] = useState<string | null>(null);
+  const [selectedVertexIndex, setSelectedVertexIndex] = useState<number | null>(null);
+  const [terrainRefusal, setTerrainRefusal] = useState<{
+    ring: { x: number; y: number }[];
+    reason: string;
+    conflictId?: string | null;
+  } | null>(null);
+
   const units: ScenarioDocument[] = Array.isArray(document.units) ? document.units : [];
   const sides: ScenarioDocument[] = Array.isArray(document.sides) ? document.sides : [];
   const unitsBySide = (() => {
@@ -288,6 +318,15 @@ export default function Editor({
   const notices = rulesetNotice ? [rulesetNotice] : [];
   const issueCount = errors.length + warnings.length + catalogueWarnings.length + notices.length;
   const provisional = isProvisionalRuleset(document?.ruleset);
+
+  const groundFeatures: ScenarioDocument[] = (document.terrainFeatures || []).filter(
+    (feature: any) => feature && feature.kind === 'ground',
+  );
+  const hillFeatures: ScenarioDocument[] = (document.terrainFeatures || []).filter(
+    (feature: any) => feature && feature.kind === 'elevation',
+  );
+  const selectedTerrain = terrainFeatureById(document, selectedTerrainId);
+  const inTerrainMode = mode === 'map';
 
   // Unlimited session undo/redo over the scenario history, which never
   // includes selection or view state. The shortcut works from anywhere in the
@@ -559,6 +598,375 @@ export default function Editor({
     }
   }
 
+  // --- Terrain mode (ground cover areas and hills) --------------------------
+  // The Map editor tab replaces the order of battle with the terrain panel.
+  // Drawing, recategorising, vertex edits, and deletions all commit through
+  // onChange, so every terrain change is undoable with no extra work. A
+  // refused edit never reaches the document: the candidate ring is drawn in
+  // red and the reason is shown until the next committed change.
+  const GROUND_COVER_LABELS: Record<string, string> = {
+    forest: 'Forest',
+    rough: 'Rough ground',
+    water: 'Water',
+    settlement: 'Settlement',
+  };
+
+  function groundCoverLabel(category: unknown): string {
+    return typeof category === 'string' && GROUND_COVER_LABELS[category]
+      ? GROUND_COVER_LABELS[category]
+      : 'Ground cover';
+  }
+
+  const GROUND_FILLS_FOR_PANEL: Record<string, { fill: string }> = {
+    forest: { fill: '#aebc9c' },
+    rough: { fill: '#d8d2b8' },
+    water: { fill: '#b3cece' },
+    settlement: { fill: '#d8cbb2' },
+  };
+
+  function terrainFeatureById(doc: ScenarioDocument, id: string | null): any {
+    if (!id) return null;
+    return (
+      (doc?.terrainFeatures || []).find(
+        (feature: any) =>
+          feature?.id === id &&
+          (feature.kind === 'ground' || feature.kind === 'elevation'),
+      ) || null
+    );
+  }
+
+  function groundAreaSquareMetres(feature: any): number | null {
+    try {
+      return Math.round(polygonArea(feature.polygon));
+    } catch {
+      return null;
+    }
+  }
+
+  function addedTerrainFeature(before: ScenarioDocument, after: ScenarioDocument): any {
+    const ids = new Set((before?.terrainFeatures || []).map((feature: any) => feature?.id));
+    return (after?.terrainFeatures || []).find((feature: any) => feature && !ids.has(feature.id));
+  }
+
+  function startTerrainDraft(kind: 'ground' | 'elevation') {
+    if (terrainDraft) return;
+    setTerrainDraft(
+      kind === 'elevation'
+        ? { kind: 'elevation', category: 'hill', points: [], error: '' }
+        : { kind: 'ground', category: draftCategory, points: [], error: '' },
+    );
+    setSelectedTerrainId(null);
+    setSelectedVertexIndex(null);
+    setTerrainRefusal(null);
+  }
+
+  function cancelTerrainDraft() {
+    if (!terrainDraft) return;
+    setTerrainDraft(null);
+    setTerrainRefusal(null);
+  }
+
+  function addDraftPoint(point: { x: number; y: number }) {
+    const rounded = { x: round1(point.x), y: round1(point.y) };
+    setTerrainDraft((current) => {
+      if (!current) return current;
+      // A double click lands two vertices on the same spot: keep the first
+      // and ignore the repeat, so the draft never holds a zero-length edge.
+      const last = current.points[current.points.length - 1];
+      if (last && last.x === rounded.x && last.y === rounded.y) return current;
+      return { ...current, points: [...current.points, rounded], error: '' };
+    });
+    // A new vertex is a new attempt: the last refusal highlight goes away.
+    setTerrainRefusal(null);
+  }
+
+  function popDraftVertex() {
+    setTerrainDraft((current) =>
+      current && current.points.length > 0
+        ? { ...current, points: current.points.slice(0, -1), error: '' }
+        : current,
+    );
+    setTerrainRefusal(null);
+  }
+
+  function finishTerrainDraft() {
+    if (!terrainDraft) return;
+    const draft = terrainDraft;
+    if (draft.kind === 'elevation') {
+      if (draft.points.length < 3) {
+        setTerrainDraft({ ...draft, error: 'A hill needs at least 3 vertices.' });
+        return;
+      }
+      const check = validateElevationCandidate(document, draft.points);
+      if (!check.ok) {
+        const detail = check.reason ?? 'invalid shape';
+        const reason = `Cannot add a hill: ${detail}.`;
+        setTerrainDraft({
+          ...draft,
+          error: `${detail[0].toUpperCase()}${detail.slice(1)}.`,
+        });
+        setTerrainRefusal({ ring: check.ring, reason, conflictId: check.conflictId });
+        return;
+      }
+      let next: ScenarioDocument;
+      try {
+        next = addElevationFeature(document, { polygon: draft.points });
+      } catch (error) {
+        const reason = errorMessage(error);
+        setTerrainDraft({ ...draft, error: reason });
+        setTerrainRefusal({ ring: draft.points, reason });
+        return;
+      }
+      const added = addedTerrainFeature(document, next);
+      setTerrainDraft(null);
+      setSelectedTerrainId(added ? added.id : null);
+      setSelectedVertexIndex(null);
+      setTerrainRefusal(null);
+      setFieldErrors({});
+      onChange(next);
+      return;
+    }
+    if (draft.points.length < 3) {
+      setTerrainDraft({ ...draft, error: 'An area needs at least 3 vertices.' });
+      return;
+    }
+    const check = validateGroundCoverCandidate(document, draft.points);
+    if (!check.ok) {
+      const detail = check.reason ?? 'invalid shape';
+      const reason = `Cannot add a ground cover area: ${detail}.`;
+      setTerrainDraft({
+        ...draft,
+        error: `${detail[0].toUpperCase()}${detail.slice(1)}.`,
+      });
+      setTerrainRefusal({ ring: check.ring, reason, conflictId: check.conflictId });
+      return;
+    }
+    let next: ScenarioDocument;
+    try {
+      next = addGroundCoverFeature(document, { category: draft.category, polygon: draft.points });
+    } catch (error) {
+      const reason = errorMessage(error);
+      setTerrainDraft({ ...draft, error: reason });
+      setTerrainRefusal({ ring: draft.points, reason });
+      return;
+    }
+    const added = addedTerrainFeature(document, next);
+    setDraftCategory(draft.category);
+    setTerrainDraft(null);
+    setSelectedTerrainId(added ? added.id : null);
+    setSelectedVertexIndex(null);
+    setTerrainRefusal(null);
+    setFieldErrors({});
+    onChange(next);
+  }
+
+  function selectTerrain(id: string, vertexIndex: number | null = null) {
+    setSelectedTerrainId(id);
+    setSelectedVertexIndex(vertexIndex);
+    setTerrainRefusal(null);
+  }
+
+  function commitTerrainCategory(id: string, category: string) {
+    let next: ScenarioDocument;
+    try {
+      next = updateGroundCoverFeature(document, id, { category });
+    } catch (error) {
+      const feature = terrainFeatureById(document, id);
+      setTerrainRefusal({
+        ring: Array.isArray(feature?.polygon) ? feature.polygon : [],
+        reason: errorMessage(error),
+      });
+      return;
+    }
+    setTerrainRefusal(null);
+    setFieldErrors({});
+    onChange(next);
+  }
+
+  function deleteTerrainFeature(id: string) {
+    const feature = terrainFeatureById(document, id);
+    if (!feature) return;
+    let next: ScenarioDocument;
+    try {
+      next =
+        feature.kind === 'elevation'
+          ? removeElevationFeature(document, id)
+          : removeGroundCoverFeature(document, id);
+    } catch (error) {
+      setTerrainRefusal({
+        ring: Array.isArray(feature?.polygon) ? feature.polygon : [],
+        reason: errorMessage(error),
+      });
+      return;
+    }
+    if (selectedTerrainId === id) {
+      setSelectedTerrainId(null);
+      setSelectedVertexIndex(null);
+    }
+    setTerrainRefusal(null);
+    onChange(next);
+  }
+
+  function validateTerrainPolygon(
+    feature: any,
+    polygon: { x: number; y: number }[],
+    ignoreId: string,
+  ) {
+    return feature?.kind === 'elevation'
+      ? validateElevationCandidate(document, polygon, { ignoreId })
+      : validateGroundCoverCandidate(document, polygon, { ignoreId });
+  }
+
+  function updateTerrainPolygon(feature: any, id: string, ring: { x: number; y: number }[]) {
+    return feature?.kind === 'elevation'
+      ? updateElevationFeature(document, id, { polygon: ring })
+      : updateGroundCoverFeature(document, id, { polygon: ring });
+  }
+
+  function insertTerrainVertex(featureId: string, edgeIndex: number) {
+    const feature = terrainFeatureById(document, featureId);
+    if (!feature || !Array.isArray(feature.polygon)) return;
+    const ring = feature.polygon;
+    const a = ring[edgeIndex];
+    const b = ring[(edgeIndex + 1) % ring.length];
+    if (!a || !b) return;
+    const polygon = [
+      ...ring.slice(0, edgeIndex + 1),
+      { x: round1((a.x + b.x) / 2), y: round1((a.y + b.y) / 2) },
+      ...ring.slice(edgeIndex + 1),
+    ];
+    const check = validateTerrainPolygon(feature, polygon, featureId);
+    if (!check.ok) {
+      setTerrainRefusal({
+        ring: check.ring,
+        reason: `Cannot insert a vertex: ${check.reason}.`,
+        conflictId: check.conflictId,
+      });
+      return;
+    }
+    setTerrainRefusal(null);
+    onChange(updateTerrainPolygon(feature, featureId, check.ring));
+    setSelectedTerrainId(featureId);
+    setSelectedVertexIndex(edgeIndex + 1);
+  }
+
+  function deleteTerrainVertex(featureId: string, index: number) {
+    const feature = terrainFeatureById(document, featureId);
+    if (!feature || !feature.polygon?.[index]) return;
+    if (feature.polygon.length <= 3) {
+      setTerrainRefusal({
+        ring: feature.polygon,
+        reason:
+          feature.kind === 'elevation'
+            ? 'A hill needs at least 3 vertices: the vertex stays.'
+            : 'An area needs at least 3 vertices: the vertex stays.',
+      });
+      return;
+    }
+    const polygon = feature.polygon.filter((_: unknown, other: number) => other !== index);
+    const check = validateTerrainPolygon(feature, polygon, featureId);
+    if (!check.ok) {
+      setTerrainRefusal({
+        ring: check.ring,
+        reason: `Cannot delete the vertex: ${check.reason}.`,
+        conflictId: check.conflictId,
+      });
+      return;
+    }
+    setTerrainRefusal(null);
+    onChange(updateTerrainPolygon(feature, featureId, check.ring));
+    setSelectedTerrainId(featureId);
+    setSelectedVertexIndex(null);
+  }
+
+  function commitTerrainVertex(
+    featureId: string,
+    index: number,
+    point: { x: number; y: number },
+  ) {
+    const feature = terrainFeatureById(document, featureId);
+    if (!feature || !feature.polygon?.[index]) return;
+    const polygon = feature.polygon.map((vertex: { x: number; y: number }, other: number) =>
+      other === index ? { x: round1(point.x), y: round1(point.y) } : vertex,
+    );
+    const check = validateTerrainPolygon(feature, polygon, featureId);
+    if (!check.ok) {
+      setTerrainRefusal({
+        ring: check.ring,
+        reason: `Cannot move the vertex: ${check.reason}.`,
+        conflictId: check.conflictId,
+      });
+      return;
+    }
+    setTerrainRefusal(null);
+    onChange(updateTerrainPolygon(feature, featureId, check.ring));
+    setSelectedTerrainId(featureId);
+    setSelectedVertexIndex(index);
+  }
+
+  // Drop a terrain selection the document no longer holds (after undo,
+  // redo, or reopening) so the panels never show a ghost.
+  useEffect(() => {
+    if (
+      selectedTerrainId &&
+      !(document?.terrainFeatures || []).some(
+        (feature: any) => feature?.id === selectedTerrainId,
+      )
+    ) {
+      setSelectedTerrainId(null);
+      setSelectedVertexIndex(null);
+    }
+  }, [document, selectedTerrainId]);
+
+  // Terrain drawing and vertex keys. Enter finishes the polygon, Escape
+  // cancels it, Backspace removes the last vertex; with no draft, Delete
+  // removes the selected vertex and Escape clears the selection. Typing in a
+  // field is never stolen. Undo and redo keep their own shortcut.
+  useEffect(() => {
+    if (mode !== 'map') return;
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT')
+      ) {
+        return;
+      }
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      if (terrainDraft) {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          finishTerrainDraft();
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          cancelTerrainDraft();
+        } else if (event.key === 'Backspace') {
+          event.preventDefault();
+          popDraftVertex();
+        }
+        return;
+      }
+      if (
+        (event.key === 'Delete' || event.key === 'Backspace') &&
+        selectedTerrainId &&
+        selectedVertexIndex !== null
+      ) {
+        event.preventDefault();
+        deleteTerrainVertex(selectedTerrainId, selectedVertexIndex);
+        return;
+      }
+      if (event.key === 'Escape' && selectedTerrainId) {
+        setSelectedTerrainId(null);
+        setSelectedVertexIndex(null);
+        setTerrainRefusal(null);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
+
   function fieldError(field: string) {
     return fieldErrors[field] ? (
       <p className="field-error" role="alert" data-testid={`inspector-${field}-error`}>
@@ -644,7 +1052,10 @@ export default function Editor({
         </p>
       ) : null}
       <main className="workspace">
-        <aside className="left-panel panel" aria-label="Order of battle">
+        <aside
+          className="left-panel panel"
+          aria-label={inTerrainMode ? 'Terrain' : 'Order of battle'}
+        >
           <div className="mode-tabs" role="tablist" aria-label="Editor mode">
             <button
               type="button"
@@ -667,6 +1078,216 @@ export default function Editor({
               Map editor
             </button>
           </div>
+          {inTerrainMode ? (
+            <div data-testid="terrain-panel">
+              <span className="eyebrow">GROUND COVER · HILLS</span>
+              <h2>Terrain</h2>
+              {terrainDraft ? (
+                <div className="terrain-drafting">
+                  <p>
+                    Drawing{' '}
+                    {terrainDraft.kind === 'elevation'
+                      ? 'hill'
+                      : groundCoverLabel(terrainDraft.category)}{' '}
+                    — click the map to add vertices ({terrainDraft.points.length}).
+                  </p>
+                  {terrainDraft.error ? (
+                    <p className="field-error" role="alert">
+                      {terrainDraft.error}
+                    </p>
+                  ) : null}
+                  <div className="terrain-actions">
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      data-testid="terrain-draw-finish"
+                      disabled={terrainDraft.points.length < 3}
+                      onClick={finishTerrainDraft}
+                    >
+                      Finish (Enter)
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      data-testid="terrain-draw-cancel"
+                      onClick={cancelTerrainDraft}
+                    >
+                      Cancel (Esc)
+                    </button>
+                  </div>
+                  <p className="terrain-hint">
+                    Enter finishes · Escape cancels · Backspace removes the last vertex. Shapes
+                    reaching past the edge are clipped to the battlefield; overlapping areas and
+                    hills that break nesting are refused, never auto-adjusted.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  <label className="field">
+                    New area category
+                    <select
+                      data-testid="terrain-new-category"
+                      value={draftCategory}
+                      onChange={(event) => setDraftCategory(event.target.value)}
+                    >
+                      {GROUND_COVER_CATEGORIES.map((category) => (
+                        <option key={category} value={category}>
+                          {groundCoverLabel(category)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="terrain-actions">
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      data-testid="terrain-draw-area"
+                      onClick={() => startTerrainDraft('ground')}
+                    >
+                      Draw area
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      data-testid="terrain-draw-hill"
+                      onClick={() => startTerrainDraft('elevation')}
+                    >
+                      Draw hill
+                    </button>
+                  </div>
+                  <p className="terrain-hint">
+                    Click vertices on the map, then finish from the keyboard. A refused shape is
+                    highlighted in red.
+                  </p>
+                </>
+              )}
+              {terrainRefusal ? (
+                <p className="field-error" role="alert" data-testid="terrain-refusal">
+                  {terrainRefusal.reason}
+                </p>
+              ) : null}
+              {groundFeatures.length > 0 ? (
+                <ul className="terrain-list">
+                  {groundFeatures.map((feature) => {
+                    const area = groundAreaSquareMetres(feature);
+                    const selected = feature.id === selectedTerrainId;
+                    return (
+                      <li
+                        className={selected ? 'terrain-row selected' : 'terrain-row'}
+                        key={feature.id}
+                        data-testid="terrain-ground-row"
+                        data-category={feature.category}
+                      >
+                        <button
+                          type="button"
+                          className="terrain-select"
+                          data-testid="terrain-select"
+                          aria-pressed={selected}
+                          onClick={() => selectTerrain(feature.id)}
+                        >
+                          <span
+                            className="swatch"
+                            style={{
+                              background:
+                                (
+                                  GROUND_FILLS_FOR_PANEL[feature.category] || { fill: '#cccccc' }
+                                ).fill,
+                            }}
+                            aria-hidden="true"
+                          />
+                          <span>
+                            <span className="unit-name">
+                              {groundCoverLabel(feature.category)}
+                            </span>
+                            <span className="unit-detail">
+                              {feature.polygon.length} vertices
+                              {area === null ? '' : ` · ${area.toLocaleString('en')} m²`}
+                            </span>
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-quiet btn-danger"
+                          data-testid="terrain-delete"
+                          title="Delete this area (undoable)"
+                          onClick={() => deleteTerrainFeature(feature.id)}
+                        >
+                          Delete
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <p className="empty-terrain">
+                  No ground cover areas yet. Open ground is the default; draw forest, rough
+                  ground, water, or a settlement.
+                </p>
+              )}
+              <p className="readonly-note">
+                Areas must not overlap; touching edge to edge is legal. Partly-outside shapes are
+                clipped to the battlefield edge.
+              </p>
+              <h3 className="terrain-subhead">Hills (elevation)</h3>
+              {hillFeatures.length > 0 ? (
+                <ul className="terrain-list">
+                  {hillFeatures.map((feature) => {
+                    const area = groundAreaSquareMetres(feature);
+                    const selected = feature.id === selectedTerrainId;
+                    return (
+                      <li
+                        className={selected ? 'terrain-row selected' : 'terrain-row'}
+                        key={feature.id}
+                        data-testid="terrain-hill-row"
+                        data-level={feature.level}
+                      >
+                        <button
+                          type="button"
+                          className="terrain-select"
+                          data-testid="terrain-select"
+                          aria-pressed={selected}
+                          onClick={() => selectTerrain(feature.id)}
+                        >
+                          <span
+                            className="swatch"
+                            style={{ background: '#c6c8a4' }}
+                            aria-hidden="true"
+                          />
+                          <span>
+                            <span className="unit-name">Hill · level {feature.level}</span>
+                            <span className="unit-detail">
+                              {feature.polygon.length} vertices
+                              {area === null ? '' : ` · ${area.toLocaleString('en')} m²`}
+                            </span>
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-quiet btn-danger"
+                          data-testid="terrain-delete"
+                          title="Delete this hill (nested hills are promoted, undoable)"
+                          onClick={() => deleteTerrainFeature(feature.id)}
+                        >
+                          Delete
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <p className="empty-terrain">
+                  No hills yet. Draw a hill for level 1, then draw inside it for level 2, and so
+                  on — levels follow from nesting and are never typed.
+                </p>
+              )}
+              <p className="readonly-note">
+                Hills nest: a hill wholly inside level n becomes level n + 1. Crossing,
+                straddling, and self-intersecting shapes are refused. Deleting a hill promotes
+                its nested hills. Elevation is independent of ground cover.
+              </p>
+            </div>
+          ) : (
+          <>
           <span className="eyebrow">FORCES IN THE FIELD</span>
           <div className="oob-head">
             <h2>
@@ -802,8 +1423,11 @@ export default function Editor({
             })}
           <p className="readonly-note">
             New and duplicated units are placed at the first free spot in the current view.
-            Select a unit to edit it in the inspector.
+            Select a unit to edit it in the inspector. Switch to the Map editor tab to shape the
+            battlefield.
           </p>
+          </>
+          )}
         </aside>
         <section className="map-panel" aria-label="Battlefield map">
           <div className="map-caption" data-testid="battlefield-dims">
@@ -820,10 +1444,37 @@ export default function Editor({
               setSelectedUnitId(id);
               setNotice(null);
             }}
+            terrainFeatures={document.terrainFeatures}
+            selectedTerrainId={selectedTerrainId}
+            selectedVertexIndex={selectedVertexIndex}
+            draft={
+              terrainDraft
+                ? {
+                    kind: terrainDraft.kind,
+                    category: terrainDraft.category,
+                    points: terrainDraft.points,
+                  }
+                : null
+            }
+            refusal={terrainRefusal}
+            terrainInteractive={inTerrainMode}
+            onTerrainSelect={(id, vertexIndex) => selectTerrain(id, vertexIndex ?? null)}
+            onTerrainClearSelection={() => {
+              setSelectedTerrainId(null);
+              setSelectedVertexIndex(null);
+            }}
+            onMapDraftPoint={(point) => addDraftPoint(point)}
+            onEdgeInsert={(featureId, edgeIndex) => insertTerrainVertex(featureId, edgeIndex)}
+            onVertexCommit={(featureId, index, point) =>
+              commitTerrainVertex(featureId, index, point)
+            }
           />
           <p className="map-hint">
             Scroll to zoom around the cursor · hand tool or Space to pan · V selects, H pans ·
-            G toggles the grid, L the labels, 0 fits the battlefield
+            G toggles the grid, L the labels, C the contours, 0 fits the battlefield
+            {inTerrainMode
+              ? ' · click the map to add terrain vertices, Enter finishes, Esc cancels'
+              : null}
           </p>
         </section>
         <aside className="right-panel panel" aria-label="Inspector" data-testid="inspector">
@@ -1026,6 +1677,149 @@ export default function Editor({
               </section>
               <hr className="panel-divider" />
             </>
+          ) : null}
+          {terrainDraft ? (
+            <section
+              className="terrain-inspector"
+              aria-label={terrainDraft.kind === 'elevation' ? 'Hill being drawn' : 'Area being drawn'}
+              data-testid="terrain-inspector"
+            >
+              <h3>
+                {terrainDraft.kind === 'elevation'
+                  ? 'New hill'
+                  : `New ${groundCoverLabel(terrainDraft.category)} area`}
+              </h3>
+              {terrainDraft.kind === 'elevation' ? (
+                <div className="kv">
+                  <dt>Level</dt>
+                  <dd>Derived from nesting when finished (inside level n becomes level n + 1)</dd>
+                </div>
+              ) : (
+                <label className="field">
+                  Category
+                  <select
+                    data-testid="terrain-draft-category"
+                    value={terrainDraft.category}
+                    onChange={(event) =>
+                      setTerrainDraft({ ...terrainDraft, category: event.target.value, error: '' })
+                    }
+                  >
+                    {GROUND_COVER_CATEGORIES.map((category) => (
+                      <option key={category} value={category}>
+                        {groundCoverLabel(category)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <div className="kv">
+                <dt>Vertices</dt>
+                <dd>
+                  {terrainDraft.points.length}{' '}
+                  {terrainDraft.points.length === 1 ? '(at least 3 to finish)' : '(at least 3 to finish)'}
+                </dd>
+              </div>
+              {terrainDraft.error ? (
+                <p className="field-error" role="alert">
+                  {terrainDraft.error}
+                </p>
+              ) : null}
+            </section>
+          ) : null}
+          {selectedTerrain && !terrainDraft ? (
+            <section
+              className="terrain-inspector"
+              aria-label={
+                selectedTerrain.kind === 'elevation' ? 'Selected hill' : 'Selected ground cover area'
+              }
+              data-testid="terrain-inspector"
+            >
+              <h3>
+                {selectedTerrain.kind === 'elevation'
+                  ? `Hill · level ${selectedTerrain.level}`
+                  : `${groundCoverLabel(selectedTerrain.category)} area`}
+              </h3>
+              {selectedTerrain.kind === 'elevation' ? (
+                <div className="kv">
+                  <dt>Level</dt>
+                  <dd data-testid="terrain-level">
+                    {selectedTerrain.level} (derived from nesting — never typed)
+                  </dd>
+                </div>
+              ) : (
+                <label className="field">
+                  Category
+                  <select
+                    data-testid="terrain-category"
+                    value={selectedTerrain.category}
+                    onChange={(event) =>
+                      commitTerrainCategory(selectedTerrain.id, event.target.value)
+                    }
+                  >
+                    {GROUND_COVER_CATEGORIES.map((category) => (
+                      <option key={category} value={category}>
+                        {groundCoverLabel(category)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              <div className="kv">
+                <dt>Area</dt>
+                <dd>
+                  {(() => {
+                    const area = groundAreaSquareMetres(selectedTerrain);
+                    return area === null ? '—' : `${area.toLocaleString('en')} m²`;
+                  })()}
+                </dd>
+              </div>
+              <div className="kv">
+                <dt>Vertices</dt>
+                <dd>{selectedTerrain.polygon.length}</dd>
+              </div>
+              <ol className="terrain-vertex-list" data-testid="terrain-vertex-list">
+                {selectedTerrain.polygon.map(
+                  (point: { x: number; y: number }, index: number) => {
+                    const active = index === selectedVertexIndex;
+                    return (
+                      <li
+                        className={active ? 'terrain-vertex-row selected' : 'terrain-vertex-row'}
+                        key={index}
+                        data-testid="terrain-vertex-row"
+                      >
+                        <span className="mono">
+                          {index + 1}. ({point.x.toFixed(1)}, {point.y.toFixed(1)})
+                        </span>
+                        <button
+                          type="button"
+                          className="btn-quiet btn-danger"
+                          data-testid="terrain-vertex-delete"
+                          data-index={index}
+                          disabled={selectedTerrain.polygon.length <= 3}
+                          onClick={() => deleteTerrainVertex(selectedTerrain.id, index)}
+                        >
+                          Delete
+                        </button>
+                      </li>
+                    );
+                  },
+                )}
+              </ol>
+              <div className="terrain-actions">
+                <button
+                  type="button"
+                  className="btn-secondary btn-danger"
+                  data-testid="terrain-delete-feature"
+                  onClick={() => deleteTerrainFeature(selectedTerrain.id)}
+                >
+                  {selectedTerrain.kind === 'elevation' ? 'Delete hill' : 'Delete area'}
+                </button>
+              </div>
+              <p className="terrain-hint">
+                Drag a vertex on the map · click a small edge dot to insert a vertex · select a
+                vertex and press Delete to remove it (at least three stay).
+              </p>
+            </section>
           ) : null}
           <h2>Scenario</h2>
           <label className="field">
