@@ -772,6 +772,133 @@ export function resizeBattlefield(document, width, height) {
   return roundScenarioToTenth(copy);
 }
 
+// --- Scenario property editing (inspector) ------------------------------------
+// The inspector commits scenario properties through these pure helpers, so the
+// app editor and the Node unit tests share one rules boundary:
+// - the title is required (a blank title is refused, never cleared);
+// - the description is optional plain text;
+// - battlefield size goes through resizeBattlefield: growing keeps every
+//   feature, shrinking clips terrain to the new bounds, and shrinking past a
+//   unit is refused with the blocking units named;
+// - sides are never added or removed (the scenario always has exactly two):
+//   names are required and unique (compared case-insensitively on the trimmed
+//   name), colours are required and distinct (compared case-insensitively).
+// Every helper returns a new document and never mutates its input. A refused
+// value throws a human-readable error naming the cause; the caller keeps the
+// old document and shows the message inline.
+
+// True when the working document holds no changes relative to the last saved
+// version: the predicate behind the unsaved-changes indicator. Key order is
+// ignored, and volatile save metadata (createdAt, updatedAt) is ignored —
+// saving refreshes it without marking the scenario dirty — but every scenario
+// property (title, description, battlefield, sides, units, terrain) counts.
+const VOLATILE_METADATA_KEYS = new Set(['createdAt', 'updatedAt']);
+
+function stripVolatile(value) {
+  if (Array.isArray(value)) {
+    return value.map(stripVolatile);
+  }
+  if (value && typeof value === 'object') {
+    const entries = [];
+    for (const [key, entry] of Object.entries(value)) {
+      if (VOLATILE_METADATA_KEYS.has(key)) {
+        continue;
+      }
+      entries.push([key, stripVolatile(entry)]);
+    }
+    entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return Object.fromEntries(entries);
+  }
+  return value;
+}
+
+export function scenarioContentEquals(left, right) {
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') {
+    return false;
+  }
+  return JSON.stringify(stripVolatile(left)) === JSON.stringify(stripVolatile(right));
+}
+
+function sideAt(document, index, verb) {
+  const sides = Array.isArray(document?.sides) ? document.sides : [];
+  if (!Number.isInteger(index) || index < 0 || index >= sides.length) {
+    throw new Error(
+      `Cannot ${verb} the side: the scenario has exactly ${sides.length} sides.`,
+    );
+  }
+  return sides[index];
+}
+
+export function updateScenarioTitle(document, title) {
+  if (!document || typeof document !== 'object') {
+    throw new Error('Cannot rename the scenario: the scenario must be an object.');
+  }
+  const value = String(title ?? '').trim();
+  if (!value) {
+    throw new Error('Scenario title is required.');
+  }
+  const copy = cloneScenario(document);
+  copy.title = value;
+  return copy;
+}
+
+export function updateScenarioDescription(document, description) {
+  if (!document || typeof document !== 'object') {
+    throw new Error('Cannot edit the scenario description: the scenario must be an object.');
+  }
+  if (description !== undefined && description !== null && typeof description !== 'string') {
+    throw new Error('Scenario description must be plain text.');
+  }
+  const copy = cloneScenario(document);
+  copy.description = description === undefined || description === null ? '' : description;
+  return copy;
+}
+
+export function updateSideName(document, index, name) {
+  if (!document || typeof document !== 'object') {
+    throw new Error('Cannot rename the side: the scenario must be an object.');
+  }
+  sideAt(document, index, 'rename');
+  const value = String(name ?? '').trim();
+  if (!value) {
+    throw new Error(`Side ${index + 1} name is required.`);
+  }
+  const clash = document.sides.some(
+    (other, otherIndex) =>
+      otherIndex !== index &&
+      String(other?.name || '').trim().toLowerCase() === value.toLowerCase(),
+  );
+  if (clash) {
+    throw new Error(
+      `Side name "${value}" is already used by the other side (names must be unique).`,
+    );
+  }
+  const copy = cloneScenario(document);
+  copy.sides[index].name = value;
+  return copy;
+}
+
+export function updateSideColor(document, index, color) {
+  if (!document || typeof document !== 'object') {
+    throw new Error('Cannot recolour the side: the scenario must be an object.');
+  }
+  sideAt(document, index, 'recolour');
+  const value = String(color ?? '').trim().toLowerCase();
+  if (!value) {
+    throw new Error(`Side ${index + 1} colour is required.`);
+  }
+  const clash = document.sides.some(
+    (other, otherIndex) =>
+      otherIndex !== index && String(other?.color || '').trim().toLowerCase() === value,
+  );
+  if (clash) {
+    throw new Error('Sides must have distinct colours.');
+  }
+  const copy = cloneScenario(document);
+  copy.sides[index].color = value;
+  return copy;
+}
+
 // --- Ground cover editing (Terrain mode) --------------------------------------
 // The editor draws and edits ground cover areas (forest, rough ground, water,
 // settlement; open ground is the default and needs no feature) through these
