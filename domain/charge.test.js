@@ -17,7 +17,7 @@ import {
 } from './turn.js';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
-const scenarioDir = path.join(here, '..', 'scenarios');
+const scenarioDir = path.join(here, 'fixtures');
 
 function loadReference() {
   return JSON.parse(readFileSync(path.join(scenarioDir, 'acceptance-plain.json'), 'utf8'));

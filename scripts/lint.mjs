@@ -1,10 +1,11 @@
 // Lint for the production tree.
 //
 // `prototype/` is a throwaway experiment and is excluded from every check.
-// The repository currently has no production sources outside `prototype/`,
-// so this script enforces the dependency-free baseline: every covered
-// JavaScript file must parse under `node --check`. When the Next.js slice
-// introduces real tooling (item 13 of #8), this script will delegate to it.
+// The production tree is the framework-free domain package in `domain/`
+// (plus these scripts), so this script enforces the dependency-free
+// baseline: every covered JavaScript file must parse under `node --check`.
+// When the Next.js slice introduces real tooling (item 13 of #8), this
+// script will delegate to it.
 import { spawnSync } from 'node:child_process';
 import { readdirSync, statSync } from 'node:fs';
 import path from 'node:path';

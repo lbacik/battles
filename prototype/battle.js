@@ -22,30 +22,30 @@ import {
   TURN_PHASE_ORDERS,
   startBattle,
   validatePlayability,
-} from './domain/battle.js';
+} from '../domain/battle.js';
 import {
   SUBMISSION_FORMAT_VERSION,
   availableActions,
   buildPlayerView,
   resolveTurn,
   validateTurn,
-} from './domain/turn.js';
-import { createPlayerForController, runTurn } from './domain/players.js';
+} from '../domain/turn.js';
+import { createPlayerForController, runTurn } from '../domain/players.js';
 import {
   changedUnitsForTurn,
   describeBattleEvent,
   groupLogEvents,
   lastResolvedTurnNumber,
   summarizeTurn,
-} from './domain/battle-log.js';
-import { isBattleFinished } from './domain/battles.js';
-import { generateId } from './domain/scenario.js';
+} from '../domain/battle-log.js';
+import { isBattleFinished } from '../domain/battles.js';
+import { generateId } from '../domain/scenario.js';
 import {
   RULESET_ID,
   RULESET_VERSION,
   getTroopType,
   isKnownTroopType,
-} from './domain/polis-classical.js';
+} from '../domain/polis-classical.js';
 import {
   clampMapZoom,
   fitMapView,
@@ -60,11 +60,11 @@ import {
   unitPosition,
   zoomViewAroundCursor,
   UNIT_PICK_TOLERANCE_PX,
-} from './domain/scenario.js';
-import { round1 } from './domain/geometry.js';
-import { CHARGE_EDGES, MAX_APPROACH_LEGS } from './domain/charge.js';
-import { IndexedDBScenarioStore } from './library/idb.js';
-import { IndexedDBBattleStore } from './library/battles-idb.js';
+} from '../domain/scenario.js';
+import { round1 } from '../domain/geometry.js';
+import { CHARGE_EDGES, MAX_APPROACH_LEGS } from '../domain/charge.js';
+import { IndexedDBScenarioStore } from '../domain/browser/idb.js';
+import { IndexedDBBattleStore } from '../domain/browser/battles-idb.js';
 
 // Controllers offered per side. Random and Passive are labelled as test
 // players; the engine accepts `human`, `random`, `passive`, and `automated`.

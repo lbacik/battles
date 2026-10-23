@@ -14,7 +14,7 @@ import {
   cloneBattle,
   cloneDecisions,
   compareBattleEntries,
-} from '../domain/battles.js';
+} from '../battles.js';
 
 export const BATTLE_DB_NAME = 'polis-battles';
 const RECORD_STORE = 'battles';

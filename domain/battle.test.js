@@ -33,7 +33,7 @@ import {
 } from './scenario.js';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
-const scenarioDir = path.join(here, '..', 'scenarios');
+const scenarioDir = path.join(here, 'fixtures');
 
 function loadFixture(name) {
   return JSON.parse(readFileSync(path.join(scenarioDir, name), 'utf8'));
