@@ -2272,6 +2272,266 @@ export function proposeUnitPatch(document, unitId, patch = {}) {
   };
 }
 
+// --- Unit add, edit, duplicate, and delete (order of battle) -----------------
+// Every change returns a new document (the input is never mutated) and is
+// validated structurally before it is returned: a change whose footprint
+// would overlap another unit or leave the battlefield throws, so refused
+// values never reach the document. The app commits each return through the
+// undo history, making every unit change undoable with no extra work.
+// Spacing presets live in the ruleset catalogue (`./polis-classical.js`),
+// which this module never consults (catalogue membership is a playability
+// concern, not a structural one): callers pass preset metres in, and the
+// scenario stores only metres (ADR 0002).
+
+function unitIndexById(document, unitId) {
+  const units = Array.isArray(document?.units) ? document.units : [];
+  const index = units.findIndex((unit) => unit?.id === unitId);
+  if (index < 0) {
+    throw new Error('Unit not found.');
+  }
+  return index;
+}
+
+// Throw the first structural error naming the edited unit, mirroring the
+// editor: the value is refused and the document keeps its last valid values.
+function refuseConflictingUnitEdit(next, index) {
+  const errors = validateScenario(next);
+  const relevant = errors.filter((error) => error.includes(`units[${index}]`));
+  if (relevant.length > 0) {
+    throw new Error(relevant[0]);
+  }
+  return next;
+}
+
+function checkUnitNumbers(soldiers, files) {
+  if (!Number.isInteger(soldiers) || soldiers < 1) {
+    throw new Error('Soldiers must be a whole number of at least 1.');
+  }
+  if (!Number.isInteger(files) || files < 1) {
+    throw new Error('Files must be a whole number of at least 1.');
+  }
+  if (files > soldiers) {
+    throw new Error(`Files (${files}) must not exceed soldiers (${soldiers}).`);
+  }
+}
+
+function checkUnitSpacing(lateralInterval, rankDepth) {
+  for (const [value, label] of [
+    [lateralInterval, 'Lateral interval'],
+    [rankDepth, 'Rank depth'],
+  ]) {
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new Error(`${label} must be a positive number of metres.`);
+    }
+    if (value > MAX_SPACING_M) {
+      throw new Error(`${label} must not exceed the application limit of ${MAX_SPACING_M} m.`);
+    }
+  }
+}
+
+function sideIdOrThrow(document, sideId) {
+  const sides = Array.isArray(document?.sides) ? document.sides : [];
+  const side = sides.find((entry) => entry?.id === sideId) || null;
+  if (!side && sides.length > 0 && (sideId === undefined || sideId === null)) {
+    return sides[0].id;
+  }
+  if (!side) {
+    throw new Error('Side is required.');
+  }
+  return side.id;
+}
+
+// The derived ranks, frontage, and depth in metres from the same footprint
+// the map draws, or null when the unit cannot derive one. The inspector
+// reads this helper so its numbers always match the true-scale rectangle.
+export function unitDerived(unit) {
+  try {
+    const footprint = unitFootprint(unit);
+    if (
+      !footprint ||
+      !Number.isFinite(footprint.ranks) ||
+      footprint.ranks < 1 ||
+      !Number.isFinite(footprint.frontageM) ||
+      !Number.isFinite(footprint.depthM)
+    ) {
+      return null;
+    }
+    return {
+      ranks: footprint.ranks,
+      frontageM: footprint.frontageM,
+      depthM: footprint.depthM,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Add a unit with editor defaults (100 soldiers in 10 files at the given
+// preset spacings) at the first free spot inside `searchRect` (the current
+// view; the whole battlefield when null). Returns { document, unitId }.
+// Throws when the view has no free spot, so the author can pan or zoom out
+// and try again. Never mutates the input.
+export function createUnit(document, options = {}) {
+  const side = sideIdOrThrow(document, options.sideId ?? null);
+  const soldiers = options.soldiers ?? 100;
+  const files = options.files ?? 10;
+  checkUnitNumbers(soldiers, files);
+  const lateralInterval = round1(options.lateralInterval ?? 1.8);
+  const rankDepth = round1(options.rankDepth ?? 1.8);
+  checkUnitSpacing(lateralInterval, rankDepth);
+  const facing = Number.isFinite(Number(options.facing))
+    ? Number(options.facing)
+    : defaultFacingForSide(document, side);
+  const position = findFreeUnitPosition(
+    document,
+    {
+      frontage: files * lateralInterval,
+      depth: Math.ceil(soldiers / files) * rankDepth,
+      facing,
+    },
+    options.searchRect ?? null,
+  );
+  if (!position) {
+    throw new Error('No free space in the current view: pan or zoom out, then add the Unit again.');
+  }
+  const next = cloneScenario(document);
+  const unit = {
+    id: generateId(),
+    name: suggestUnitName(next, options.name ?? 'New Unit'),
+    side,
+    troopType: isNonEmptyString(options.troopType) ? options.troopType.trim() : 'hoplite',
+    soldiers,
+    files,
+    lateralInterval,
+    rankDepth,
+    position,
+    facing,
+  };
+  next.units.push(unit);
+  return { document: refuseConflictingUnitEdit(next, next.units.length - 1), unitId: unit.id };
+}
+
+// Duplicate a unit under a unique name at the first free spot inside
+// `searchRect` (the current view; the whole battlefield when null). Returns
+// { document, unitId }. Throws when the view has no free spot. Never mutates
+// the input.
+export function duplicateUnit(document, unitId, searchRect = null) {
+  const units = Array.isArray(document?.units) ? document.units : [];
+  const source = units.find((unit) => unit?.id === unitId) || null;
+  if (!source) {
+    throw new Error('Unit not found.');
+  }
+  const derived = unitDerived(source);
+  const frontage = derived ? derived.frontageM : 1;
+  const depth = derived ? derived.depthM : 1;
+  const position = findFreeUnitPosition(
+    document,
+    { frontage, depth, facing: source.facing },
+    searchRect,
+  );
+  if (!position) {
+    throw new Error(
+      'No free space in the current view: pan or zoom out, then duplicate the Unit again.',
+    );
+  }
+  const next = cloneScenario(document);
+  const copy = JSON.parse(JSON.stringify(source));
+  copy.id = generateId();
+  copy.name = suggestUnitName(next, `${source.name} copy`);
+  copy.position = position;
+  next.units.push(copy);
+  return { document: refuseConflictingUnitEdit(next, next.units.length - 1), unitId: copy.id };
+}
+
+// Delete a unit. Throws for an unknown id. Never mutates the input.
+export function deleteUnit(document, unitId) {
+  const index = unitIndexById(document, unitId);
+  const next = cloneScenario(document);
+  next.units = next.units.filter((unit, other) => other !== index);
+  return next;
+}
+
+// Rename a unit. Names are required and unique (case-insensitive on the
+// trimmed name). Never mutates the input.
+export function updateUnitName(document, unitId, name) {
+  const index = unitIndexById(document, unitId);
+  const value = String(name ?? '');
+  if (!value.trim()) {
+    throw new Error('Unit name is required.');
+  }
+  const units = Array.isArray(document?.units) ? document.units : [];
+  const clash = units.some(
+    (other) =>
+      other?.id !== unitId &&
+      String(other?.name || '').trim().toLowerCase() === value.trim().toLowerCase(),
+  );
+  if (clash) {
+    throw new Error(`Unit name "${value.trim()}" is already used (names must be unique).`);
+  }
+  const next = cloneScenario(document);
+  next.units[index].name = value.trim();
+  return refuseConflictingUnitEdit(next, index);
+}
+
+// Move a unit to a side. The side must exist. Never mutates the input.
+export function updateUnitSide(document, unitId, sideId) {
+  const index = unitIndexById(document, unitId);
+  const next = cloneScenario(document);
+  next.units[index].side = sideIdOrThrow(next, sideId);
+  return refuseConflictingUnitEdit(next, index);
+}
+
+// Change a unit's troop type. The key is required; unknown keys stay
+// preserved verbatim (catalogue membership is a playability concern). When
+// `preset` ({ lateralInterval, rankDepth }) is given, both spacings are
+// pre-filled from it in the same undo step — the editor passes the new type's
+// normal preset so the form follows the catalogue. Never mutates the input.
+export function updateUnitTroopType(document, unitId, troopType, preset = null) {
+  const index = unitIndexById(document, unitId);
+  const value = String(troopType ?? '');
+  if (!value.trim()) {
+    throw new Error('Troop type is required.');
+  }
+  const next = cloneScenario(document);
+  next.units[index].troopType = value;
+  if (preset !== null && preset !== undefined) {
+    checkUnitSpacing(Number(preset.lateralInterval), Number(preset.rankDepth));
+    next.units[index].lateralInterval = round1(Number(preset.lateralInterval));
+    next.units[index].rankDepth = round1(Number(preset.rankDepth));
+  }
+  return refuseConflictingUnitEdit(next, index);
+}
+
+// Change a unit's soldier and file counts. Counts are whole numbers of at
+// least 1 and files must not exceed soldiers. Never mutates the input.
+export function updateUnitNumbers(document, unitId, patch = {}) {
+  const index = unitIndexById(document, unitId);
+  const current = (Array.isArray(document?.units) ? document.units : [])[index];
+  const soldiers = patch.soldiers === undefined ? current.soldiers : patch.soldiers;
+  const files = patch.files === undefined ? current.files : patch.files;
+  checkUnitNumbers(soldiers, files);
+  const next = cloneScenario(document);
+  next.units[index].soldiers = soldiers;
+  next.units[index].files = files;
+  return refuseConflictingUnitEdit(next, index);
+}
+
+// Change a unit's spacings in metres. Both are positive and bounded by the
+// structural application limit; values round to the stored 0.1 m precision.
+// Never mutates the input.
+export function updateUnitSpacing(document, unitId, patch = {}) {
+  const index = unitIndexById(document, unitId);
+  const current = (Array.isArray(document?.units) ? document.units : [])[index];
+  const lateralInterval =
+    patch.lateralInterval === undefined ? current.lateralInterval : Number(patch.lateralInterval);
+  const rankDepth = patch.rankDepth === undefined ? current.rankDepth : Number(patch.rankDepth);
+  checkUnitSpacing(lateralInterval, rankDepth);
+  const next = cloneScenario(document);
+  next.units[index].lateralInterval = round1(lateralInterval);
+  next.units[index].rankDepth = round1(rankDepth);
+  return refuseConflictingUnitEdit(next, index);
+}
+
 // --- Undo history (framework-free) ------------------------------------------
 // The editing session keeps whole-document snapshots: every committed change
 // (properties, terrain, units, placements, rotations) pushes the previous

@@ -3,18 +3,31 @@
 import { useEffect, useMemo, useState } from 'react';
 import BattlefieldMap from './battlefield-map';
 import {
+  TROOP_TYPE_CATALOGUE,
+  TROOP_TYPE_KEYS,
   collectUnknownTroopTypeWarnings,
+  getTroopType,
   isKnownTroopType,
+  spacingClass,
 } from '../domain/polis-classical.js';
 import {
   collectWarnings,
+  createUnit,
+  deleteUnit,
+  duplicateUnit,
   isProvisionalRuleset,
   resizeBattlefield,
   rulesetCompatibilityNotice,
+  unitDerived,
   updateScenarioDescription,
   updateScenarioTitle,
   updateSideColor,
   updateSideName,
+  updateUnitName,
+  updateUnitNumbers,
+  updateUnitSide,
+  updateUnitSpacing,
+  updateUnitTroopType,
   validateScenario,
 } from '../domain/scenario.js';
 
@@ -146,6 +159,57 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function sideColorFor(sides: ScenarioDocument[], unit: ScenarioDocument): string {
+  const key = unit?.side ?? unit?.sideId;
+  const side = (sides || []).find((entry) => entry && entry.id === key);
+  return side && side.color ? String(side.color) : '#666666';
+}
+
+// The catalogue's spacing presets, in order. Shared by the preset matcher
+// and the preset select so the two can never drift apart.
+const SPACING_PRESET_KEYS = ['close', 'normal', 'open'];
+
+function troopDisplayName(troopType: unknown): string {
+  const entry = getTroopType(troopType as string) as any;
+  return entry?.displayName || String(troopType ?? 'Unknown');
+}
+
+// Prototype variant A's formation diagram: one dot per file and rank,
+// capped to fit the inspector. Dots only — the footprint on the map is the
+// true-scale rectangle, never enlarged for display.
+function FormationDiagram({ files, ranks }: { files: number; ranks: number }) {
+  const cols = Math.max(1, Math.min(Math.floor(files), 18));
+  const rows = Math.max(1, Math.min(Math.floor(ranks), 9));
+  const dots = [];
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      dots.push(
+        <rect
+          key={`${row}-${col}`}
+          x={110 - cols * 4.7 + col * 9.4}
+          y={32 + row * 6}
+          width={5.5}
+          height={3.8}
+          rx={0.8}
+          fill="currentColor"
+          opacity={0.8 - row * 0.035}
+        />,
+      );
+    }
+  }
+  return (
+    <svg
+      viewBox="0 0 220 95"
+      role="img"
+      aria-label={`Diagram: ${files} files, ${ranks} ranks`}
+      data-testid="formation-diagram"
+    >
+      <path d="m102 13 8-7 8 7M110 6v16" fill="none" stroke="currentColor" opacity="0.6" />
+      {dots}
+    </svg>
+  );
+}
+
 export default function Editor({
   document,
   dirty,
@@ -164,6 +228,13 @@ export default function Editor({
   // Rejected form values, keyed by field: the value is never committed to
   // the document, the field reverts, and the cause is shown inline.
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  // Order-of-battle tab: 'all' or a side id. Selection and the tab are
+  // display-only: neither marks the scenario unsaved nor records undo steps.
+  const [oobTab, setOobTab] = useState<string>('all');
+  const [selectedUnitId, setSelectedUnitId] = useState<string | null>(null);
+  // Placement refusals (no free spot in the current view): the document is
+  // untouched, so the message lives outside the field errors.
+  const [notice, setNotice] = useState<string | null>(null);
 
   const units: ScenarioDocument[] = Array.isArray(document.units) ? document.units : [];
   const sides: ScenarioDocument[] = Array.isArray(document.sides) ? document.sides : [];
@@ -311,6 +382,183 @@ export default function Editor({
     }
   }
 
+  // --- Units (order of battle) ---------------------------------------------
+  // Every unit change commits through onChange, so add, edit, duplicate, and
+  // delete are all undoable with no extra work. Invalid values throw in the
+  // domain helpers and are refused before they reach the document: the field
+  // reverts and the cause is shown inline.
+
+  const selectedUnit: ScenarioDocument | null =
+    (units as ScenarioDocument[]).find((unit) => unit?.id === selectedUnitId) ?? null;
+  const selectedDerived = selectedUnit ? unitDerived(selectedUnit) : null;
+  const selectedSpacingClass = selectedUnit
+    ? spacingClass(selectedUnit.troopType, selectedUnit.lateralInterval)
+    : null;
+
+  // Which spacing preset the selected unit's spacings match, or 'custom'.
+  function presetKeyFor(unit: ScenarioDocument): string {
+    const entry = getTroopType(unit?.troopType) as any;
+    if (!entry || !Number.isFinite(unit?.lateralInterval) || !Number.isFinite(unit?.rankDepth)) {
+      return 'custom';
+    }
+    for (const key of SPACING_PRESET_KEYS) {
+      const preset = entry.presets?.[key];
+      if (
+        preset &&
+        Math.abs(preset.lateralInterval - unit.lateralInterval) < 1e-9 &&
+        Math.abs(preset.rankDepth - unit.rankDepth) < 1e-9
+      ) {
+        return key;
+      }
+    }
+    return 'custom';
+  }
+
+  function handleAddUnit() {
+    const targetSide = oobTab !== 'all' ? oobTab : sides[0]?.id;
+    try {
+      // A new unit is a hoplite standing at its normal preset: the scenario
+      // stores the preset's metres (ADR 0002), read from the catalogue here
+      // so a catalogue change moves the default with it.
+      const normalPreset = (getTroopType('hoplite') as any)?.presets?.normal;
+      const next = createUnit(document, {
+        sideId: targetSide,
+        ...(normalPreset
+          ? {
+              lateralInterval: normalPreset.lateralInterval,
+              rankDepth: normalPreset.rankDepth,
+            }
+          : {}),
+      });
+      setSelectedUnitId(next.unitId);
+      setFieldErrors({});
+      setNotice(null);
+      onChange(next.document);
+    } catch (error) {
+      setFieldErrors({});
+      setNotice(errorMessage(error));
+    }
+  }
+
+  function handleDuplicateUnit(unit: ScenarioDocument) {
+    try {
+      const next = duplicateUnit(document, unit?.id);
+      setSelectedUnitId(next.unitId);
+      setFieldErrors({});
+      setNotice(null);
+      onChange(next.document);
+    } catch (error) {
+      setFieldErrors({});
+      setNotice(errorMessage(error));
+    }
+  }
+
+  function handleDeleteUnit(unit: ScenarioDocument) {
+    try {
+      onChange(deleteUnit(document, unit?.id));
+      if (selectedUnitId === unit?.id) {
+        setSelectedUnitId(null);
+      }
+      setFieldErrors({});
+      setNotice(null);
+    } catch (error) {
+      fail('unit-delete', errorMessage(error));
+    }
+  }
+
+  function commitUnitName(unit: ScenarioDocument, raw: string) {
+    try {
+      onChange(updateUnitName(document, unit?.id, raw));
+      setFieldErrors({});
+      setNotice(null);
+    } catch (error) {
+      fail('unit-name', errorMessage(error));
+    }
+  }
+
+  function commitUnitSide(unit: ScenarioDocument, sideId: string) {
+    if (sideId === unit?.side) return;
+    try {
+      onChange(updateUnitSide(document, unit?.id, sideId));
+      setFieldErrors({});
+      setNotice(null);
+    } catch (error) {
+      fail('unit-side', errorMessage(error));
+    }
+  }
+
+  // Changing the troop type pre-fills both spacings from the new type's
+  // normal preset in the same undo step; the scenario stores the metres
+  // (ADR 0002), never the preset itself.
+  function commitUnitTroopType(unit: ScenarioDocument, troopType: string) {
+    if (troopType === unit?.troopType) return;
+    try {
+      const preset = (getTroopType(troopType) as any)?.presets?.normal ?? null;
+      onChange(updateUnitTroopType(document, unit?.id, troopType, preset));
+      setFieldErrors({});
+      setNotice(null);
+    } catch (error) {
+      fail('unit-troop', errorMessage(error));
+    }
+  }
+
+  function commitUnitNumbers(unit: ScenarioDocument, patch: { soldiers?: string; files?: string }) {
+    const field = patch.soldiers !== undefined ? 'unit-soldiers' : 'unit-files';
+    const label = patch.soldiers !== undefined ? 'Soldiers' : 'Files';
+    const trimmed = String(patch.soldiers ?? patch.files ?? '').trim();
+    if (!trimmed || !Number.isInteger(Number(trimmed)) || Number(trimmed) < 1) {
+      fail(field, `${label} must be a whole number of at least 1.`);
+      return;
+    }
+    try {
+      onChange(
+        updateUnitNumbers(document, unit?.id, {
+          ...(patch.soldiers !== undefined ? { soldiers: Number(trimmed) } : {}),
+          ...(patch.files !== undefined ? { files: Number(trimmed) } : {}),
+        }),
+      );
+      setFieldErrors({});
+      setNotice(null);
+    } catch (error) {
+      fail(field, errorMessage(error));
+    }
+  }
+
+  function commitUnitSpacing(
+    unit: ScenarioDocument,
+    key: 'lateralInterval' | 'rankDepth',
+    raw: string,
+  ) {
+    const label = key === 'lateralInterval' ? 'Lateral interval' : 'Rank depth';
+    const field = key === 'lateralInterval' ? 'unit-spacing-lateral' : 'unit-spacing-depth';
+    const trimmed = raw.trim();
+    if (!trimmed || !Number.isFinite(Number(trimmed))) {
+      fail(field, `${label} must be a positive number of metres.`);
+      return;
+    }
+    try {
+      onChange(updateUnitSpacing(document, unit?.id, { [key]: Number(trimmed) }));
+      setFieldErrors({});
+      setNotice(null);
+    } catch (error) {
+      fail(field, errorMessage(error));
+    }
+  }
+
+  // A spacing preset pre-fills both spacings in metres in one undo step.
+  function commitUnitPreset(unit: ScenarioDocument, presetKey: string) {
+    if (presetKey === 'custom') return;
+    const preset = (getTroopType(unit?.troopType) as any)?.presets?.[presetKey];
+    if (!preset) return;
+    try {
+      onChange(updateUnitSpacing(document, unit?.id, preset));
+      setFieldErrors({});
+      setNotice(null);
+    } catch (error) {
+      fail('unit-preset', errorMessage(error));
+    }
+  }
+
   function fieldError(field: string) {
     return fieldErrors[field] ? (
       <p className="field-error" role="alert" data-testid={`inspector-${field}-error`}>
@@ -419,58 +667,142 @@ export default function Editor({
               Map editor
             </button>
           </div>
-          <h2>Order of battle</h2>
-          {sides.map((side) => {
-            const sideUnits = unitsForSide(side?.id);
-            return (
-              <section
-                className="side"
-                key={side?.id ?? side?.name}
-                data-testid={side?.id === sides[0]?.id ? 'oob-side-a' : 'oob-side-b'}
-                data-empty={sideUnits.length === 0 ? 'true' : 'false'}
+          <span className="eyebrow">FORCES IN THE FIELD</span>
+          <div className="oob-head">
+            <h2>
+              Order of battle <span data-testid="oob-count">{units.length}</span>
+            </h2>
+            <button
+              type="button"
+              className="btn-tool"
+              data-testid="oob-add"
+              title="Add a unit to this side"
+              aria-label="Add unit"
+              onClick={handleAddUnit}
+            >
+              +
+            </button>
+          </div>
+          <div className="mode-tabs" role="tablist" aria-label="Order of battle filter">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={oobTab === 'all'}
+              className={oobTab === 'all' ? 'mode-tab active' : 'mode-tab'}
+              data-testid="oob-tab-all"
+              onClick={() => setOobTab('all')}
+            >
+              All
+            </button>
+            {sides.map((side, tabIndex) => (
+              <button
+                type="button"
+                role="tab"
+                key={side?.id ?? tabIndex}
+                aria-selected={oobTab === side?.id}
+                className={oobTab === side?.id ? 'mode-tab active' : 'mode-tab'}
+                data-testid={`oob-tab-${tabIndex}`}
+                data-side={side?.id}
+                onClick={() => setOobTab(side?.id)}
               >
-                <div className="side-name">
-                  <span
-                    className="swatch"
-                    style={{ background: side?.color ?? '#888' }}
-                    aria-hidden="true"
-                  />
-                  {side?.name ?? 'Unnamed side'}
-                </div>
-                <p className="side-count" data-testid="oob-side-count">
-                  {sideUnits.length === 0
-                    ? 'No units'
-                    : `${sideUnits.length} ${sideUnits.length === 1 ? 'unit' : 'units'}`}
-                </p>
-                {sideUnits.length === 0 ? (
-                  <p className="empty-oob">No units yet.</p>
-                ) : (
-                  sideUnits.map((unit) => {
-                    const unknownTroop = !isKnownTroopType(unit?.troopType);
-                    return (
-                      <div key={unit?.id ?? unit?.name}>
-                        <div className="side-name">
+                {side?.name ?? 'Unnamed side'}
+              </button>
+            ))}
+          </div>
+          {notice ? (
+            <p className="oob-notice" role="status" data-testid="oob-notice">
+              {notice}
+            </p>
+          ) : null}
+          {sides
+            .filter((side) => oobTab === 'all' || side?.id === oobTab)
+            .map((side, index) => {
+              const sideUnits = unitsForSide(side?.id);
+              const soldiers = sideUnits.reduce(
+                (sum, unit) => sum + (Number(unit?.soldiers) || 0),
+                0,
+              );
+              return (
+                <section
+                  className="side"
+                  key={side?.id ?? side?.name ?? index}
+                  data-testid={
+                    side?.id === sides[0]?.id
+                      ? 'oob-side-a'
+                      : side?.id === sides[1]?.id
+                        ? 'oob-side-b'
+                        : `oob-side-${index}`
+                  }
+                  data-empty={sideUnits.length === 0 ? 'true' : 'false'}
+                >
+                  <div className="side-name">
+                    <span
+                      className="swatch"
+                      style={{ background: side?.color ?? '#888' }}
+                      aria-hidden="true"
+                    />
+                    {side?.name ?? 'Unnamed side'}
+                  </div>
+                  <p className="side-count" data-testid="oob-side-count">
+                    {sideUnits.length === 0
+                      ? 'No units'
+                      : `${sideUnits.length} ${sideUnits.length === 1 ? 'unit' : 'units'} · ${soldiers.toLocaleString('en')} troops`}
+                  </p>
+                  {sideUnits.length === 0 ? (
+                    <p className="empty-oob">No units yet.</p>
+                  ) : (
+                    sideUnits.map((unit) => {
+                      const unknownTroop = !isKnownTroopType(unit?.troopType);
+                      return (
+                        <button
+                          type="button"
+                          className={
+                            unit?.id === selectedUnitId ? 'unit-row selected' : 'unit-row'
+                          }
+                          key={unit?.id ?? unit?.name}
+                          data-testid="oob-unit"
+                          data-unit-id={unit?.id ?? ''}
+                          data-selected={unit?.id === selectedUnitId ? 'true' : 'false'}
+                          aria-pressed={unit?.id === selectedUnitId}
+                          onClick={() => {
+                            setSelectedUnitId(unit?.id ?? null);
+                            setNotice(null);
+                          }}
+                        >
                           <span
                             className="swatch"
-                            style={{ background: unknownTroop ? '#9aa0a6' : (side?.color ?? '#888') }}
+                            style={{
+                              background: unknownTroop
+                                ? '#9aa0a6'
+                                : sideColorFor(sides, unit),
+                            }}
+                            aria-hidden="true"
                           />
-                          {unit?.name}
-                        </div>
-                        {unknownTroop ? (
-                          <p className="unknown-badge" data-testid="unknown-troop-badge">
-                            Unknown troop type &ldquo;{unit?.troopType}&rdquo; · preserved
-                          </p>
-                        ) : null}
-                      </div>
-                    );
-                  })
-                )}
-              </section>
-            );
-          })}
+                          <span>
+                            <span className="unit-name">{unit?.name}</span>
+                            <span className="unit-detail">
+                              {troopDisplayName(unit?.troopType)} · {unit?.soldiers} soldiers
+                            </span>
+                            {unknownTroop ? (
+                              <span
+                                className="unknown-badge"
+                                data-testid="unknown-troop-badge"
+                              >
+                                Unknown troop type &ldquo;{unit?.troopType}&rdquo; ·
+                                preserved
+                              </span>
+                            ) : null}
+                          </span>
+                        </button>
+                      );
+                    })
+                  )}
+                </section>
+              );
+            })}
           <p className="readonly-note">
-            Units and terrain are added in later slices; this slice always opens an empty
-            battlefield.
+            New and duplicated units are placed at the first free spot in the current view.
+            Select a unit to edit it in the inspector.
           </p>
         </aside>
         <section className="map-panel" aria-label="Battlefield map">
@@ -483,6 +815,11 @@ export default function Editor({
             height={document.battlefield?.height}
             units={units}
             sides={sides}
+            selectedUnitId={selectedUnitId}
+            onSelectUnit={(id: string | null) => {
+              setSelectedUnitId(id);
+              setNotice(null);
+            }}
           />
           <p className="map-hint">
             Scroll to zoom around the cursor · hand tool or Space to pan · V selects, H pans ·
@@ -490,6 +827,206 @@ export default function Editor({
           </p>
         </section>
         <aside className="right-panel panel" aria-label="Inspector" data-testid="inspector">
+          {selectedUnit ? (
+            <>
+              <section aria-label="Selected unit" data-testid="unit-inspector">
+                <span className="eyebrow">SELECTED UNIT</span>
+                <h3 data-testid="unit-title">{selectedUnit.name || 'Unit'}</h3>
+                {selectedDerived ? (
+                  <p className="derived-line" data-testid="unit-derived">
+                    {selectedDerived.ranks} {selectedDerived.ranks === 1 ? 'rank' : 'ranks'} ·{' '}
+                    {selectedDerived.frontageM.toFixed(1)} m frontage ·{' '}
+                    {selectedDerived.depthM.toFixed(1)} m depth
+                    {selectedSpacingClass ? ` · ${selectedSpacingClass} spacing` : ''}
+                  </p>
+                ) : (
+                  <p className="derived-line" data-testid="unit-derived">
+                    Ranks, frontage, and depth follow from soldiers, files, and spacings.
+                  </p>
+                )}
+                {selectedDerived &&
+                Number.isInteger(selectedDerived.ranks) &&
+                Number.isInteger(selectedUnit.files) &&
+                selectedUnit.files >= 1 ? (
+                  <>
+                    <div className="formation-preview">
+                      <FormationDiagram
+                        files={selectedUnit.files}
+                        ranks={selectedDerived.ranks ?? 0}
+                      />
+                      <span>FORMATION DIAGRAM</span>
+                    </div>
+                  </>
+                ) : null}
+                <label className="field">
+                  Unit name
+                  <DraftField
+                    testid="unit-name"
+                    value={selectedUnit.name ?? ''}
+                    error={fieldErrors['unit-name'] ?? null}
+                    maxLength={60}
+                    onCommit={(raw) => commitUnitName(selectedUnit, raw)}
+                  />
+                </label>
+                {fieldError('unit-name')}
+                <div className="field-pair">
+                  <div>
+                    <label className="field">
+                      Side
+                      <select
+                        data-testid="unit-side"
+                        value={selectedUnit.side ?? ''}
+                        onChange={(event) => commitUnitSide(selectedUnit, event.target.value)}
+                        aria-invalid={fieldErrors['unit-side'] ? true : undefined}
+                      >
+                        {sides.map((side) => (
+                          <option key={side?.id} value={side?.id}>
+                            {side?.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    {fieldError('unit-side')}
+                  </div>
+                  <div>
+                    <label className="field">
+                      Troop type
+                      <select
+                        data-testid="unit-troop"
+                        value={selectedUnit.troopType ?? ''}
+                        onChange={(event) => commitUnitTroopType(selectedUnit, event.target.value)}
+                        aria-invalid={fieldErrors['unit-troop'] ? true : undefined}
+                      >
+                        {TROOP_TYPE_KEYS.map((key) => (
+                          <option key={key} value={key}>
+                            {(TROOP_TYPE_CATALOGUE as any)[key]?.displayName || key}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    {fieldError('unit-troop')}
+                  </div>
+                </div>
+                <div className="field-pair">
+                  <div>
+                    <label className="field">
+                      Soldiers
+                      <DraftField
+                        testid="unit-soldiers"
+                        type="number"
+                        min={1}
+                        step={1}
+                        value={String(selectedUnit.soldiers ?? '')}
+                        error={fieldErrors['unit-soldiers'] ?? null}
+                        onCommit={(raw) => commitUnitNumbers(selectedUnit, { soldiers: raw })}
+                      />
+                    </label>
+                    {fieldError('unit-soldiers')}
+                  </div>
+                  <div>
+                    <label className="field">
+                      Files
+                      <DraftField
+                        testid="unit-files"
+                        type="number"
+                        min={1}
+                        step={1}
+                        value={String(selectedUnit.files ?? '')}
+                        error={fieldErrors['unit-files'] ?? null}
+                        onCommit={(raw) => commitUnitNumbers(selectedUnit, { files: raw })}
+                      />
+                    </label>
+                    {fieldError('unit-files')}
+                  </div>
+                </div>
+                <label className="field">
+                  Spacing preset
+                  <select
+                    data-testid="unit-preset"
+                    value={presetKeyFor(selectedUnit)}
+                    onChange={(event) => commitUnitPreset(selectedUnit, event.target.value)}
+                    aria-invalid={fieldErrors['unit-preset'] ? true : undefined}
+                  >
+                    {presetKeyFor(selectedUnit) === 'custom' ? (
+                      <option value="custom">Custom spacings</option>
+                    ) : null}
+                    {SPACING_PRESET_KEYS.map((key) => {
+                      const preset = (getTroopType(selectedUnit.troopType) as any)?.presets?.[key];
+                      const label = preset
+                        ? `${key} (${preset.lateralInterval} × ${preset.rankDepth} m)`
+                        : key;
+                      return (
+                        <option key={key} value={key}>
+                          {label}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </label>
+                {fieldError('unit-preset')}
+                <div className="field-pair">
+                  <div>
+                    <label className="field">
+                      Lateral interval (m)
+                      <DraftField
+                        testid="unit-spacing-lateral"
+                        type="number"
+                        min={0.1}
+                        max={10}
+                        step={0.1}
+                        value={String(selectedUnit.lateralInterval ?? '')}
+                        error={fieldErrors['unit-spacing-lateral'] ?? null}
+                        onCommit={(raw) =>
+                          commitUnitSpacing(selectedUnit, 'lateralInterval', raw)
+                        }
+                      />
+                    </label>
+                    {fieldError('unit-spacing-lateral')}
+                  </div>
+                  <div>
+                    <label className="field">
+                      Rank depth (m)
+                      <DraftField
+                        testid="unit-spacing-depth"
+                        type="number"
+                        min={0.1}
+                        max={10}
+                        step={0.1}
+                        value={String(selectedUnit.rankDepth ?? '')}
+                        error={fieldErrors['unit-spacing-depth'] ?? null}
+                        onCommit={(raw) => commitUnitSpacing(selectedUnit, 'rankDepth', raw)}
+                      />
+                    </label>
+                    {fieldError('unit-spacing-depth')}
+                  </div>
+                </div>
+                <p className="preset-note">
+                  A spacing preset pre-fills both spacings in metres; the scenario stores the
+                  metres (the preset itself is not stored).
+                </p>
+                <div className="unit-actions">
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    data-testid="unit-duplicate"
+                    onClick={() => handleDuplicateUnit(selectedUnit)}
+                  >
+                    Duplicate
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-quiet btn-danger"
+                    data-testid="unit-delete"
+                    onClick={() => handleDeleteUnit(selectedUnit)}
+                  >
+                    Delete
+                  </button>
+                </div>
+                {fieldError('unit-delete')}
+              </section>
+              <hr className="panel-divider" />
+            </>
+          ) : null}
           <h2>Scenario</h2>
           <label className="field">
             Title

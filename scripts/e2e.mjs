@@ -468,6 +468,155 @@ try {
     (await page.getByTestId('save-status').textContent()) === 'Saved',
   );
 
+  // Issue #77: order of battle — add, select, edit, duplicate, delete.
+  const oobTabAll = page.getByTestId('oob-tab-all');
+  const oobTabA = page.getByTestId('oob-tab-0');
+  const oobTabB = page.getByTestId('oob-tab-1');
+  check(
+    'oob filter tabs are visible',
+    (await oobTabAll.isVisible()) &&
+      (await oobTabA.isVisible()) &&
+      (await oobTabB.isVisible()),
+  );
+  await oobTabA.click();
+  check(
+    'an oob side tab filters to that side',
+    (await page.getByTestId('oob-side-a').isVisible()) &&
+      !(await page.getByTestId('oob-side-b').isVisible()),
+  );
+  await oobTabAll.click();
+
+  await page.getByTestId('oob-add').click();
+  const oobUnit = page.getByTestId('oob-unit');
+  check('adding a unit creates a row', (await oobUnit.count()) === 1);
+  const firstUnitId = await oobUnit.first().getAttribute('data-unit-id');
+  const firstRowText = (await oobUnit.first().textContent()) ?? '';
+  check(
+    'the new unit has the default name',
+    /New Unit/.test(firstRowText),
+    firstRowText.trim().slice(0, 80),
+  );
+  const warningsAfterAdd = await page.getByTestId('issue-warning').allTextContents();
+  check(
+    'adding a unit clears one side warning',
+    warningsAfterAdd.length === 1 && /has no units/.test(warningsAfterAdd[0] ?? ''),
+    warningsAfterAdd.join(' | '),
+  );
+  const derived = (await page.getByTestId('unit-derived').textContent()) ?? '';
+  check(
+    'the inspector derives ranks, frontage, and depth',
+    /10 ranks/.test(derived) &&
+      /18\.0 m frontage/.test(derived) &&
+      /18\.0 m depth/.test(derived),
+    (derived ?? '').trim().slice(0, 120),
+  );
+  check(
+    'the inspector shows the formation diagram',
+    await page.getByTestId('formation-diagram').isVisible(),
+  );
+
+  // Selecting in the list selects the unit on the map and vice versa.
+  await oobUnit.first().click();
+  const selectedOnMap = page.locator('[data-testid="map-unit"][data-selected="true"]');
+  check(
+    'selecting in the list selects the unit on the map',
+    (await selectedOnMap.count()) === 1 &&
+      ((await selectedOnMap.getAttribute('data-unit-id')) === firstUnitId),
+  );
+
+  // Editing soldiers updates the derived ranks and depth.
+  await page.getByTestId('unit-soldiers').fill('150');
+  await page.locator('.map-caption').click();
+  const derived150 = (await page.getByTestId('unit-derived').textContent()) ?? '';
+  check(
+    'editing soldiers updates ranks and depth',
+    /15 ranks/.test(derived150) &&
+      /18\.0 m frontage/.test(derived150) &&
+      /27\.0 m depth/.test(derived150),
+    (derived150 ?? '').trim().slice(0, 120),
+  );
+
+  // Changing troop type pre-fills that type's normal preset; the preset
+  // select then applies the open spacings in one step.
+  await page.getByTestId('unit-troop').selectOption('peltast');
+  check(
+    'changing troop type pre-fills its normal spacing',
+    (await page.getByTestId('unit-spacing-lateral').inputValue()) === '1.5' &&
+      (await page.getByTestId('unit-spacing-depth').inputValue()) === '1.5',
+  );
+  await page.getByTestId('unit-preset').selectOption('open');
+  const lateralOpen = await page.getByTestId('unit-spacing-lateral').inputValue();
+  const depthOpen = await page.getByTestId('unit-spacing-depth').inputValue();
+  check(
+    'the open preset applies both spacings',
+    lateralOpen === '3' && depthOpen === '3',
+    `lateral=${lateralOpen} depth=${depthOpen}`,
+  );
+
+  // Duplicate names the copy uniquely; selecting on the map drives the
+  // inspector back to the first unit.
+  await page.getByTestId('unit-duplicate').click();
+  check('duplicating adds a second row', (await oobUnit.count()) === 2);
+  const oobDupTitles = await oobUnit.allTextContents();
+  check(
+    'the duplicate is uniquely named',
+    oobDupTitles.some((entry) => /copy/.test(entry ?? '')),
+    oobDupTitles.join(' | ').slice(0, 120),
+  );
+  await page.locator(`[data-testid="map-unit"][data-unit-id="${firstUnitId}"]`).click();
+  const selectedUnitTitle = await page.getByTestId('unit-title').textContent();
+  check(
+    'selecting on the map selects the unit in the inspector',
+    selectedUnitTitle === 'New Unit',
+    selectedUnitTitle ?? '',
+  );
+
+  // Structural refusals: files beyond soldiers, a duplicate name, and a
+  // spacing outside the application limit.
+  await page.getByTestId('unit-files').fill('200');
+  await page.locator('.map-caption').click();
+  check(
+    'files beyond soldiers are refused',
+    await page.getByTestId('inspector-unit-files-error').isVisible(),
+  );
+  await page.getByTestId('unit-name').fill('New Unit copy');
+  await page.locator('.map-caption').click();
+  check(
+    'a duplicate unit name is refused',
+    await page.getByTestId('inspector-unit-name-error').isVisible(),
+  );
+  await page.getByTestId('unit-spacing-lateral').fill('99');
+  await page.locator('.map-caption').click();
+  check(
+    'a spacing outside structural bounds is refused',
+    await page.getByTestId('inspector-unit-spacing-lateral-error').isVisible(),
+  );
+
+  // Delete both units; the warnings return; undo/redo walks the deletes back.
+  await page.getByTestId('unit-delete').click();
+  check('deleting removes the selected row', (await oobUnit.count()) === 1);
+  await oobUnit.first().click();
+  await page.getByTestId('unit-delete').click();
+  check('deleting the last unit clears the list', (await oobUnit.count()) === 0);
+  const warningsAfterDelete = await page.getByTestId('issue-warning').allTextContents();
+  check(
+    'the side warnings return when the sides have no units',
+    warningsAfterDelete.length === 2,
+    warningsAfterDelete.join(' | '),
+  );
+  await undoButton.click();
+  check(
+    'undo restores the deleted unit',
+    (await oobUnit.count()) === 1 &&
+      (await page.getByTestId('issue-warning').count()) === 1,
+  );
+  await redoButton.click();
+  check(
+    'redo removes the unit again',
+    (await oobUnit.count()) === 0 &&
+      (await page.getByTestId('issue-warning').count()) === 2,
+  );
+
   // Leaving the editor with unsaved changes asks for confirmation.
   await page.getByTestId('inspector-description').fill('Revised description.');
   await page.locator('.map-caption').click();

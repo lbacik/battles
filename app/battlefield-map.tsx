@@ -52,6 +52,10 @@ interface BattlefieldMapProps {
   height: number;
   units?: any[];
   sides?: any[];
+  // Single selection shared with the order of battle: clicking a unit's
+  // true-scale footprint selects it (display-only, never undoable).
+  selectedUnitId?: string | null;
+  onSelectUnit?: (id: string | null) => void;
 }
 
 function safeDimension(value: number, fallback: number): number {
@@ -100,6 +104,7 @@ interface PlacedUnit {
   name: string;
   dims: string;
   mpp: number;
+  selected: boolean;
 }
 
 function escapeXml(value: string): string {
@@ -119,7 +124,14 @@ function escapeXml(value: string): string {
   });
 }
 
-export default function BattlefieldMap({ width, height, units = [], sides = [] }: BattlefieldMapProps) {
+export default function BattlefieldMap({
+  width,
+  height,
+  units = [],
+  sides = [],
+  selectedUnitId = null,
+  onSelectUnit,
+}: BattlefieldMapProps) {
   const safeW = safeDimension(width, FALLBACK_WIDTH);
   const safeH = safeDimension(height, FALLBACK_HEIGHT);
   const battlefield = useMemo(() => ({ width: safeW, height: safeH }), [safeW, safeH]);
@@ -273,10 +285,11 @@ export default function BattlefieldMap({ width, height, units = [], sides = [] }
         name,
         dims: `${Math.round(footprint.frontageM)} × ${Math.round(footprint.depthM)} m`,
         mpp,
+        selected: selectedUnitId != null && String(unit?.id ?? '') === String(selectedUnitId),
       });
     }
     return out;
-  }, [units, sides, safeH, mpp]);
+  }, [units, sides, safeH, mpp, selectedUnitId]);
 
   const cursorText = cursor
     ? `X ${cursor.x.toFixed(1)} m · Y ${cursor.y.toFixed(1)} m${cursor.inside ? '' : ' · outside'}`
@@ -353,6 +366,8 @@ export default function BattlefieldMap({ width, height, units = [], sides = [] }
         showLabels={showLabels}
         placed={placed}
         svgRef={svgHolderRef}
+        selectionEnabled={!handActive && !panning}
+        onSelectUnit={onSelectUnit}
       />
       <div className="map-tool-rail" role="toolbar" aria-label="Map tools">
         <button
@@ -485,6 +500,8 @@ interface BattlefieldSvgProps {
   showLabels: boolean;
   placed: PlacedUnit[];
   svgRef: RefObject<SVGSVGElement | null>;
+  selectionEnabled: boolean;
+  onSelectUnit?: (id: string | null) => void;
 }
 
 // The scene, memoised so cursor-readout updates (which only touch the HTML
@@ -499,7 +516,12 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
   zoom,
   showGrid,
   placed,
+  selectionEnabled,
+  onSelectUnit,
 }: BattlefieldSvgProps) {
+  // Pointer-down position per unit, so a pan that starts on a footprint does
+  // not select it when the pointer comes back up.
+  const downPos = useRef<{ x: number; y: number } | null>(null);
   const axisSize = 13 / zoom;
   const grid = useMemo(() => {
     const lines: string[] = [];
@@ -582,15 +604,34 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
             minEdgePx < 10
               ? `<rect x="${-helperBox / 2}" y="${helperCy - helperBox / 2}" width="${helperBox}" height="${helperBox}" rx="${4 * entry.mpp}" fill="none" stroke="${entry.color}" stroke-width="${1.5 * entry.mpp}" stroke-dasharray="${6 * entry.mpp} ${4 * entry.mpp}" opacity="0.85"/>`
               : '';
+          const outline = entry.selected ? 3 * entry.mpp : 1.6 * entry.mpp;
           const footprint =
             `<g transform="rotate(${entry.facing})">${helper}` +
-            `<rect x="${-entry.frontageM / 2}" y="0" width="${entry.frontageM}" height="${entry.depthM}" fill="${entry.color}" fill-opacity="0.32" stroke="${entry.color}" stroke-width="${1.6 * entry.mpp}"/>` +
+            `<rect x="${-entry.frontageM / 2}" y="0" width="${entry.frontageM}" height="${entry.depthM}" fill="${entry.color}" fill-opacity="0.32" stroke="${entry.color}" stroke-width="${outline}"/>` +
             `<line x1="${-entry.frontageM / 2}" y1="0" x2="${entry.frontageM / 2}" y2="0" stroke="${entry.color}" stroke-width="${3 * entry.mpp}"/></g>`;
+          const unitId = String(entry.unit?.id ?? '');
           return (
             <g
-              key={String(entry.unit?.id ?? entry.name)}
+              key={unitId || entry.name}
               transform={`translate(${entry.centre.x} ${entry.centre.y})`}
-              data-unit-id={String(entry.unit?.id ?? '')}
+              data-testid="map-unit"
+              data-unit-id={unitId}
+              data-selected={entry.selected ? 'true' : 'false'}
+              style={{ cursor: selectionEnabled ? 'pointer' : undefined }}
+              onPointerDown={(event) => {
+                downPos.current = { x: event.clientX, y: event.clientY };
+              }}
+              onClick={(event) => {
+                const down = downPos.current;
+                downPos.current = null;
+                if (!selectionEnabled) return;
+                if (down && Math.hypot(event.clientX - down.x, event.clientY - down.y) > 5) {
+                  return;
+                }
+                if (!unitId) return;
+                event.stopPropagation();
+                onSelectUnit?.(unitId);
+              }}
               dangerouslySetInnerHTML={{ __html: footprint }}
             />
           );

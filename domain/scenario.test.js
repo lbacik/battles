@@ -28,7 +28,10 @@ import {
   compareRulesetVersions,
   createHistory,
   createScenario,
+  createUnit,
   defaultFacingForSide,
+  deleteUnit,
+  duplicateUnit,
   exportScenario,
   findFreeUnitPosition,
   fitMapView,
@@ -65,6 +68,7 @@ import {
   snapFacing,
   suggestUnitName,
   toScreenPoint,
+  unitDerived,
   unitFacingDeg,
   unitFootprint,
   unitPosition,
@@ -76,6 +80,11 @@ import {
   updateScenarioTitle,
   updateSideColor,
   updateSideName,
+  updateUnitName,
+  updateUnitNumbers,
+  updateUnitSide,
+  updateUnitSpacing,
+  updateUnitTroopType,
   validateElevationCandidate,
   validateGroundCoverCandidate,
   validateLinearCandidate,
@@ -1842,5 +1851,177 @@ describe('editor release gate: save, export, and import round-trips', () => {
     assert.equal(current.terrainFeatures.length, 1);
     assert.deepEqual(current.units[0].position, { x: 620, y: 400 });
     assert.deepEqual(validateScenario(current), []);
+  });
+});
+
+describe('unit editing (order of battle)', () => {
+  it('derives ranks, frontage, and depth from the same footprint the map draws', () => {
+    assert.deepEqual(unitDerived(probeUnit()), { ranks: 10, frontageM: 10, depthM: 10 });
+    assert.deepEqual(unitDerived(probeUnit({ soldiers: 101, files: 10 })), {
+      ranks: 11,
+      frontageM: 10,
+      depthM: 11,
+    });
+    assert.equal(unitDerived({}), null);
+  });
+
+  it('creates a unit with catalogue-style defaults at the first free spot', () => {
+    const before = freshDocument();
+    const { document, unitId } = createUnit(before);
+    assert.equal(before.units.length, 0, 'the input document is never mutated');
+    assert.equal(document.units.length, 1);
+    const unit = document.units[0];
+    assert.equal(unit.id, unitId);
+    assert.equal(unit.name, 'New Unit');
+    assert.equal(unit.side, 'side-a');
+    assert.equal(unit.troopType, 'hoplite');
+    assert.equal(unit.soldiers, 100);
+    assert.equal(unit.files, 10);
+    assert.deepEqual(validateScenario(document), []);
+    assert.deepEqual(collectWarnings(document).filter((warning) => /side-a/i.test(warning)), []);
+  });
+
+  it('faces a new unit with its side and keeps names unique', () => {
+    const first = createUnit(freshDocument()).document;
+    const second = createUnit(first, { sideId: 'side-b' }).document;
+    assert.equal(second.units[0].facing, 180);
+    assert.equal(second.units[1].facing, 0);
+    assert.equal(second.units[1].side, 'side-b');
+    assert.equal(second.units[1].name, 'New Unit 2');
+  });
+
+  it('refuses to add a unit when the current view has no free spot', () => {
+    const document = freshDocument();
+    document.units.push(probeUnit({ position: { x: 600, y: 400 } }));
+    assert.throws(
+      () =>
+        createUnit(document, {
+          searchRect: { minX: 600, maxX: 600, minY: 395, maxY: 395 },
+        }),
+      /No free space/,
+    );
+  });
+
+  it('duplicates a unit under a unique name at the first free spot', () => {
+    const document = freshDocument();
+    document.units.push(probeUnit({ name: 'Taxis', position: { x: 600, y: 400 } }));
+    const { document: next, unitId } = duplicateUnit(document, document.units[0].id);
+    assert.equal(document.units.length, 1, 'the input document is never mutated');
+    assert.equal(next.units.length, 2);
+    const copy = next.units.find((unit) => unit.id === unitId);
+    assert.equal(copy.name, 'Taxis copy');
+    assert.notDeepEqual(copy.position, { x: 600, y: 400 });
+    assert.deepEqual(validateScenario(next), []);
+  });
+
+  it('refuses to duplicate when the current view has no free spot', () => {
+    const document = freshDocument();
+    document.units.push(probeUnit({ name: 'Taxis', position: { x: 600, y: 400 } }));
+    assert.throws(
+      () =>
+        duplicateUnit(document, document.units[0].id, {
+          minX: 595,
+          maxX: 605,
+          minY: 395,
+          maxY: 405,
+        }),
+      /No free space/,
+    );
+  });
+
+  it('deletes a unit and reports an unknown id', () => {
+    const document = freshDocument();
+    document.units.push(probeUnit());
+    const id = document.units[0].id;
+    const next = deleteUnit(document, id);
+    assert.equal(document.units.length, 1, 'the input document is never mutated');
+    assert.equal(next.units.length, 0);
+    assert.throws(() => deleteUnit(next, id), /Unit not found/);
+  });
+
+  it('requires a unique unit name', () => {
+    const document = freshDocument();
+    document.units.push(probeUnit({ name: 'Taxis' }));
+    document.units.push(probeUnit({ name: 'Other', position: { x: 300, y: 200 } }));
+    assert.throws(() => updateUnitName(document, document.units[1].id, '  '), /required/);
+    assert.throws(
+      () => updateUnitName(document, document.units[1].id, 'taxis'),
+      /already used/,
+    );
+    const next = updateUnitName(document, document.units[1].id, '  Fresh  ');
+    assert.equal(next.units[1].name, 'Fresh');
+    assert.equal(document.units[1].name, 'Other', 'the input document is never mutated');
+  });
+
+  it('moves a unit between the two sides only', () => {
+    const document = freshDocument();
+    document.units.push(probeUnit());
+    assert.throws(() => updateUnitSide(document, document.units[0].id, 'side-z'), /Side/);
+    const next = updateUnitSide(document, document.units[0].id, 'side-b');
+    assert.equal(next.units[0].side, 'side-b');
+  });
+
+  it('changes the troop type and optionally pre-fills the preset spacings', () => {
+    const document = freshDocument();
+    document.units.push(probeUnit());
+    assert.throws(
+      () => updateUnitTroopType(document, document.units[0].id, '  '),
+      /Troop type is required/,
+    );
+    const kept = updateUnitTroopType(document, document.units[0].id, 'peltast');
+    assert.equal(kept.units[0].troopType, 'peltast');
+    assert.equal(kept.units[0].lateralInterval, 1, 'spacings stay without a preset');
+    const prefilled = updateUnitTroopType(document, document.units[0].id, 'peltast', {
+      lateralInterval: 1.5,
+      rankDepth: 1.5,
+    });
+    assert.equal(prefilled.units[0].lateralInterval, 1.5);
+    assert.equal(prefilled.units[0].rankDepth, 1.5);
+  });
+
+  it('checks soldier and file counts structurally', () => {
+    const document = freshDocument();
+    document.units.push(probeUnit());
+    const id = document.units[0].id;
+    assert.throws(() => updateUnitNumbers(document, id, { soldiers: 0 }), /at least 1/);
+    assert.throws(() => updateUnitNumbers(document, id, { files: 2.5 }), /whole number/);
+    assert.throws(() => updateUnitNumbers(document, id, { files: 101 }), /must not exceed/);
+    const next = updateUnitNumbers(document, id, { soldiers: 150 });
+    assert.equal(next.units[0].soldiers, 150);
+    assert.equal(next.units[0].files, 10);
+  });
+
+  it('checks spacings against the structural application limit', () => {
+    const document = freshDocument();
+    document.units.push(probeUnit());
+    const id = document.units[0].id;
+    assert.throws(() => updateUnitSpacing(document, id, { lateralInterval: 0 }), /positive/);
+    assert.throws(
+      () => updateUnitSpacing(document, id, { rankDepth: 10.5 }),
+      /application limit/,
+    );
+    const next = updateUnitSpacing(document, id, { lateralInterval: 1.85, rankDepth: 1.85 });
+    assert.equal(next.units[0].lateralInterval, 1.9, 'spacings round to 0.1 m');
+  });
+
+  it('refuses a numbers change whose footprint would overlap or leave the field', () => {
+    const document = freshDocument();
+    document.units.push(probeUnit({ name: 'First', position: { x: 600, y: 400 } }));
+    document.units.push(probeUnit({ name: 'Second', position: { x: 300, y: 200 } }));
+    assert.throws(
+      () => updateUnitNumbers(document, document.units[0].id, { soldiers: 100000 }),
+      /footprint extends outside/,
+    );
+    assert.deepEqual(validateScenario(document), [], 'the refused edit leaves no trace');
+  });
+
+  it('refuses a spacing change whose footprint would overlap another unit', () => {
+    const document = freshDocument();
+    document.units.push(probeUnit({ name: 'First', position: { x: 600, y: 400 } }));
+    document.units.push(probeUnit({ name: 'Second', position: { x: 615, y: 400 } }));
+    assert.throws(
+      () => updateUnitSpacing(document, document.units[0].id, { lateralInterval: 10 }),
+      /overlap/,
+    );
   });
 });
