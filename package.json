@@ -1,8 +1,9 @@
 {
-  "name": "poleis-ui-prototype",
+  "name": "polis",
   "private": true,
   "engines": { "node": "22" },
   "scripts": {
+    "dev": "next dev",
     "prototype": "node prototype/server.mjs",
     "lint": "node scripts/lint.mjs",
     "format:check": "node scripts/format-check.mjs",
@@ -10,5 +11,18 @@
     "test": "node --test domain/geometry.test.js domain/polis-classical.test.js domain/scenario.test.js domain/store.test.js domain/library.test.js domain/battle.test.js domain/battles.test.js domain/battle-log.test.js domain/turn.test.js domain/movement.test.js domain/charge.test.js domain/reform-withdraw.test.js domain/combat.test.js domain/cohesion.test.js domain/shoot.test.js domain/battle-end.test.js domain/engine-gate.test.js",
     "build": "node scripts/build.mjs",
     "test:e2e": "node scripts/e2e.mjs"
+  },
+  "dependencies": {
+    "next": "14.2.35",
+    "react": "18.3.1",
+    "react-dom": "18.3.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.49.1",
+    "@types/node": "22.10.2",
+    "@types/react": "18.3.18",
+    "@types/react-dom": "18.3.5",
+    "playwright": "1.49.1",
+    "typescript": "5.7.2"
   }
 }

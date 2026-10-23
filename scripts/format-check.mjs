@@ -9,8 +9,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const EXCLUDED = new Set(['.git', 'node_modules', 'prototype', 'dist', 'e2e-report']);
-const EXCLUDED_FILES = new Set(['package-lock.json']);
+const EXCLUDED = new Set(['.git', 'node_modules', 'prototype', 'dist', 'out', '.next', 'e2e-report']);
+const EXCLUDED_FILES = new Set(['package-lock.json', 'tsconfig.tsbuildinfo']);
 
 function collect(dir, out = []) {
   for (const entry of readdirSync(dir)) {
