@@ -70,6 +70,17 @@ export interface TerrainRefusalShape {
   kind?: 'ground' | 'elevation' | 'linear';
 }
 
+export interface BattleGhost {
+  unitId: string;
+  corners: TerrainMapPoint[];
+}
+
+export interface BattlePath {
+  points: TerrainMapPoint[];
+  rejected: boolean;
+  label: string;
+}
+
 interface BattlefieldMapProps {
   width: number;
   height: number;
@@ -84,7 +95,7 @@ interface BattlefieldMapProps {
   selectedVertexIndex?: number | null;
   draft?: TerrainDraftShape | null;
   refusal?: TerrainRefusalShape | null;
-  // When true, map clicks select terrain and add draft vertices instead of
+  // When true, map clicks (empty ground) add draft vertices instead of
   // being ignored. The editor sets this in its Map editor mode.
   terrainInteractive?: boolean;
   onTerrainSelect?: (id: string, vertexIndex?: number | null) => void;
@@ -92,6 +103,18 @@ interface BattlefieldMapProps {
   onMapDraftPoint?: (point: TerrainMapPoint) => void;
   onEdgeInsert?: (featureId: string, edgeIndex: number) => void;
   onVertexCommit?: (featureId: string, index: number, point: TerrainMapPoint) => void;
+  // Battle drafting (the battle screen): clicks on open ground report the map
+  // point in metres for the active Move draft, accepted drafts draw ghost
+  // footprints and leg paths, and rejected drafts highlight their conflict.
+  battleClickable?: boolean;
+  onBattleMapClick?: (point: TerrainMapPoint) => void;
+  battleGhosts?: BattleGhost[];
+  battlePaths?: BattlePath[];
+  battleConflictPoints?: TerrainMapPoint[];
+  // When set, the selected unit's rotation handle pivots the Move draft facing
+  // instead of the scenario geometry (the battle never moves units).
+  battleRotateUnitId?: string | null;
+  onBattleRotate?: (facing: number) => void;
   // Placement refusals to highlight: every id the refused drop would conflict
   // with (the dragged unit plus every overlap partner). Display-only, like the
   // selection: the document keeps the last valid values.
@@ -192,6 +215,13 @@ export default function BattlefieldMap({
   unitConflictIds = [],
   onMoveUnit,
   onRotateUnit,
+  battleClickable = false,
+  onBattleMapClick,
+  battleGhosts = [],
+  battlePaths = [],
+  battleConflictPoints = [],
+  battleRotateUnitId = null,
+  onBattleRotate,
 }: BattlefieldMapProps) {
   const safeW = safeDimension(width, FALLBACK_WIDTH);
   const safeH = safeDimension(height, FALLBACK_HEIGHT);
@@ -548,6 +578,17 @@ export default function BattlefieldMap({
           }
           if (event.ctrlKey || event.metaKey || event.altKey) return;
           const target = event.target instanceof Element ? event.target : null;
+          // Battle drafting: a click on open ground (never on a unit, whose
+          // pointer gesture already selected it) appends a leg point to the
+          // active Move draft.
+          if (battleClickable && !draft) {
+            if (target?.closest('[data-rotate-handle],[data-testid="map-unit"]')) return;
+            const svg = svgHolderRef.current;
+            if (!svg) return;
+            const cursorMap = clientToMap(svg, event.clientX, event.clientY, safeH);
+            if (cursorMap) onBattleMapClick?.(cursorMap);
+            return;
+          }
           if (draft) {
             // Handles have their own pointer handlers; anywhere else on the
             // map adds a vertex.
@@ -586,6 +627,11 @@ export default function BattlefieldMap({
         onMoveUnit={onMoveUnit}
         onRotateUnit={onRotateUnit}
         onPreviewRotate={setLiveRotate}
+        battleRotateUnitId={battleRotateUnitId}
+        onBattleRotate={onBattleRotate}
+        battleGhosts={battleGhosts}
+        battlePaths={battlePaths}
+        battleConflictPoints={battleConflictPoints}
       />
       {draft ? (
         <p className="map-terrain-hint" role="status" data-testid="map-terrain-hint">
@@ -756,6 +802,11 @@ interface BattlefieldSvgProps {
   onMoveUnit?: (id: string, position: { x: number; y: number }) => void;
   onRotateUnit?: (id: string, facing: number) => void;
   onPreviewRotate?: (preview: { facing: number; free: boolean } | null) => void;
+  battleRotateUnitId?: string | null;
+  onBattleRotate?: (facing: number) => void;
+  battleGhosts?: BattleGhost[];
+  battlePaths?: BattlePath[];
+  battleConflictPoints?: TerrainMapPoint[];
 }
 
 // A map pointer gesture: dragging a true-scale footprint moves it, dragging
@@ -818,7 +869,55 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
   onMoveUnit,
   onRotateUnit,
   onPreviewRotate,
+  battleRotateUnitId = null,
+  onBattleRotate,
+  battleGhosts = [],
+  battlePaths = [],
+  battleConflictPoints = [],
 }: BattlefieldSvgProps) {
+  // Battle draft overlays in true scale: ghost footprints for accepted drafts,
+  // leg paths for every draft, and conflict markers from rejection details.
+  const battleOverlays = useMemo(() => {
+    let out = '';
+    for (const ghost of battleGhosts) {
+      if (!ghost || !Array.isArray(ghost.corners) || ghost.corners.length < 3) {
+        continue;
+      }
+      const line = ghost.corners.map((point) => `${point.x},${safeH - point.y}`).join(' ');
+      out += `<polygon points="${line}" fill="#4e6047" fill-opacity="0.14" stroke="#4e6047" stroke-width="${(2 * mpp).toFixed(2)}" stroke-dasharray="${(7 * mpp).toFixed(1)} ${(4 * mpp).toFixed(1)}" data-testid="draft-ghost" data-ghost-unit="${escapeXml(ghost.unitId)}"><title>Ghost: ${escapeXml(ghost.unitId)} Move preview</title></polygon>`;
+    }
+    for (const path of battlePaths) {
+      const points = Array.isArray(path?.points) ? path.points : [];
+      if (points.length < 2) {
+        continue;
+      }
+      const line = points.map((point) => `${point.x},${safeH - point.y}`).join(' ');
+      const color = path.rejected ? '#b91c1c' : '#4e6047';
+      const dash = path.rejected
+        ? `${(3 * mpp).toFixed(1)} ${(3 * mpp).toFixed(1)}`
+        : `${(7 * mpp).toFixed(1)} ${(4 * mpp).toFixed(1)}`;
+      out += `<polyline points="${line}" fill="none" stroke="${color}" stroke-width="${(2 * mpp).toFixed(2)}" stroke-dasharray="${dash}" data-testid="draft-path"><title>${escapeXml(path.label || 'Leg')}</title></polyline>`;
+      out += points
+        .slice(1)
+        .map(
+          (stop, legIndex) =>
+            `<circle cx="${stop.x}" cy="${(safeH - stop.y).toFixed(1)}" r="${(5 * mpp).toFixed(2)}" fill="${color}" stroke="#f8f9f0" stroke-width="${(1.5 * mpp).toFixed(2)}" data-testid="draft-vertex"><title>${escapeXml(path.label || 'Leg')} ${legIndex + 1} · (${stop.x.toFixed(1)}, ${stop.y.toFixed(1)})</title></circle>`,
+        )
+        .join('');
+    }
+    return out;
+  }, [battleGhosts, battlePaths, safeH, mpp]);
+
+  const battleMarkers = useMemo(() => {
+    let out = '';
+    for (const point of battleConflictPoints) {
+      if (!point || !Number.isFinite(point?.x) || !Number.isFinite(point?.y)) {
+        continue;
+      }
+      out += `<circle cx="${point.x}" cy="${safeH - point.y}" r="${(8 * mpp).toFixed(2)}" fill="none" stroke="#b91c1c" stroke-width="${(2.5 * mpp).toFixed(2)}" data-testid="conflict-marker"><title>Conflict at (${point.x.toFixed(1)}, ${point.y.toFixed(1)})</title></circle>`;
+    }
+    return out;
+  }, [battleConflictPoints, safeH, mpp]);
   // The live drag preview mutates the SVG transform directly (no re-render
   // per pointermove, so gestures stay smooth). Bumping dropSeq remounts the
   // units layer on drop, discarding the preview: a committed drop re-renders
@@ -1178,7 +1277,13 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
     if (gesture.kind === 'move' && gesture.preview) {
       onMoveUnit?.(gesture.unitId, gesture.preview);
     } else if (gesture.kind === 'rotate' && gesture.previewFacing !== undefined) {
-      onRotateUnit?.(gesture.unitId, gesture.previewFacing);
+      // A battle draft pivots the Move facing, never the scenario geometry:
+      // the engine alone decides the draft through validation.
+      if (battleRotateUnitId && gesture.unitId === battleRotateUnitId && onBattleRotate) {
+        onBattleRotate(gesture.previewFacing);
+      } else {
+        onRotateUnit?.(gesture.unitId, gesture.previewFacing);
+      }
     }
   }
 
@@ -1236,6 +1341,7 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
       />
       <g data-testid="map-terrain" dangerouslySetInnerHTML={{ __html: terrain }} />
       <g dangerouslySetInnerHTML={{ __html: xLabels + yLabels }} />
+      <g data-testid="map-battle-overlays" dangerouslySetInnerHTML={{ __html: battleOverlays }} />
       <g data-testid="map-units-group" key={`units-${dropSeq}`}>
         {placed.map((entry) => {
           const minEdgePx = Math.min(entry.frontageM, entry.depthM) / entry.mpp;
@@ -1285,6 +1391,7 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
           );
         })}
       </g>
+      <g data-testid="map-conflict-markers" dangerouslySetInnerHTML={{ __html: battleMarkers }} />
       <g
         data-testid="map-unit-labels"
         style={{ display: showLabels ? 'block' : 'none' }}

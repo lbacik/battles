@@ -1611,3 +1611,157 @@ textarea:focus-visible {
   display: flex;
   gap: 6px;
 }
+
+/* Move drafting (issue #84): the human turn draft list, the inspector draft
+   editor, and the map ghost/path/conflict overlays. Mirrors
+   prototype/battle.css — accepted drafts draw a ghost footprint of their
+   movement preview, rejected drafts highlight their conflict. */
+#battle-svg [data-testid='draft-ghost'],
+#battle-svg [data-testid='draft-path'],
+#battle-svg [data-testid='draft-vertex'],
+#battle-svg [data-testid='conflict-marker'] {
+  pointer-events: none;
+}
+
+.draft-list,
+[data-testid='draft-list'] {
+  margin-top: 18px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.draft-list h3,
+[data-testid='draft-list'] h3 {
+  font-size: 14px;
+  margin: 0 0 10px;
+}
+
+.draft-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.draft-row {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 10px;
+  background: var(--paper);
+}
+
+.draft-row.selected {
+  border-color: var(--green);
+}
+
+.draft-row.rejected {
+  border-color: #b91c1c;
+  background: #fdf3ef;
+}
+
+.draft-row.accepted {
+  border-color: #4e6047;
+}
+
+.draft-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.draft-select {
+  font-weight: 650;
+  font-size: 13px;
+  padding: 0;
+}
+
+.draft-select:hover {
+  text-decoration: underline;
+}
+
+.draft-kind {
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--green-deep);
+  background: #eef2e4;
+  border-radius: 3px;
+  padding: 2px 6px;
+}
+
+.draft-row.rejected .draft-kind {
+  color: #8a4636;
+  background: #f9e9e4;
+}
+
+.draft-meta {
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.draft-ok {
+  font-size: 12px;
+  color: #4e6047;
+  line-height: 1.5;
+  margin: 6px 0 0;
+}
+
+.draft-pending {
+  font-size: 12px;
+  color: var(--muted);
+  margin: 6px 0 0;
+}
+
+.draft-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.leg-list {
+  margin: 0 0 8px;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.leg-empty {
+  list-style: none;
+  color: var(--muted);
+}
+
+.draft-hint {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.7;
+  margin: 8px 0;
+}
+
+.inspector-drafts {
+  margin-top: 12px;
+}
+
+.field-label {
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  color: var(--muted);
+  display: block;
+  margin-bottom: 6px;
+}
+
+.unavailable {
+  margin: 0 0 12px;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.unavailable strong {
+  color: var(--ink);
+}

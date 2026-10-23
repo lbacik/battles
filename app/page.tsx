@@ -716,6 +716,43 @@ export default function Home() {
     showToast(`${battleSideName(started, started.activeSide)} begins.`);
   }
 
+  // The human side commits its drafted orders: every draft change is already
+  // validated by the engine, and the commit re-validates the whole submission
+  // before it resolves. A commit is all or nothing, and a committed turn
+  // cannot be taken back.
+  async function handleCommitDraft(orders: any[]) {
+    if (!battle || resolving) return;
+    if (battle.status !== 'ongoing') return;
+    setResolveError(null);
+    const submission = {
+      formatVersion: SUBMISSION_FORMAT_VERSION,
+      battleId: battle.id,
+      turnNumber: battle.turnNumber,
+      side: battle.activeSide,
+      orders,
+    };
+    const verdict = validateTurn(battle, submission);
+    if (!verdict.ok) {
+      setResolveError(`Commit refused: ${verdict.message} (${verdict.code}).`);
+      return;
+    }
+    let next: any;
+    try {
+      next = resolveTurn(battle, { type: 'commit', submission });
+    } catch (resolveFailure) {
+      setResolveError(
+        resolveFailure instanceof Error ? resolveFailure.message : String(resolveFailure),
+      );
+      return;
+    }
+    const nextDecisions = [...decisions, { type: 'commit', submission }];
+    setBattle(next);
+    setDecisions(nextDecisions);
+    setAnnouncement(null);
+    showToast(`Turn ${battle.turnNumber} resolved.`);
+    await persistBattle(next, nextDecisions);
+  }
+
   // The human side commits an empty turn: all units hold. The commit is
   // validated by the engine before it resolves; a committed turn cannot be
   // taken back.
@@ -889,6 +926,7 @@ export default function Home() {
             resolving={resolving}
             resolveError={resolveError}
             onCommitEmpty={handleCommitEmpty}
+            onCommitDraft={handleCommitDraft}
             onContinueAutomated={handleContinueAutomated}
             onBackToLibrary={handleBackToLibrary}
           />
