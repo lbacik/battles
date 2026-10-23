@@ -5,10 +5,13 @@
 // bottom turn bar showing round and round limit, the active side in its
 // colour, and the phase.
 //
-// During a human turn the side drafts Move orders: one per unit, up to three
-// leg points clicked on the map with a rotation handle. Every draft change
-// calls the engine's `validateTurn`: an accepted order shows a ghost footprint
-// of its movement preview, a rejected one shows its message inline and
+// During a human turn the side drafts orders of every kind: one per unit —
+// Move on the map (up to three leg points with a rotation handle), Charge at
+// a highlighted candidate (with optional approach legs), Shoot at a
+// highlighted candidate, Reform through its form with spacing presets, and
+// Withdraw and Rally in place from the inspector. Every draft change calls the
+// engine's `validateTurn`: an accepted order shows a ghost footprint of its
+// preview (where it moves), a rejected one shows its message inline and
 // highlights the conflict. Drafts can be removed and reordered (reordering
 // re-validates); Commit is enabled only while every order is accepted, and a
 // committed turn cannot be taken back. Automated turns resolve through the
@@ -18,13 +21,16 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import BattlefieldMap from './battlefield-map';
+import type { BattleChargeCandidate } from './battlefield-map';
 import { TURN_PHASE_ORDERS } from '../domain/battle.js';
 import {
   SUBMISSION_FORMAT_VERSION,
   availableActions,
   validateTurn,
 } from '../domain/turn.js';
+import { CHARGE_EDGES, MAX_APPROACH_LEGS } from '../domain/charge.js';
 import { MAX_MOVE_LEGS } from '../domain/movement.js';
+import { getTroopType } from '../domain/polis-classical.js';
 import { normalizeFacing } from '../domain/scenario.js';
 import { round1 } from '../domain/geometry.js';
 import { isBattleFinished } from '../domain/battles.js';
@@ -38,13 +44,28 @@ import {
 
 type BattleDocument = any;
 
-// A Move draft for one unit: up to three `{ face, to }` legs in draft order.
-// A leg with only a rotation is allowed. The engine alone decides legality.
-interface MoveDraft {
-  key: string;
-  unitId: string;
-  legs: { face: number | null; to: { x: number; y: number } | null }[];
+// An order draft for one unit. Move holds up to three `{ face, to }` legs in
+// draft order (a leg with only a rotation is allowed); Charge holds its target,
+// edge, and up to two optional approach legs; Shoot holds its target; Reform
+// holds the files with the spacings; Withdraw and Rally hold no parameters.
+// Drafting a second kind for the same unit replaces the first. The engine
+// alone decides legality.
+interface DraftLeg {
+  face: number | null;
+  to: { x: number; y: number } | null;
 }
+
+type OrderDraft =
+  | { key: string; unitId: string; kind: 'Move'; legs: DraftLeg[] }
+  | { key: string; unitId: string; kind: 'Charge'; targetId: string; edge: string; approach: DraftLeg[] }
+  | { key: string; unitId: string; kind: 'Shoot'; targetId: string }
+  | { key: string; unitId: string; kind: 'Reform'; files: number; lateralInterval: number; rankDepth: number }
+  | { key: string; unitId: string; kind: 'Withdraw' }
+  | { key: string; unitId: string; kind: 'Rally' };
+
+// Move drafts predate the union: the only leg-bearing draft kind besides
+// Charge approaches (which always carry a destination).
+type MoveDraft = Extract<OrderDraft, { kind: 'Move' }>;
 
 interface BattleScreenProps {
   battle: BattleDocument;
@@ -96,11 +117,12 @@ export default function BattleScreen({
 }: BattleScreenProps) {
   const [selectedUnitId, setSelectedUnitId] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
-  // The ordered turn draft: at most one Move draft per unit. Every mutation
-  // rebuilds the turn submission in draft order and re-validates it against
-  // the authoritative battle state, so the verdicts always describe the
-  // current draft. Units without a draft hold implicitly.
-  const [drafts, setDrafts] = useState<MoveDraft[]>([]);
+  // The ordered turn draft: at most one order draft per unit, of every kind
+  // (Move, Charge, Shoot, Reform, Withdraw, Rally). Every mutation rebuilds
+  // the turn submission in draft order and re-validates it against the
+  // authoritative battle state, so the verdicts always describe the current
+  // draft. Units without a draft hold implicitly.
+  const [drafts, setDrafts] = useState<OrderDraft[]>([]);
   const draftSeq = useRef(1);
   const scenario = battle?.scenario;
   const units: any[] = Array.isArray(battle?.units) ? battle.units : [];
@@ -147,8 +169,12 @@ export default function BattleScreen({
     return units.find((unit) => unit?.id === unitId && unit?.side === activeSide) || null;
   }
 
-  function draftForUnit(unitId: string): MoveDraft | null {
+  function draftForUnit(unitId: string): OrderDraft | null {
     return drafts.find((draft) => draft.unitId === unitId) || null;
+  }
+
+  function draftKindOf(draft: OrderDraft | null): string {
+    return draft?.kind || 'Move';
   }
 
   // The inspector reads the engine's available actions, never its own rules:
@@ -174,8 +200,8 @@ export default function BattleScreen({
     return (actionsEntryFor(unitId)?.permitted || []).map((item: any) => item.kind);
   }
 
-  // The draft submission in draft order, one Move order per draft, validated
-  // by the engine on every change.
+  // The draft submission in draft order, one order per draft. Every kind the
+  // inspector can draft maps to the order shape the engine validates.
   const draftSubmission = useMemo(() => {
     if (!battle) return null;
     return {
@@ -183,14 +209,48 @@ export default function BattleScreen({
       battleId: battle.id,
       turnNumber: battle.turnNumber,
       side: battle.activeSide,
-      orders: drafts.map((draft) => ({
-        unitId: draft.unitId,
-        kind: 'Move',
-        legs: draft.legs.map((leg) => ({
-          ...(leg.face === null || leg.face === undefined ? {} : { face: leg.face }),
-          ...(leg.to ? { to: { ...leg.to } } : {}),
-        })),
-      })),
+      orders: drafts.map((draft) => {
+        switch (draft.kind) {
+          case 'Charge':
+            return {
+              unitId: draft.unitId,
+              kind: 'Charge',
+              targetId: draft.targetId,
+              edge: draft.edge,
+              approach: draft.approach.map((leg) => ({
+                ...(leg.face === null || leg.face === undefined ? {} : { face: leg.face }),
+                ...(leg.to ? { to: { ...leg.to } } : {}),
+              })),
+            };
+          case 'Shoot':
+            return { unitId: draft.unitId, kind: 'Shoot', targetId: draft.targetId };
+          case 'Reform': {
+            const order: any = { unitId: draft.unitId, kind: 'Reform' };
+            if (draft.files !== null && draft.files !== undefined) order.files = draft.files;
+            if (draft.lateralInterval !== null && draft.lateralInterval !== undefined) {
+              order.lateralInterval = draft.lateralInterval;
+            }
+            if (draft.rankDepth !== null && draft.rankDepth !== undefined) {
+              order.rankDepth = draft.rankDepth;
+            }
+            return order;
+          }
+          case 'Withdraw':
+            return { unitId: draft.unitId, kind: 'Withdraw' };
+          case 'Rally':
+            return { unitId: draft.unitId, kind: 'Rally' };
+          case 'Move':
+          default:
+            return {
+              unitId: draft.unitId,
+              kind: 'Move',
+              legs: draft.legs.map((leg) => ({
+                ...(leg.face === null || leg.face === undefined ? {} : { face: leg.face }),
+                ...(leg.to ? { to: { ...leg.to } } : {}),
+              })),
+            };
+        }
+      }),
     };
   }, [battle, drafts]);
 

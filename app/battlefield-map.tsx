@@ -73,12 +73,26 @@ export interface TerrainRefusalShape {
 export interface BattleGhost {
   unitId: string;
   corners: TerrainMapPoint[];
+  kind?: string;
 }
 
 export interface BattlePath {
   points: TerrainMapPoint[];
   rejected: boolean;
   label: string;
+}
+
+export interface BattleShootLine {
+  from: TerrainMapPoint;
+  to: TerrainMapPoint;
+  rejected: boolean;
+  shooterId: string;
+  targetId: string;
+}
+
+export interface BattleChargeCandidate {
+  unitId: string;
+  edge: string;
 }
 
 interface BattlefieldMapProps {
@@ -110,6 +124,11 @@ interface BattlefieldMapProps {
   onBattleMapClick?: (point: TerrainMapPoint) => void;
   battleGhosts?: BattleGhost[];
   battlePaths?: BattlePath[];
+  battleShootLines?: BattleShootLine[];
+  // Charge and shoot candidates for the selected unit (from the engine's
+  // available actions): highlighted on the map; clicking one drafts the order.
+  battleCandidateCharges?: BattleChargeCandidate[];
+  battleCandidateShoots?: string[];
   battleConflictPoints?: TerrainMapPoint[];
   // When set, the selected unit's rotation handle pivots the Move draft facing
   // instead of the scenario geometry (the battle never moves units).
@@ -180,6 +199,9 @@ interface PlacedUnit {
   selected: boolean;
   conflict: boolean;
   changed: boolean;
+  candidateCharge: boolean;
+  candidateShoot: boolean;
+  candidateEdge: string | null;
 }
 
 function escapeXml(value: string): string {
@@ -225,6 +247,9 @@ export default function BattlefieldMap({
   onBattleMapClick,
   battleGhosts = [],
   battlePaths = [],
+  battleShootLines = [],
+  battleCandidateCharges = [],
+  battleCandidateShoots = [],
   battleConflictPoints = [],
   battleRotateUnitId = null,
   onBattleRotate,
@@ -388,6 +413,13 @@ export default function BattlefieldMap({
 
   const placed: PlacedUnit[] = useMemo(() => {
     const list = Array.isArray(units) ? units : [];
+    const chargeByUnit = new Map(
+      (battleCandidateCharges || []).map((candidate) => [
+        String(candidate.unitId),
+        String(candidate.edge || ''),
+      ]),
+    );
+    const shootSet = new Set((battleCandidateShoots || []).map((id) => String(id)));
     const out: PlacedUnit[] = [];
     for (const unit of list) {
       const position = unitPosition(unit);
@@ -409,10 +441,13 @@ export default function BattlefieldMap({
         selected: selectedUnitId != null && id !== '' && id === String(selectedUnitId),
         conflict: id !== '' && (unitConflictIds || []).includes(id),
         changed: id !== '' && (changedUnitIds || []).includes(id),
+        candidateCharge: chargeByUnit.has(id),
+        candidateShoot: shootSet.has(id),
+        candidateEdge: chargeByUnit.get(id) ?? null,
       });
     }
     return out;
-  }, [units, sides, safeH, mpp, selectedUnitId, unitConflictIds, changedUnitIds]);
+  }, [units, sides, safeH, mpp, selectedUnitId, unitConflictIds, changedUnitIds, battleCandidateCharges, battleCandidateShoots]);
 
   const cursorText = liveRotate
     ? liveRotate.free
@@ -638,6 +673,9 @@ export default function BattlefieldMap({
         onBattleRotate={onBattleRotate}
         battleGhosts={battleGhosts}
         battlePaths={battlePaths}
+        battleShootLines={battleShootLines}
+        battleCandidateCharges={battleCandidateCharges}
+        battleCandidateShoots={battleCandidateShoots}
         battleConflictPoints={battleConflictPoints}
       />
       {draft ? (
@@ -813,6 +851,11 @@ interface BattlefieldSvgProps {
   onBattleRotate?: (facing: number) => void;
   battleGhosts?: BattleGhost[];
   battlePaths?: BattlePath[];
+  battleShootLines?: BattleShootLine[];
+  // Charge and shoot candidates for the selected unit (from the engine's
+  // available actions): highlighted on the map; clicking one drafts the order.
+  battleCandidateCharges?: BattleChargeCandidate[];
+  battleCandidateShoots?: string[];
   battleConflictPoints?: TerrainMapPoint[];
 }
 
@@ -880,6 +923,9 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
   onBattleRotate,
   battleGhosts = [],
   battlePaths = [],
+  battleShootLines = [],
+  battleCandidateCharges = [],
+  battleCandidateShoots = [],
   battleConflictPoints = [],
 }: BattlefieldSvgProps) {
   // Battle draft overlays in true scale: ghost footprints for accepted drafts,
@@ -891,7 +937,8 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
         continue;
       }
       const line = ghost.corners.map((point) => `${point.x},${safeH - point.y}`).join(' ');
-      out += `<polygon points="${line}" fill="#4e6047" fill-opacity="0.14" stroke="#4e6047" stroke-width="${(2 * mpp).toFixed(2)}" stroke-dasharray="${(7 * mpp).toFixed(1)} ${(4 * mpp).toFixed(1)}" data-testid="draft-ghost" data-ghost-unit="${escapeXml(ghost.unitId)}"><title>Ghost: ${escapeXml(ghost.unitId)} Move preview</title></polygon>`;
+      const kindLabel = ghost.kind ? escapeXml(ghost.kind) : 'Move';
+      out += `<polygon points="${line}" fill="#4e6047" fill-opacity="0.14" stroke="#4e6047" stroke-width="${(2 * mpp).toFixed(2)}" stroke-dasharray="${(7 * mpp).toFixed(1)} ${(4 * mpp).toFixed(1)}" data-testid="draft-ghost" data-ghost-unit="${escapeXml(ghost.unitId)}"><title>Ghost: ${escapeXml(ghost.unitId)} ${kindLabel} preview</title></polygon>`;
     }
     for (const path of battlePaths) {
       const points = Array.isArray(path?.points) ? path.points : [];
@@ -912,8 +959,17 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
         )
         .join('');
     }
+    // A Shoot never moves: the line marks the shot, and the Shooting phase
+    // resolves it. Rejected shots draw in red like every rejected draft.
+    for (const shot of battleShootLines) {
+      if (!shot || !shot.from || !shot.to) {
+        continue;
+      }
+      const color = shot.rejected ? '#b91c1c' : '#2f6f8f';
+      out += `<line x1="${shot.from.x}" y1="${safeH - shot.from.y}" x2="${shot.to.x}" y2="${safeH - shot.to.y}" stroke="${color}" stroke-width="${(2 * mpp).toFixed(2)}" stroke-dasharray="${(7 * mpp).toFixed(1)} ${(4 * mpp).toFixed(1)}" data-testid="shoot-line"><title>Shoot: ${escapeXml(shot.shooterId)} → ${escapeXml(shot.targetId)}</title></line>`;
+    }
     return out;
-  }, [battleGhosts, battlePaths, safeH, mpp]);
+  }, [battleGhosts, battlePaths, battleShootLines, safeH, mpp]);
 
   const battleMarkers = useMemo(() => {
     let out = '';
@@ -1362,12 +1418,36 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
           // A refused drop highlights every unit the refused placement would
           // conflict with (the dragged unit plus every overlap partner) in
           // red; the document keeps the last valid values throughout. A unit
-          // the last resolved turn changed outlines in amber instead.
-          const outline = entry.conflict ? '#b91c1c' : entry.changed ? '#b45309' : entry.color;
-          const strokeW = (entry.selected || entry.conflict || entry.changed ? 3 : 1.6) * entry.mpp;
-          const dash = entry.conflict
-            ? ` stroke-dasharray="${7 * entry.mpp} ${4 * entry.mpp}"`
-            : '';
+          // the last resolved turn changed outlines in amber instead. Battle
+          // charge candidates draw in bronze and shoot candidates in blue, so
+          // the selected unit's targets stand out from the order of battle.
+          const outline = entry.conflict
+            ? '#b91c1c'
+            : entry.candidateCharge
+              ? '#9c853c'
+              : entry.candidateShoot
+                ? '#2f6f8f'
+                : entry.changed
+                  ? '#b45309'
+                  : entry.color;
+          const strokeW =
+            (entry.selected || entry.conflict || entry.changed ? 3 : 1.6) * entry.mpp;
+          let dash = '';
+          if (entry.conflict) {
+            dash = ` stroke-dasharray="${7 * entry.mpp} ${4 * entry.mpp}"`;
+          } else if (entry.candidateCharge) {
+            dash = ` stroke-dasharray="${6 * entry.mpp} ${3 * entry.mpp}"`;
+          } else if (entry.candidateShoot) {
+            dash = ` stroke-dasharray="${2 * entry.mpp} ${3 * entry.mpp}"`;
+          }
+          const candidateNote =
+            entry.candidateCharge && entry.candidateShoot
+              ? ' · charge/shoot candidate — click to draft'
+              : entry.candidateCharge
+                ? ` · charge candidate (${escapeXml(entry.candidateEdge || '')}) — click to draft`
+                : entry.candidateShoot
+                  ? ' · shoot candidate — click to draft'
+                  : '';
           // Rotation handle for the selected unit: a stem forward of the front
           // edge with a grab circle, pivoting the footprint about the front
           // midpoint. Sizes scale with metres-per-pixel so the handle keeps a
@@ -1380,6 +1460,7 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
               `<circle cx="0" cy="${-reach}" r="${gripR}" fill="#f8f9f0" stroke="${entry.color}" stroke-width="${2 * entry.mpp}" class="rotate-grip" data-testid="rotate-handle" data-rotate-handle="${entry.id}"><title>Drag to rotate (snaps to ${FACING_SNAP_DEG}°, hold Shift for free rotation)</title></circle>`
             : '';
           const footprint =
+            `<title>${entry.name} · ${entry.dims}${candidateNote}</title>` +
             `<g class="unit-rotor" transform="rotate(${entry.facing})">${helper}` +
             `<rect x="${-entry.frontageM / 2}" y="0" width="${entry.frontageM}" height="${entry.depthM}" fill="${entry.color}" fill-opacity="0.32" stroke="${outline}" stroke-width="${strokeW}"${dash} class="unit-footprint" data-testid="unit-footprint"/>` +
             `<line x1="${-entry.frontageM / 2}" y1="0" x2="${entry.frontageM / 2}" y2="0" stroke="${outline}" stroke-width="${3 * entry.mpp}"/>${handle}</g>`;
@@ -1388,13 +1469,21 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
             <g
               key={unitId || entry.name}
               transform={`translate(${entry.centre.x} ${entry.centre.y})`}
-              className={`map-unit${entry.selected ? ' selected' : ''}${entry.conflict ? ' conflict' : ''}${entry.changed ? ' changed' : ''}`}
+              className={`map-unit${entry.selected ? ' selected' : ''}${entry.conflict ? ' conflict' : ''}${entry.changed ? ' changed' : ''}${entry.candidateCharge ? ' candidate-charge' : ''}${entry.candidateShoot ? ' candidate-shoot' : ''}`}
               data-testid="map-unit"
               data-unit-id={unitId}
               data-selected={entry.selected ? 'true' : 'false'}
               data-conflict={entry.conflict ? 'true' : 'false'}
               data-changed={entry.changed ? 'true' : 'false'}
-              style={{ cursor: selectionEnabled ? 'pointer' : undefined }}
+              data-candidate-charge={entry.candidateCharge ? 'true' : 'false'}
+              data-candidate-shoot={entry.candidateShoot ? 'true' : 'false'}
+              data-candidate-edge={entry.candidateEdge ?? undefined}
+              style={{
+                cursor:
+                  selectionEnabled || entry.candidateCharge || entry.candidateShoot
+                    ? 'pointer'
+                    : undefined,
+              }}
               dangerouslySetInnerHTML={{ __html: footprint }}
             />
           );
