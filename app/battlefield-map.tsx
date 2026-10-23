@@ -119,6 +119,10 @@ interface BattlefieldMapProps {
   // with (the dragged unit plus every overlap partner). Display-only, like the
   // selection: the document keeps the last valid values.
   unitConflictIds?: string[];
+  // Battle change highlights: the units the last resolved turn changed
+  // (losses, cohesion, rout, flight, or destruction). Display-only amber
+  // outlines, cleared when the next turn resolves.
+  changedUnitIds?: string[];
   // Geometry commits. Each call is one undo step in the editor: dragging a
   // footprint commits its front-midpoint position, dragging the round handle
   // commits the facing. A refused drop commits nothing (the unit returns).
@@ -175,6 +179,7 @@ interface PlacedUnit {
   mpp: number;
   selected: boolean;
   conflict: boolean;
+  changed: boolean;
 }
 
 function escapeXml(value: string): string {
@@ -213,6 +218,7 @@ export default function BattlefieldMap({
   onEdgeInsert,
   onVertexCommit,
   unitConflictIds = [],
+  changedUnitIds = [],
   onMoveUnit,
   onRotateUnit,
   battleClickable = false,
@@ -402,10 +408,11 @@ export default function BattlefieldMap({
         mpp,
         selected: selectedUnitId != null && id !== '' && id === String(selectedUnitId),
         conflict: id !== '' && (unitConflictIds || []).includes(id),
+        changed: id !== '' && (changedUnitIds || []).includes(id),
       });
     }
     return out;
-  }, [units, sides, safeH, mpp, selectedUnitId, unitConflictIds]);
+  }, [units, sides, safeH, mpp, selectedUnitId, unitConflictIds, changedUnitIds]);
 
   const cursorText = liveRotate
     ? liveRotate.free
@@ -1354,9 +1361,10 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
               : '';
           // A refused drop highlights every unit the refused placement would
           // conflict with (the dragged unit plus every overlap partner) in
-          // red; the document keeps the last valid values throughout.
-          const outline = entry.conflict ? '#b91c1c' : entry.color;
-          const strokeW = (entry.selected || entry.conflict ? 3 : 1.6) * entry.mpp;
+          // red; the document keeps the last valid values throughout. A unit
+          // the last resolved turn changed outlines in amber instead.
+          const outline = entry.conflict ? '#b91c1c' : entry.changed ? '#b45309' : entry.color;
+          const strokeW = (entry.selected || entry.conflict || entry.changed ? 3 : 1.6) * entry.mpp;
           const dash = entry.conflict
             ? ` stroke-dasharray="${7 * entry.mpp} ${4 * entry.mpp}"`
             : '';
@@ -1380,11 +1388,12 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
             <g
               key={unitId || entry.name}
               transform={`translate(${entry.centre.x} ${entry.centre.y})`}
-              className={`map-unit${entry.selected ? ' selected' : ''}${entry.conflict ? ' conflict' : ''}`}
+              className={`map-unit${entry.selected ? ' selected' : ''}${entry.conflict ? ' conflict' : ''}${entry.changed ? ' changed' : ''}`}
               data-testid="map-unit"
               data-unit-id={unitId}
               data-selected={entry.selected ? 'true' : 'false'}
               data-conflict={entry.conflict ? 'true' : 'false'}
+              data-changed={entry.changed ? 'true' : 'false'}
               style={{ cursor: selectionEnabled ? 'pointer' : undefined }}
               dangerouslySetInnerHTML={{ __html: footprint }}
             />

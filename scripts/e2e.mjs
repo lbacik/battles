@@ -2025,8 +2025,33 @@ try {
 
   // One turn each way: the human side commits an empty turn (with
   // confirmation) and the automated side resolves through the runner and
-  // waits for Continue. The starting side is seed-drawn, so either order.
-  async function resolveOneTurn() {
+  // waits for Continue. Every resolution ends behind the device handoff, so
+  // each step below first presses "<Side> — begin your turn" when it is
+  // showing. The starting side is seed-drawn, so either order.
+  async function settleAfterHandoff() {
+    await battlePage.waitForFunction(
+      () =>
+        document.querySelector('[data-testid="commit-empty"]') ||
+        document.querySelector('[data-testid="continue-turn"]') ||
+        document.querySelector('[data-testid="handoff"]') ||
+        document.querySelector('[data-testid="battle-outcome"]'),
+      null,
+      { timeout: 15000 },
+    );
+  }
+  async function advanceOneStep() {
+    if ((await battlePage.getByTestId('handoff').count()) > 0) {
+      const label = (await battlePage.getByTestId('handoff').textContent()) ?? '';
+      check(
+        'the device handoff names the next side',
+        /— begin your turn/.test(label),
+        label.replace(/\s+/g, ' ').slice(0, 80),
+      );
+      await battlePage.getByTestId('handoff').click();
+      // A human side unlocks drafting; an automated side resolves at once.
+      await settleAfterHandoff();
+      return;
+    }
     const controller = (await battlePage.getByTestId('turn-controller').textContent()) ?? '';
     if (controller.startsWith('human')) {
       await battlePage.getByTestId('commit-empty').click();
@@ -2041,7 +2066,7 @@ try {
       await battlePage.getByTestId('continue-turn').click();
     }
   }
-  await resolveOneTurn();
+  await advanceOneStep();
   await battlePage.getByTestId('turn-result').waitFor({ timeout: 15000 });
   const afterFirst = await battlePage.getByTestId('round').textContent();
   check(
@@ -2049,8 +2074,17 @@ try {
     afterFirst !== roundText,
     `${roundText} → ${afterFirst}`,
   );
-  await resolveOneTurn();
-  await battlePage.waitForTimeout(500);
+  check(
+    'the resolved turn ends behind the device handoff',
+    await battlePage.getByTestId('handoff').isVisible(),
+  );
+  await advanceOneStep();
+  await advanceOneStep();
+  await battlePage.waitForFunction(
+    (expected) => document.querySelector('[data-testid="round"]')?.textContent !== expected,
+    afterFirst,
+    { timeout: 15000 },
+  );
   const afterSecond = await battlePage.getByTestId('round').textContent();
   check(
     'one turn each way resolves',

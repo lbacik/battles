@@ -168,6 +168,12 @@ export default function Home() {
   const [announcement, setAnnouncement] = useState<string | null>(null);
   const [resolving, setResolving] = useState(false);
   const [resolveError, setResolveError] = useState<string | null>(null);
+  // After each resolution the next side waits for the device handoff: the
+  // "<Side> — begin your turn" press unlocks the turn (a human side drafts,
+  // an automated side resolves at once). The first turn is announced at once
+  // and needs no handoff.
+  const [awaitingHandoff, setAwaitingHandoff] = useState(false);
+  const [handoffSide, setHandoffSide] = useState<string | null>(null);
   const [battleError, setBattleError] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [persistent, setPersistent] = useState<boolean | null>(null);
@@ -279,6 +285,8 @@ export default function Home() {
         }
         setBattle(stored.battle);
         setDecisions(Array.isArray(stored.decisions) ? stored.decisions : []);
+        setAwaitingHandoff(false);
+        setHandoffSide(null);
         // The starting-side announcement belongs to the first turn only: a
         // resumed battle that already resolved a turn shows no announcement.
         const resolved = (stored.battle?.events || []).some(
@@ -705,6 +713,8 @@ export default function Home() {
     setAnnouncement(`${battleSideName(started, started.startingSide)} begins — round 1, turn 1.`);
     setResolveError(null);
     setResolving(false);
+    setAwaitingHandoff(false);
+    setHandoffSide(null);
     setSetupId(null);
     setSetupDocument(null);
     setSetupProblems([]);
@@ -785,6 +795,8 @@ export default function Home() {
     setBattle(next);
     setDecisions(nextDecisions);
     setAnnouncement(null);
+    setAwaitingHandoff(true);
+    setHandoffSide(next.activeSide);
     showToast(`Turn ${battle.turnNumber} resolved.`);
     await persistBattle(next, nextDecisions);
   }
@@ -813,6 +825,8 @@ export default function Home() {
       setBattle(step.battle);
       setDecisions(nextDecisions);
       setAnnouncement(null);
+      setAwaitingHandoff(true);
+      setHandoffSide(step.battle.activeSide);
       showToast(`Turn ${battle.turnNumber} resolved.`);
       await persistBattle(step.battle, nextDecisions);
     } catch (automatedError) {
@@ -824,6 +838,22 @@ export default function Home() {
     }
   }
 
+  // The device handoff: pressing "<Side> — begin your turn" unlocks the next
+  // turn. A human side drafts after the press; an automated side resolves at
+  // once through the runner. A committed turn cannot be taken back.
+  async function handleHandoff() {
+    if (!battle || resolving || !awaitingHandoff) return;
+    if (battle.status !== 'ongoing') return;
+    const nextSide = handoffSide;
+    setAwaitingHandoff(false);
+    setHandoffSide(null);
+    setResolveError(null);
+    if (!nextSide) return;
+    const controller = battle.controllers?.[nextSide] || 'human';
+    if (controller === 'human') return;
+    await handleContinueAutomated();
+  }
+
   function handleBackToLibrary() {
     setSetupId(null);
     setSetupDocument(null);
@@ -833,6 +863,8 @@ export default function Home() {
     setAnnouncement(null);
     setResolveError(null);
     setResolving(false);
+    setAwaitingHandoff(false);
+    setHandoffSide(null);
     setUrlParams({ scenario: null, battle: null });
     void refreshLibrary();
     void refreshBattles();
@@ -925,6 +957,9 @@ export default function Home() {
             announcement={announcement}
             resolving={resolving}
             resolveError={resolveError}
+            awaitingHandoff={awaitingHandoff}
+            handoffSide={handoffSide}
+            onHandoff={handleHandoff}
             onCommitEmpty={handleCommitEmpty}
             onCommitDraft={handleCommitDraft}
             onContinueAutomated={handleContinueAutomated}

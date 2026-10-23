@@ -1549,8 +1549,27 @@ textarea:focus-visible {
   line-height: 1.6;
 }
 
+.result-list li.chance {
+  color: var(--muted);
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+}
+
 .result-list li.empty-result {
   color: var(--muted);
+}
+
+/* Changed units: amber outlines on the map and in the order of battle mark
+   the units the last resolved turn changed (losses, cohesion, rout, flight,
+   or destruction). The new state appears at once — phases are not animated. */
+#battlefield-map .map-unit.changed .unit-footprint {
+  stroke: #b45309;
+  stroke-width: 3px;
+}
+
+.unit-row.changed {
+  border-color: #b45309;
+  background: #fdf6e7;
 }
 
 .battles {
