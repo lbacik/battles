@@ -70,6 +70,13 @@ function formatScaleLabel(lengthM: number): string {
   return lengthM >= 1000 ? `${lengthM / 1000} km` : `${lengthM} m`;
 }
 
+// Map buttons release focus on activation: Space-held panning must work
+// right after clicking a control instead of re-triggering the focused button
+// (keyboard activation itself still fires before focus is released).
+function releaseFocus(event: { currentTarget: HTMLElement }): void {
+  event.currentTarget.blur();
+}
+
 // Screen-space point (y down) for a client position over the SVG.
 function clientToMap(
   svg: SVGSVGElement,
@@ -131,6 +138,9 @@ export default function BattlefieldMap({ width, height, units = [], sides = [] }
   const viewportRef = useRef<HTMLDivElement>(null);
   const svgHolderRef = useRef<SVGSVGElement | null>(null);
   const panRef = useRef<{ x: number; y: number } | null>(null);
+  // Last-known cursor position in map metres, so the zoom control and the
+  // +/- keys can anchor on the cursor (centre fallback) just like the wheel.
+  const cursorAnchorRef = useRef<MapCentre | null>(null);
 
   // A new battlefield size refits the camera; every other prop change keeps it.
   const dimsKey = `${safeW}x${safeH}`;
@@ -215,9 +225,13 @@ export default function BattlefieldMap({ width, height, units = [], sides = [] }
       } else if (key === '0') {
         setView(fitMapView(battlefield));
       } else if (key === '+' || key === '=') {
-        setView((current) => zoomViewAroundCursor(current, current.center, current.zoom * ZOOM_STEP));
+        setView((current) =>
+          zoomViewAroundCursor(current, cursorAnchorRef.current ?? current.center, current.zoom * ZOOM_STEP),
+        );
       } else if (key === '-' || key === '_') {
-        setView((current) => zoomViewAroundCursor(current, current.center, current.zoom / ZOOM_STEP));
+        setView((current) =>
+          zoomViewAroundCursor(current, cursorAnchorRef.current ?? current.center, current.zoom / ZOOM_STEP),
+        );
       }
     };
     const onKeyUp = (event: KeyboardEvent) => {
@@ -293,6 +307,13 @@ export default function BattlefieldMap({ width, height, units = [], sides = [] }
         if (point) {
           const inside =
             point.x >= 0 && point.x <= safeW && point.y >= 0 && point.y <= safeH;
+          // The rail and zoom controls overlay the viewport: only the SVG
+          // scene itself refreshes the zoom anchor, so moving the pointer
+          // onto a button never re-anchors the zoom onto the control.
+          const svg = svgHolderRef.current;
+          if (svg && event.target instanceof Element && svg.contains(event.target)) {
+            cursorAnchorRef.current = { x: point.x, y: point.y };
+          }
           setCursor({ x: point.x, y: point.y, inside });
         } else {
           setCursor(null);
@@ -317,7 +338,10 @@ export default function BattlefieldMap({ width, height, units = [], sides = [] }
         setPanning(false);
       }}
       onPointerLeave={() => {
-        if (!panRef.current) setCursor(null);
+        if (!panRef.current) {
+          setCursor(null);
+          cursorAnchorRef.current = null;
+        }
       }}
     >
       <BattlefieldSvg
@@ -335,10 +359,12 @@ export default function BattlefieldMap({ width, height, units = [], sides = [] }
           type="button"
           className={tool === 'select' ? 'map-tool active' : 'map-tool'}
           data-testid="map-tool-select"
-          data-action="map-tool-select"
           aria-pressed={tool === 'select'}
           title="Select (V)"
-          onClick={() => setTool('select')}
+          onClick={(event) => {
+            releaseFocus(event);
+            setTool('select');
+          }}
         >
           Select
         </button>
@@ -346,10 +372,12 @@ export default function BattlefieldMap({ width, height, units = [], sides = [] }
           type="button"
           className={tool === 'hand' ? 'map-tool active' : 'map-tool'}
           data-testid="map-tool-hand"
-          data-action="map-tool-hand"
           aria-pressed={tool === 'hand'}
           title="Hand: drag to pan (H, or hold Space)"
-          onClick={() => setTool('hand')}
+          onClick={(event) => {
+            releaseFocus(event);
+            setTool('hand');
+          }}
         >
           Hand
         </button>
@@ -361,7 +389,10 @@ export default function BattlefieldMap({ width, height, units = [], sides = [] }
           data-testid="toggle-grid"
           aria-pressed={showGrid}
           title="Toggle display-only grid (G)"
-          onClick={() => setShowGrid((value) => !value)}
+          onClick={(event) => {
+            releaseFocus(event);
+            setShowGrid((value) => !value);
+          }}
         >
           Grid
         </button>
@@ -371,7 +402,10 @@ export default function BattlefieldMap({ width, height, units = [], sides = [] }
           data-testid="toggle-labels"
           aria-pressed={showLabels}
           title="Toggle unit labels (L)"
-          onClick={() => setShowLabels((value) => !value)}
+          onClick={(event) => {
+            releaseFocus(event);
+            setShowLabels((value) => !value);
+          }}
         >
           Labels
         </button>
@@ -398,11 +432,12 @@ export default function BattlefieldMap({ width, height, units = [], sides = [] }
           className="map-tool"
           data-testid="zoom-out"
           aria-label="Zoom out (−)"
-          onClick={() =>
+          onClick={(event) => {
+            releaseFocus(event);
             setView((current) =>
-              zoomViewAroundCursor(current, current.center, current.zoom / ZOOM_STEP),
-            )
-          }
+              zoomViewAroundCursor(current, cursorAnchorRef.current ?? current.center, current.zoom / ZOOM_STEP),
+            );
+          }}
         >
           −
         </button>
@@ -414,11 +449,12 @@ export default function BattlefieldMap({ width, height, units = [], sides = [] }
           className="map-tool"
           data-testid="zoom-in"
           aria-label="Zoom in (+)"
-          onClick={() =>
+          onClick={(event) => {
+            releaseFocus(event);
             setView((current) =>
-              zoomViewAroundCursor(current, current.center, current.zoom * ZOOM_STEP),
-            )
-          }
+              zoomViewAroundCursor(current, cursorAnchorRef.current ?? current.center, current.zoom * ZOOM_STEP),
+            );
+          }}
         >
           +
         </button>
@@ -428,7 +464,10 @@ export default function BattlefieldMap({ width, height, units = [], sides = [] }
           data-testid="fit-view"
           aria-label="Fit battlefield (0)"
           title="Fit to battlefield (0)"
-          onClick={() => setView(fitMapView(battlefield))}
+          onClick={(event) => {
+            releaseFocus(event);
+            setView(fitMapView(battlefield));
+          }}
         >
           Fit
         </button>
