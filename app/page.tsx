@@ -8,7 +8,15 @@ import { useCallback, useEffect, useState } from 'react';
 import Editor from './editor';
 import Library from './library';
 import { documentsMatch, getScenarioStore, type LibraryEntry } from '../lib/store';
-import { cloneScenario, createScenario } from '../domain/scenario.js';
+import {
+  cloneScenario,
+  createHistory,
+  createScenario,
+  historyCommit,
+  historyRedo,
+  historyUndo,
+  validateScenario,
+} from '../domain/scenario.js';
 
 type ScenarioDocument = any;
 
@@ -26,6 +34,13 @@ export default function Home() {
   const [openId, setOpenId] = useState<string | null>(null);
   const [document, setDocument] = useState<ScenarioDocument | null>(null);
   const [savedDocument, setSavedDocument] = useState<ScenarioDocument | null>(null);
+  // Undo history for the editing session: snapshots of the document before
+  // each committed change. Unbounded within the session, never saved, and
+  // reset on every open. Selection and view changes are display-only and are
+  // never recorded.
+  const [history, setHistory] = useState<{ past: ScenarioDocument[]; future: ScenarioDocument[] }>(
+    createHistory(),
+  );
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
@@ -51,6 +66,9 @@ export default function Home() {
         }
         setDocument(loaded);
         setSavedDocument(cloneScenario(loaded));
+        // A reopened scenario starts with a clean slate: the undo history is
+        // empty, so undo is unavailable until the first new change.
+        setHistory(createHistory());
         setSaveError(null);
         setOpenId(id);
         const url = new URL(window.location.href);
@@ -97,6 +115,15 @@ export default function Home() {
 
   async function handleSave() {
     if (!document) return;
+    // Structural errors block saving; completeness warnings (the issues
+    // panel) never do, so a scenario with warnings still saves. Commit-time
+    // validation keeps the document valid after every change; this is the
+    // backstop for anything that slips through.
+    const problems = validateScenario(document);
+    if (problems.length > 0) {
+      setSaveError(`Cannot save: ${problems[0]}`);
+      return;
+    }
     setSaving(true);
     setSaveError(null);
     try {
@@ -111,10 +138,36 @@ export default function Home() {
     }
   }
 
+  function handleChange(next: ScenarioDocument) {
+    if (!document || documentsMatch(next, document)) return;
+    setHistory(historyCommit(history, cloneScenario(document)));
+    setDocument(next);
+  }
+
+  function handleUndo() {
+    if (!document) return;
+    const stepped = historyUndo(history, cloneScenario(document));
+    if (!stepped) return;
+    setHistory(stepped.history);
+    setDocument(stepped.document);
+  }
+
+  function handleRedo() {
+    if (!document) return;
+    const stepped = historyRedo(history, cloneScenario(document));
+    if (!stepped) return;
+    setHistory(stepped.history);
+    setDocument(stepped.document);
+  }
+
   function handleBack() {
+    if (dirty && !window.confirm('You have unsaved changes. Leave the editor without saving?')) {
+      return;
+    }
     setOpenId(null);
     setDocument(null);
     setSavedDocument(null);
+    setHistory(createHistory());
     setSaveError(null);
     const url = new URL(window.location.href);
     url.searchParams.delete('scenario');
@@ -129,6 +182,20 @@ export default function Home() {
 
   const headerTitle = document && openId ? document.title : 'Scenario library';
   const dirty = !!document && !!savedDocument && !documentsMatch(document, savedDocument);
+  const canUndo = history.past.length > 0;
+  const canRedo = history.future.length > 0;
+
+  // Leaving the editor (reload, close, navigate) with unsaved changes asks
+  // for confirmation; the in-editor back button confirms on its own.
+  useEffect(() => {
+    if (!dirty) return undefined;
+    const guard = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', guard);
+    return () => window.removeEventListener('beforeunload', guard);
+  }, [dirty]);
 
   return (
     <>
@@ -164,7 +231,11 @@ export default function Home() {
           dirty={dirty}
           saveError={saveError}
           saving={saving}
-          onChange={setDocument}
+          canUndo={canUndo}
+          canRedo={canRedo}
+          onChange={handleChange}
+          onUndo={handleUndo}
+          onRedo={handleRedo}
           onSave={handleSave}
           onBack={handleBack}
         />

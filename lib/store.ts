@@ -6,6 +6,7 @@
 // React components never touch `indexedDB` during server prerendering.
 
 import { IndexedDBScenarioStore } from '../domain/browser/idb.js';
+import { scenarioContentEquals } from '../domain/scenario.js';
 
 let store: IndexedDBScenarioStore | null = null;
 
@@ -35,19 +36,10 @@ export function formatSavedAt(updatedAt: string | null): string {
   return date.toLocaleString();
 }
 
-// True when two scenario documents hold identical content. Key order is
-// ignored so a reload or clone that reorders keys still counts as unchanged.
-function canonicalize(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalize);
-  if (value && typeof value === 'object') {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .map(([key, entry]) => [key, canonicalize(entry)] as const)
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-    return Object.fromEntries(entries);
-  }
-  return value;
-}
-
+// True when two scenario documents hold identical content: the predicate
+// behind the editor's unsaved-changes indicator. The canonical comparison
+// lives in the framework-free domain package (and is unit-tested there);
+// this module only re-exports it so the app keeps a single dirty source.
 export function documentsMatch(a: unknown, b: unknown): boolean {
-  return JSON.stringify(canonicalize(a)) === JSON.stringify(canonicalize(b));
+  return scenarioContentEquals(a, b);
 }
