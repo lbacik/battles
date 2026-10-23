@@ -24,6 +24,7 @@ import {
   availableActions,
   validateTurn,
 } from '../domain/turn.js';
+import { MAX_MOVE_LEGS } from '../domain/movement.js';
 import { normalizeFacing } from '../domain/scenario.js';
 import { round1 } from '../domain/geometry.js';
 import { isBattleFinished } from '../domain/battles.js';
@@ -263,7 +264,7 @@ export default function BattleScreen({
     const snapped = { x: round1(point.x), y: round1(point.y) };
     if (!Number.isFinite(snapped.x) || !Number.isFinite(snapped.y)) return;
     setDrafts((prev) => prev.map((draft) => {
-      if (draft.unitId !== unitId || draft.legs.length >= 3) return draft;
+      if (draft.unitId !== unitId || draft.legs.length >= MAX_MOVE_LEGS) return draft;
       return { ...draft, legs: [...draft.legs, { face: null, to: snapped }] };
     }));
     setConfirming(false);
@@ -291,7 +292,10 @@ export default function BattleScreen({
       if (draft.unitId !== unitId) return draft;
       if (text === '') {
         // Clearing the facing removes the rotation from every leg.
-        return { ...draft, legs: draft.legs.map((leg) => ({ face: null, ...(leg.to ? { to: { ...leg.to } } : {}) })) };
+        return {
+          ...draft,
+          legs: draft.legs.map((leg) => ({ face: null as number | null, to: leg.to ? { ...leg.to } : null })),
+        };
       }
       if (!Number.isFinite(Number(text))) return draft;
       const face = normalizeFacing(round1(Number(text)));
@@ -301,7 +305,7 @@ export default function BattleScreen({
       return {
         ...draft,
         legs: draft.legs.map((leg, index) => (
-          index === draft.legs.length - 1 ? { face, ...(leg.to ? { to: { ...leg.to } } : {}) } : leg
+          index === draft.legs.length - 1 ? { face, to: leg.to ? { ...leg.to } : null } : leg
         )),
       };
     }));
@@ -311,7 +315,7 @@ export default function BattleScreen({
   function handleBattleMapClick(point: { x: number; y: number }): void {
     if (!canDraft || !selectedUnitId) return;
     const draft = draftForUnit(selectedUnitId);
-    if (!draft || draft.legs.length >= 3) return;
+    if (!draft || draft.legs.length >= MAX_MOVE_LEGS) return;
     appendDraftLeg(selectedUnitId, point);
   }
 
@@ -501,7 +505,7 @@ export default function BattleScreen({
           />
           <p className="map-hint">
             {canDraft
-              ? 'Select your unit · click the map for Move legs (up to 3) · drag the round handle to rotate · scroll to zoom · drag to pan'
+              ? `Select your unit · click the map for Move legs (up to ${MAX_MOVE_LEGS}) · drag the round handle to rotate · scroll to zoom · drag to pan`
               : 'The map is shared with the editor and read-only here: scroll to zoom, drag to pan, 0 fits the battlefield.'}
           </p>
         </section>
@@ -609,8 +613,8 @@ export default function BattleScreen({
               </ol>
               <p className="draft-hint">
                 Click the map for leg {(draftForUnit(selectedUnit.id)?.legs || []).length + 1}{' '}
-                (up to 3) · drag the round handle or type a facing to rotate about the front
-                midpoint.
+                (up to {MAX_MOVE_LEGS}) · drag the round handle or type a facing to rotate about
+                the front midpoint.
               </p>
               <label className="field">
                 Facing (°)
