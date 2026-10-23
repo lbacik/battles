@@ -4,3 +4,13 @@ node_modules/
 # Generated build and test outputs
 dist/
 e2e-report/
+
+# Next.js static export and build cache
+out/
+.next/
+
+# TypeScript incremental build info
+tsconfig.tsbuildinfo
+
+# Next.js generated types
+next-env.d.ts

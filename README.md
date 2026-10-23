@@ -4,6 +4,31 @@
 
 A throwaway interface experiment, not production code. Three layouts of the same application explore **how formation design, formation management on the map, and terrain preparation can work together in a turn-based game**.
 
+## Running the app
+
+The production application is Next.js (App Router, TypeScript) with a static
+export; it is client-only and runs locally. Requires Node.js — install
+dependencies from the lockfile first:
+
+```sh
+npm ci
+npm run dev
+```
+
+Open <http://localhost:3000>. Create a scenario with a title, see its empty
+battlefield in the editor, save it, reload the browser, and reopen it from
+the library.
+
+```sh
+npm run build
+```
+
+produces the static production site in `out/` (build metadata in `dist/`);
+`npm run test:e2e` serves that build over loopback HTTP and drives a
+headless browser through create → empty battlefield → save → reload → reopen
+(requires the Playwright Chromium browser: `npx playwright install chromium`;
+CI installs it before running the test and uploads `e2e-report/` on failure).
+
 ## Running the prototype
 
 Requires Node.js. No dependencies to install:

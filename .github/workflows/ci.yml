@@ -45,6 +45,9 @@ jobs:
       - name: Production build
         run: npm run build
 
+      - name: Install browsers for end-to-end tests
+        run: npx playwright install --with-deps chromium
+
       - name: End-to-end tests
         run: npm run test:e2e
 

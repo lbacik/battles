@@ -10,7 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const EXCLUDED = new Set(['.git', 'node_modules', 'prototype', 'dist', 'e2e-report']);
+const EXCLUDED = new Set(['.git', 'node_modules', 'prototype', 'dist', 'out', '.next', 'e2e-report']);
 const EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts']);
 
 function collect(dir, out = []) {

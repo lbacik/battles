@@ -1,11 +1,9 @@
-// Placeholder production build.
+// Production build: the Next.js static export of the PÓLIS app.
 //
-// The production application (Next.js editor slice) does not exist yet, so
-// there is nothing to bundle. This script enforces the build-time invariant
-// the CI relies on — the running Node.js major version matches `.nvmrc` and
-// the `engines` field — and emits `dist/build-info.json`, the artifact that
-// `test:e2e` runs against. The Next.js slice replaces this placeholder with
-// the real build.
+// Emits the client-only static site to `out/` and records build metadata in
+// `dist/build-info.json`. The Node.js version must match `.nvmrc` and the
+// `engines` field, the same invariant CI relies on.
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -38,12 +36,20 @@ if (problems.length > 0) {
   process.exit(1);
 }
 
+const nextBin = path.join(root, 'node_modules', 'next', 'dist', 'bin', 'next');
+const result = spawnSync(process.execPath, [nextBin, 'build'], { cwd: root, stdio: 'inherit' });
+if (result.status !== 0) {
+  console.error('build: `next build` failed.');
+  process.exit(result.status ?? 1);
+}
+
 mkdirSync(path.join(root, 'dist'), { recursive: true });
 const info = {
-  artifact: 'battles-placeholder-build',
+  artifact: 'polis-static-export',
+  directory: 'out',
   node: process.versions.node,
   builtAt: new Date().toISOString(),
   revision: process.env.GITHUB_SHA ?? 'local',
 };
 writeFileSync(path.join(root, 'dist', 'build-info.json'), `${JSON.stringify(info, null, 2)}\n`);
-console.log(`build: placeholder artifact written (node ${process.versions.node}).`);
+console.log('build: static export written to out/.');
