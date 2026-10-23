@@ -57,8 +57,8 @@ import {
   validateLinearCandidate,
   validateScenario,
   zoomViewAroundCursor,
-} from './domain/scenario.js';
-import { polygonArea, round1 } from './domain/geometry.js';
+} from '../domain/scenario.js';
+import { polygonArea, round1 } from '../domain/geometry.js';
 import {
   SaveConflictError,
   duplicateScenario,
@@ -66,7 +66,7 @@ import {
   isQuotaError,
   isUnsupportedDocument,
   performSave,
-} from './domain/library.js';
+} from '../domain/library.js';
 import {
   TROOP_TYPE_CATALOGUE,
   TROOP_TYPE_KEYS,
@@ -74,9 +74,9 @@ import {
   getTroopType,
   isKnownTroopType,
   spacingClass,
-} from './domain/polis-classical.js';
-import { IndexedDBScenarioStore, ensurePersistentStorage } from './library/idb.js';
-import { IndexedDBBattleStore } from './library/battles-idb.js';
+} from '../domain/polis-classical.js';
+import { IndexedDBScenarioStore, ensurePersistentStorage } from '../domain/browser/idb.js';
+import { IndexedDBBattleStore } from '../domain/browser/battles-idb.js';
 
 const NARROW_NOTICE_WIDTH = 1280;
 

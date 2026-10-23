@@ -6,8 +6,8 @@
 // the document id. The revision counter lives on the record, never inside
 // the document itself.
 
-import { assertValidScenario, cloneScenario } from '../domain/scenario.js';
-import { classifyStoredRecord, compareLibraryEntries } from '../domain/library.js';
+import { assertValidScenario, cloneScenario } from '../scenario.js';
+import { classifyStoredRecord, compareLibraryEntries } from '../library.js';
 
 export const SCENARIO_DB_NAME = 'polis-scenarios';
 const RECORD_STORE = 'scenarios';

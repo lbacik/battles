@@ -42,7 +42,7 @@ import {
 import { battleEndParamsOf } from './battle-end.js';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
-const scenarioDir = path.join(here, '..', 'scenarios');
+const scenarioDir = path.join(here, 'fixtures');
 
 const HOPLITE_A = '11111111-1111-4111-8111-111111111111';
 const PELT_A = '22222222-2222-4222-8222-222222222222';

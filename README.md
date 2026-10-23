@@ -56,7 +56,7 @@ Manual browser checks cover formation creation, map selection, movement planning
 The first editor-first slice (layout A from the prototype: order of battle on the
 left, map in the centre, inspector on the right). No dependencies, no build step:
 
-- `prototype/domain/scenario.js` — framework-free scenario model (imports
+- `domain/scenario.js` — framework-free scenario model (imports
   nothing from React or Next.js): generated immutable UUIDs, required titles,
   optional descriptions, a default 1200 × 800 m battlefield within the 2000 m
   application limit, two sides with default names and distinct colours, units
@@ -71,16 +71,16 @@ left, map in the centre, inspector on the right). No dependencies, no build step
   and imports a file as a new copy, rejecting bad files with specific
   messages. Map coordinates follow ADR 0001 (origin south-west, x east,
   y north, metres); only rendering flips the vertical axis.
-- `prototype/domain/geometry.js` — true-scale footprint derivation and polygon
+- `domain/geometry.js` — true-scale footprint derivation and polygon
   predicates (simple rings, overlap with positive area, elevation nesting).
-- `prototype/domain/polis-classical.js` — provisional `polis-classical 0.1`
+- `domain/polis-classical.js` — provisional `polis-classical 0.1`
   troop-type catalogue (six keys with display names, close/normal/open
   presets, permitted ranges, and spacing-class thresholds; placeholders).
-- `prototype/scenarios/acceptance-plain.json` — reference scenario as an
+- `domain/fixtures/acceptance-plain.json` — reference scenario as an
   exported file; it round-trips through import and export identically.
-- `prototype/domain/store.js` — the narrow scenario store interface with an
+- `domain/store.js` — the narrow scenario store interface with an
   in-memory implementation for tests.
-- `prototype/library/idb.js` — the IndexedDB implementation used by the editor.
+- `domain/browser/idb.js` — the IndexedDB implementation used by the editor.
 - `prototype/editor.html` — the application: library → new scenario → empty
   battlefield → save → reload → reopen. The inspector edits the title,
   description, battlefield size (shrinking clips terrain to the new bounds),
@@ -102,8 +102,11 @@ guarantee.
 
 Deliberately not Next.js yet: this repository ships a dependency-free browser
 prototype with no build step, so the tracer is implemented in that same style.
-The seams the Next.js application needs are already in place — client-only
-modules, a framework-free domain package, and storage behind the narrow store
+The seams the Next.js application needs are already in place — the framework-free
+domain package in `domain/` (scenario model, geometry, ruleset, and battle
+engine alongside their unit tests, with shared fixtures in
+`domain/fixtures/` and the browser IndexedDB stores in the browser-only
+`domain/browser/` module), and storage behind the narrow store
 interface — so a Next.js shell can adopt them without changing the model.
 
 ### Run the application
@@ -162,12 +165,13 @@ npm run test:e2e
 | `npm run lint` | Syntax check of every JavaScript file outside `prototype/` |
 | `npm run format:check` | No trailing whitespace, exactly one trailing newline |
 | `npm run typecheck` | `tsc --noEmit` once TypeScript sources exist (none yet) |
-| `npm test` | Unit tests (`node --test` over `prototype/domain/`) |
+| `npm test` | Unit tests (`node --test` over `domain/`) |
 | `npm run build` | Version coherence check, emits the `dist/` artifact |
 | `npm run test:e2e` | Headless smoke test against the `dist/` build |
 
-`prototype/` is a throwaway and is excluded from every check except `npm
-test`, which covers the tracer-bullet domain model. The end-to-end script
+`prototype/` is a throwaway and is excluded from every check; `npm test`
+covers the framework-free domain package in `domain/`, which the tracer
+imports. The end-to-end script
 serves the current placeholder build over loopback HTTP; the browser harness
 arrives with the Next.js editor slice, and CI already uploads
 `e2e-report/` (report plus trace log) as an artifact when it fails.

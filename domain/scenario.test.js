@@ -789,7 +789,7 @@ describe('resizeBattlefield', () => {
 describe('reference scenario', () => {
   it('round-trips through import and export with identical values', () => {
     const file = readFileSync(
-      path.join(here, '..', 'scenarios', 'acceptance-plain.json'),
+      path.join(here, 'fixtures', 'acceptance-plain.json'),
       'utf8',
     );
     const stored = JSON.parse(file);

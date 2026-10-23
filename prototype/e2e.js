@@ -25,7 +25,7 @@
 //                       key, and a simulated quota failure).
 // Progress survives the reload in sessionStorage. Results are rendered into
 // the page and logged to the console for headless collection.
-import { deriveFootprint } from './domain/geometry.js';
+import { deriveFootprint } from '../domain/geometry.js';
 import {
   RULESET_ID,
   SCENARIO_FORMAT_VERSION,
@@ -55,32 +55,32 @@ import {
   validateGroundCoverCandidate,
   validateLinearCandidate,
   validateScenario,
-} from './domain/scenario.js';
+} from '../domain/scenario.js';
 import {
   SaveConflictError,
   detectSaveConflict,
   duplicateScenario,
   isQuotaError,
   performSave,
-} from './domain/library.js';
-import { collectUnknownTroopTypeWarnings } from './domain/polis-classical.js';
-import { BattleStartError, startBattle, validatePlayability } from './domain/battle.js';
+} from '../domain/library.js';
+import { collectUnknownTroopTypeWarnings } from '../domain/polis-classical.js';
+import { BattleStartError, startBattle, validatePlayability } from '../domain/battle.js';
 import {
   SUBMISSION_FORMAT_VERSION,
   availableActions,
   buildPlayerView,
   resolveTurn,
   validateTurn,
-} from './domain/turn.js';
+} from '../domain/turn.js';
 import {
   changedUnitsForTurn,
   describeBattleEvent,
   groupLogEvents,
   summarizeTurn,
-} from './domain/battle-log.js';
-import { createPassivePlayer, createRandomPlayer, runRounds, runTurn } from './domain/players.js';
-import { IndexedDBScenarioStore } from './library/idb.js';
-import { IndexedDBBattleStore } from './library/battles-idb.js';
+} from '../domain/battle-log.js';
+import { createPassivePlayer, createRandomPlayer, runRounds, runTurn } from '../domain/players.js';
+import { IndexedDBScenarioStore } from '../domain/browser/idb.js';
+import { IndexedDBBattleStore } from '../domain/browser/battles-idb.js';
 
 const DB_NAME = 'polis-scenarios-e2e';
 const BATTLE_DB_NAME = 'polis-battles-e2e';

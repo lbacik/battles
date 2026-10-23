@@ -1,0 +1,7 @@
+{
+  "name": "polis-domain",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Framework-free PÓLIS domain: scenario model, geometry, polis-classical ruleset, battle engine, players, battle log, and store interfaces, plus the browser (IndexedDB) store implementations."
+}

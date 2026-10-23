@@ -30,7 +30,7 @@ import { RULESET_PARAMETERS } from './polis-classical.js';
 import { round1 } from './geometry.js';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
-const scenarioDir = path.join(here, '..', 'scenarios');
+const scenarioDir = path.join(here, 'fixtures');
 const MOVEMENT = RULESET_PARAMETERS.movement;
 
 function loadReference() {
