@@ -642,6 +642,14 @@ export default function Home() {
     }
   }
 
+  // Every resolved turn ends behind the device handoff: the "<Side> — begin
+  // your turn" press unlocks the next turn (a human side drafts, an automated
+  // side resolves at once).
+  function armHandoff(nextBattle: any) {
+    setAwaitingHandoff(true);
+    setHandoffSide(nextBattle.activeSide);
+  }
+
   async function handleStartBattleFromLibrary(id: string) {
     setBattleError(null);
     try {
@@ -759,6 +767,7 @@ export default function Home() {
     setBattle(next);
     setDecisions(nextDecisions);
     setAnnouncement(null);
+    armHandoff(next);
     showToast(`Turn ${battle.turnNumber} resolved.`);
     await persistBattle(next, nextDecisions);
   }
@@ -795,8 +804,7 @@ export default function Home() {
     setBattle(next);
     setDecisions(nextDecisions);
     setAnnouncement(null);
-    setAwaitingHandoff(true);
-    setHandoffSide(next.activeSide);
+    armHandoff(next);
     showToast(`Turn ${battle.turnNumber} resolved.`);
     await persistBattle(next, nextDecisions);
   }
@@ -825,8 +833,7 @@ export default function Home() {
       setBattle(step.battle);
       setDecisions(nextDecisions);
       setAnnouncement(null);
-      setAwaitingHandoff(true);
-      setHandoffSide(step.battle.activeSide);
+      armHandoff(step.battle);
       showToast(`Turn ${battle.turnNumber} resolved.`);
       await persistBattle(step.battle, nextDecisions);
     } catch (automatedError) {

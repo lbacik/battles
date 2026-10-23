@@ -133,9 +133,14 @@ export default function BattleScreen({
     units.find((unit) => unit?.id === selectedUnitId) ?? null;
 
   // Drafting is a human Orders-phase activity only: automated sides resolve
-  // through the runner, and nothing drafts outside the Orders phase.
+  // through the runner, nothing drafts outside the Orders phase, and nothing
+  // drafts behind the device handoff — "<Side> — begin your turn" unlocks it.
   const canDraft =
-    !finished && !automated && battle?.phase === TURN_PHASE_ORDERS && !resolving;
+    !finished &&
+    !automated &&
+    battle?.phase === TURN_PHASE_ORDERS &&
+    !resolving &&
+    !awaitingHandoff;
 
   function ownUnit(unitId: string | null): any {
     if (!unitId) return null;
@@ -392,11 +397,6 @@ export default function BattleScreen({
       return null;
     }
   }, [battle, lastResolved]);
-
-  function unitDisplayName(unitId: string): string {
-    const unit = units.find((entry: any) => entry?.id === unitId);
-    return unit?.name || unitId;
-  }
 
   // Each rout, loss, and cohesion change shows its chance outcome: the
   // rout-test, shooting/combat-loss, and rally/withdraw-cohesion draws that
