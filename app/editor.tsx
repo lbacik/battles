@@ -3,8 +3,12 @@
 import { useEffect, useMemo, useState } from 'react';
 import BattlefieldMap from './battlefield-map';
 import {
+  TROOP_TYPE_CATALOGUE,
+  TROOP_TYPE_KEYS,
   collectUnknownTroopTypeWarnings,
+  getTroopType,
   isKnownTroopType,
+  spacingClass,
 } from '../domain/polis-classical.js';
 import {
   collectWarnings,
@@ -26,12 +30,6 @@ import {
   updateUnitTroopType,
   validateScenario,
 } from '../domain/scenario.js';
-import {
-  TROOP_TYPE_CATALOGUE,
-  TROOP_TYPE_KEYS,
-  getTroopType,
-  spacingClass,
-} from '../domain/polis-classical.js';
 
 type ScenarioDocument = any;
 
@@ -166,6 +164,10 @@ function sideColorFor(sides: ScenarioDocument[], unit: ScenarioDocument): string
   const side = (sides || []).find((entry) => entry && entry.id === key);
   return side && side.color ? String(side.color) : '#666666';
 }
+
+// The catalogue's spacing presets, in order. Shared by the preset matcher
+// and the preset select so the two can never drift apart.
+const SPACING_PRESET_KEYS = ['close', 'normal', 'open'];
 
 function troopDisplayName(troopType: unknown): string {
   const entry = getTroopType(troopType as string) as any;
@@ -399,7 +401,7 @@ export default function Editor({
     if (!entry || !Number.isFinite(unit?.lateralInterval) || !Number.isFinite(unit?.rankDepth)) {
       return 'custom';
     }
-    for (const key of ['close', 'normal', 'open']) {
+    for (const key of SPACING_PRESET_KEYS) {
       const preset = entry.presets?.[key];
       if (
         preset &&
@@ -415,7 +417,19 @@ export default function Editor({
   function handleAddUnit() {
     const targetSide = oobTab !== 'all' ? oobTab : sides[0]?.id;
     try {
-      const next = createUnit(document, { sideId: targetSide });
+      // A new unit is a hoplite standing at its normal preset: the scenario
+      // stores the preset's metres (ADR 0002), read from the catalogue here
+      // so a catalogue change moves the default with it.
+      const normalPreset = (getTroopType('hoplite') as any)?.presets?.normal;
+      const next = createUnit(document, {
+        sideId: targetSide,
+        ...(normalPreset
+          ? {
+              lateralInterval: normalPreset.lateralInterval,
+              rankDepth: normalPreset.rankDepth,
+            }
+          : {}),
+      });
       setSelectedUnitId(next.unitId);
       setFieldErrors({});
       setNotice(null);
@@ -831,13 +845,14 @@ export default function Editor({
                   </p>
                 )}
                 {selectedDerived &&
+                Number.isInteger(selectedDerived.ranks) &&
                 Number.isInteger(selectedUnit.files) &&
                 selectedUnit.files >= 1 ? (
                   <>
                     <div className="formation-preview">
                       <FormationDiagram
                         files={selectedUnit.files}
-                        ranks={selectedDerived.ranks}
+                        ranks={selectedDerived.ranks ?? 0}
                       />
                       <span>FORMATION DIAGRAM</span>
                     </div>
@@ -935,7 +950,7 @@ export default function Editor({
                     {presetKeyFor(selectedUnit) === 'custom' ? (
                       <option value="custom">Custom spacings</option>
                     ) : null}
-                    {['close', 'normal', 'open'].map((key) => {
+                    {SPACING_PRESET_KEYS.map((key) => {
                       const preset = (getTroopType(selectedUnit.troopType) as any)?.presets?.[key];
                       const label = preset
                         ? `${key} (${preset.lateralInterval} × ${preset.rankDepth} m)`

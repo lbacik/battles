@@ -467,6 +467,127 @@ textarea:focus-visible {
   padding-top: 12px;
 }
 
+/* Order of battle (issue #77): tabs, add button, selectable unit rows,
+// formation diagram and derived-values line in the inspector. */
+.oob-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 6px 0 10px;
+}
+
+.oob-head h2 {
+  margin: 0;
+}
+
+.oob-notice {
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  background: #faf3dd;
+  border-left: 3px solid #c99a1f;
+  color: #6b5518;
+}
+
+.unit-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  width: 100%;
+  text-align: left;
+  margin: 0 0 6px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  cursor: pointer;
+  color: inherit;
+}
+
+.unit-row:hover {
+  border-color: var(--line);
+  background: #ffffff88;
+}
+
+.unit-row.selected {
+  border-color: var(--green);
+  background: #eef2e4;
+}
+
+.unit-row .swatch {
+  margin-top: 3px;
+}
+
+.unit-name {
+  display: block;
+  font-weight: 550;
+  font-size: 13px;
+}
+
+.unit-detail {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 2px;
+  line-height: 1.6;
+}
+
+.unit-row .unknown-badge {
+  margin-left: 0;
+}
+
+.formation-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin: 0 0 12px;
+  padding: 10px 8px 6px;
+  background-color: #f0f1e7;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.formation-preview svg {
+  width: 100%;
+  height: 90px;
+}
+
+.formation-preview > span {
+  font-size: 9px;
+  letter-spacing: 1.55px;
+  color: var(--muted);
+}
+
+.derived-line {
+  font-size: 12px;
+  color: #4c554a;
+  line-height: 1.6;
+  margin: 0 0 12px;
+}
+
+.preset-note {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.6;
+  margin: -6px 0 12px;
+}
+
+.unit-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.panel-divider {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 16px 0;
+}
+
 .map-panel {
   position: relative;
   background: #e8e5d5;
