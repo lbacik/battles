@@ -484,6 +484,169 @@ textarea:focus-visible {
   position: relative;
   flex: 1;
   min-height: 0;
+  touch-action: none;
+  overflow: hidden;
+}
+
+.map-viewport.tool-hand #battle-svg,
+.map-viewport.space-pan #battle-svg {
+  cursor: grab;
+}
+
+.map-viewport.panning #battle-svg {
+  cursor: grabbing;
+}
+
+.map-viewport svg text {
+  user-select: none;
+}
+
+/* Vertical tool rail (select, hand), top-left of the map. */
+.map-tool-rail {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 5px;
+  background: #faf9f0ed;
+  border: 1px solid #d8dccc;
+  border-radius: 5px;
+  box-shadow: 0 2px 6px #414b3020;
+}
+
+/* Display toggles (grid, labels), top-right of the map. */
+.map-display-tools {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 3;
+  display: flex;
+  gap: 3px;
+  padding: 5px;
+  background: #faf9f0ed;
+  border: 1px solid #d8dccc;
+  border-radius: 5px;
+  box-shadow: 0 2px 6px #414b3020;
+}
+
+.map-tool {
+  font-size: 11px;
+  font-weight: 550;
+  padding: 7px 10px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  color: #4c554a;
+  min-height: 30px;
+}
+
+.map-tool:hover {
+  border-color: var(--line);
+  background: #ffffff88;
+}
+
+.map-tool.active {
+  background: var(--green);
+  border-color: var(--green);
+  color: #f8f9f0;
+}
+
+/* Scale bar and cursor coordinates, bottom-left of the map. */
+.map-bottom-left {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: #7d8a70;
+  pointer-events: none;
+}
+
+.map-scale {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  background: #f4f3e9d9;
+  border: 1px solid #d9dccb;
+  border-radius: 4px;
+  padding: 6px 10px;
+  width: max-content;
+  pointer-events: auto;
+}
+
+#scale-bar {
+  display: inline-block;
+  height: 5px;
+  border: 2px solid #4c554a;
+  border-top: 0;
+  min-width: 8px;
+}
+
+.cursor-coords {
+  font-size: 11px;
+  letter-spacing: 0.4px;
+  color: #4c554a;
+  font-variant-numeric: tabular-nums;
+  background: #f4f3e9d9;
+  border: 1px solid #d9dccb;
+  border-radius: 4px;
+  padding: 6px 10px;
+  width: max-content;
+  pointer-events: auto;
+}
+
+.cursor-coords.outside {
+  color: var(--error);
+}
+
+/* Zoom control, bottom-right of the map. */
+.map-zoom-control {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px;
+  background: #faf9f0ed;
+  border: 1px solid #d8dccc;
+  border-radius: 5px;
+  box-shadow: 0 2px 6px #414b3020;
+}
+
+.map-zoom-control .map-tool {
+  min-width: 30px;
+}
+
+#zoom-level {
+  font-size: 11px;
+  min-width: 44px;
+  text-align: center;
+  color: #4c554a;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Unit labels keep the ink-on-parchment tactical look. */
+.unit-label {
+  fill: #303a32;
+  paint-order: stroke;
+  stroke: #f4f3e9;
+  stroke-width: 3px;
+  font-weight: 600;
+}
+
+.unit-dims {
+  fill: #5c665a;
+  paint-order: stroke;
+  stroke: #f4f3e9;
+  stroke-width: 3px;
 }
 
 .map-status {

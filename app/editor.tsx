@@ -167,17 +167,19 @@ export default function Editor({
         </aside>
         <section className="map-panel" aria-label="Battlefield map">
           <div className="map-caption" data-testid="battlefield-dims">
-            Battlefield · {document.battlefield?.width} × {document.battlefield?.height} m
+            Battlefield · {document.battlefield?.width} × {document.battlefield?.height} m ·
+            origin south-west
           </div>
-          <div className="map-viewport">
-            <BattlefieldMap width={document.battlefield?.width} height={document.battlefield?.height} />
-          </div>
-          <div className="map-status">
-            <span data-testid="battlefield-scale">
-              {units.length === 0 ? 'Empty battlefield · drawn to scale' : `${units.length} units`}
-            </span>
-          </div>
-          <p className="map-hint">True scale: what is drawn is what counts.</p>
+          <BattlefieldMap
+            width={document.battlefield?.width}
+            height={document.battlefield?.height}
+            units={units}
+            sides={sides}
+          />
+          <p className="map-hint">
+            Scroll to zoom around the cursor · hand tool or Space to pan · V selects, H pans ·
+            G toggles the grid, L the labels, 0 fits the battlefield
+          </p>
         </section>
         <aside className="right-panel panel" aria-label="Inspector" data-testid="inspector">
           <h2>Scenario</h2>
