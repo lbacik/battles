@@ -57,15 +57,17 @@ export interface TerrainMapPoint {
 }
 
 export interface TerrainDraftShape {
-  kind: 'ground' | 'elevation';
+  kind: 'ground' | 'elevation' | 'linear';
   category: string;
   points: TerrainMapPoint[];
+  width?: number;
 }
 
 export interface TerrainRefusalShape {
   ring: TerrainMapPoint[];
   reason: string;
   conflictId?: string | null;
+  kind?: 'ground' | 'elevation' | 'linear';
 }
 
 interface BattlefieldMapProps {
@@ -587,9 +589,14 @@ export default function BattlefieldMap({
       />
       {draft ? (
         <p className="map-terrain-hint" role="status" data-testid="map-terrain-hint">
-          Drawing {draft.kind === 'elevation' ? 'hill' : draft.category} · {draft.points.length}{' '}
-          {draft.points.length === 1 ? 'vertex' : 'vertices'} · click the map, Enter finishes, Esc
-          cancels
+          Drawing{' '}
+          {draft.kind === 'linear'
+            ? LINEAR_LABELS[draft.category] || draft.category
+            : draft.kind === 'elevation'
+              ? 'hill'
+              : draft.category}{' '}
+          · {draft.points.length} {draft.points.length === 1 ? 'vertex' : 'vertices'} · click the
+          map, Enter finishes, Esc cancels
         </p>
       ) : null}
       <div className="map-tool-rail" role="toolbar" aria-label="Map tools">
@@ -777,6 +784,18 @@ const GROUND_FILLS: Record<string, { fill: string; stroke: string; label: string
   settlement: { fill: '#d8cbb2', stroke: '#a08c66', label: 'Settlement' },
 };
 
+// Rivers and roads draw as true-scale polylines: the stroke width is the
+// stored width in metres, so what is drawn is what counts.
+const LINEAR_COLORS: Record<string, string> = {
+  river: '#7fb3c8',
+  road: '#c9b98f',
+};
+
+const LINEAR_LABELS: Record<string, string> = {
+  river: 'River',
+  road: 'Road',
+};
+
 const BattlefieldSvg = memo(function BattlefieldSvg({
   showLabels,
   showContours,
@@ -856,12 +875,33 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
         .join(' ');
     let out = '';
     for (const feature of features) {
-      if (
-        !feature ||
-        (feature.kind !== 'ground' && feature.kind !== 'elevation') ||
-        !Array.isArray(feature.polygon) ||
-        feature.polygon.length < 3
-      ) {
+      if (!feature) {
+        continue;
+      }
+      // A river or road is an open polyline drawn at true scale: the stroke
+      // width is the stored width in metres, so the line covers exactly the
+      // ground it claims. Rivers and roads may cross everything, so they are
+      // never in conflict with another feature.
+      if (feature.kind === 'linear') {
+        if (!Array.isArray(feature.path) || feature.path.length < 2) {
+          continue;
+        }
+        const line = project(feature.path as TerrainMapPoint[]);
+        const id = escapeXml(String(feature.id ?? ''));
+        const selected = feature.id === selectedTerrainId;
+        const color = LINEAR_COLORS[feature.category] || '#888888';
+        const widthM = Number(feature.width);
+        const label = `${LINEAR_LABELS[feature.category] || 'River or road'} · ${escapeXml(String(feature.width))} m`;
+        const halo = selected
+          ? `<polyline points="${line}" fill="none" stroke="#4e6047" stroke-width="${(Number.isFinite(widthM) ? widthM : 0) + 6 * mpp}" opacity="0.35" stroke-linecap="round" stroke-linejoin="round" class="terrain-linear-halo"/>`
+          : '';
+        out += `${halo}<polyline points="${line}" fill="none" stroke="${color}" stroke-width="${Number.isFinite(widthM) ? widthM : 2}" stroke-linecap="round" stroke-linejoin="round" data-feature-id="${id}" data-testid="terrain-linear"><title>${label}</title></polyline>`;
+        continue;
+      }
+      if (feature.kind !== 'ground' && feature.kind !== 'elevation') {
+        continue;
+      }
+      if (!Array.isArray(feature.polygon) || feature.polygon.length < 3) {
         continue;
       }
       const ring = feature.polygon as TerrainMapPoint[];
@@ -930,14 +970,20 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
         out += `<g data-feature-id="${id}" data-testid="terrain-hill"><polygon points="${line}" fill="#c6c8a4" fill-opacity=".31" stroke="${outline}" stroke-width="${selected || conflict ? 3 : 1.5}" stroke-dasharray="7 4"><title>Hill · level ${escapeXml(String(level))} (derived from nesting)</title></polygon>${rings}<text x="${cx.toFixed(1)}" y="${(cy + 4).toFixed(1)}" text-anchor="middle" font-size="${(13 / zoom).toFixed(2)}" fill="#6b6247" pointer-events="none">L${escapeXml(String(level))}</text>${selectedHalo}</g>`;
       }
     }
-    if (refusal && Array.isArray(refusal.ring) && refusal.ring.length >= 3) {
+    if (refusal && Array.isArray(refusal.ring) && refusal.ring.length >= 2) {
       const label = escapeXml(refusal.reason || 'Refused shape');
-      out += `<polygon points="${project(refusal.ring)}" fill="#b76e5a" fill-opacity="0.35" stroke="#b76e5a" stroke-width="${(2.5 * mpp).toFixed(2)}" stroke-dasharray="${(8 * mpp).toFixed(1)} ${(5 * mpp).toFixed(1)}" class="terrain-refused" data-testid="terrain-refusal-shape"><title>${label}</title></polygon>`;
+      // A refused river or road is an open line, never a closed shape.
+      if (refusal.kind === 'linear' || refusal.ring.length === 2) {
+        out += `<polyline points="${project(refusal.ring)}" fill="none" stroke="#b76e5a" stroke-width="${(2.5 * mpp).toFixed(2)}" stroke-dasharray="${(8 * mpp).toFixed(1)} ${(5 * mpp).toFixed(1)}" class="terrain-refused" data-testid="terrain-refusal-shape"><title>${label}</title></polyline>`;
+      } else {
+        out += `<polygon points="${project(refusal.ring)}" fill="#b76e5a" fill-opacity="0.35" stroke="#b76e5a" stroke-width="${(2.5 * mpp).toFixed(2)}" stroke-dasharray="${(8 * mpp).toFixed(1)} ${(5 * mpp).toFixed(1)}" class="terrain-refused" data-testid="terrain-refusal-shape"><title>${label}</title></polygon>`;
+      }
     }
     if (draft && Array.isArray(draft.points) && draft.points.length > 0) {
       const line = project(draft.points);
+      const isLinearDraft = draft.kind === 'linear';
       const fill =
-        draft.points.length >= 3
+        !isLinearDraft && draft.points.length >= 3
           ? `<polygon points="${line}" fill="#4e6047" fill-opacity="0.12" stroke="#4e6047" stroke-width="${(2 * mpp).toFixed(2)}" stroke-dasharray="${(7 * mpp).toFixed(1)} ${(4 * mpp).toFixed(1)}" data-testid="terrain-draft"/>`
           : `<polyline points="${line}" fill="none" stroke="#4e6047" stroke-width="${(2 * mpp).toFixed(2)}" stroke-dasharray="${(7 * mpp).toFixed(1)} ${(4 * mpp).toFixed(1)}" data-testid="terrain-draft"/>`;
       out +=
@@ -953,22 +999,30 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
     const selected = features.find(
       (feature) =>
         feature?.id === selectedTerrainId &&
-        (feature.kind === 'ground' || feature.kind === 'elevation') &&
-        Array.isArray(feature.polygon),
+        (((feature.kind === 'ground' || feature.kind === 'elevation') &&
+          Array.isArray(feature.polygon) &&
+          feature.polygon.length >= 3) ||
+          (feature.kind === 'linear' &&
+            Array.isArray(feature.path) &&
+            feature.path.length >= 2)),
     );
     if (selected && !draft) {
-      const ring = selected.polygon as TerrainMapPoint[];
-      out += ring
-        .map((point, index) => {
-          const edge = ring[(index + 1) % ring.length];
-          const mid = { x: (point.x + edge.x) / 2, y: (point.y + edge.y) / 2 };
-          return `<circle cx="${mid.x.toFixed(1)}" cy="${(safeH - mid.y).toFixed(1)}" r="${(4 * mpp).toFixed(2)}" fill="#faf9f4" stroke="#4e6047" stroke-width="${(1.5 * mpp).toFixed(2)}" stroke-dasharray="${(3 * mpp).toFixed(1)} ${(2 * mpp).toFixed(1)}" class="terrain-edge-handle" data-testid="terrain-edge-handle" data-edge-index="${index}" data-feature-id="${escapeXml(String(selected.id))}"><title>Insert a vertex here</title></circle>`;
-        })
-        .join('');
+      const isLinear = selected.kind === 'linear';
+      const ring = (isLinear ? selected.path : selected.polygon) as TerrainMapPoint[];
+      const handleStroke = isLinear ? '#7fa8c9' : '#4e6047';
+      // Edges of a river or road run between consecutive vertices only; a
+      // polygon's last edge wraps back to its first vertex.
+      const edges = isLinear ? ring.length - 1 : ring.length;
+      for (let index = 0; index < edges; index += 1) {
+        const point = ring[index];
+        const edge = ring[(index + 1) % ring.length];
+        const mid = { x: (point.x + edge.x) / 2, y: (point.y + edge.y) / 2 };
+        out += `<circle cx="${mid.x.toFixed(1)}" cy="${(safeH - mid.y).toFixed(1)}" r="${(4 * mpp).toFixed(2)}" fill="#faf9f4" stroke="${handleStroke}" stroke-width="${(1.5 * mpp).toFixed(2)}" stroke-dasharray="${(3 * mpp).toFixed(1)} ${(2 * mpp).toFixed(1)}" class="terrain-edge-handle" data-testid="terrain-edge-handle" data-edge-index="${index}" data-feature-id="${escapeXml(String(selected.id))}"><title>Insert a vertex here</title></circle>`;
+      }
       out += ring
         .map((point, index) => {
           const active = index === selectedVertexIndex;
-          return `<circle cx="${point.x}" cy="${safeH - point.y}" r="${((active ? 7 : 6) * mpp).toFixed(2)}" fill="${active ? '#4e6047' : '#faf9f4'}" stroke="#4e6047" stroke-width="${(2 * mpp).toFixed(2)}" class="terrain-vertex${active ? ' selected' : ''}" data-testid="terrain-vertex-handle" data-vertex-index="${index}" data-feature-id="${escapeXml(String(selected.id))}"><title>Vertex ${index + 1}: drag to move, Delete removes it</title></circle>`;
+          return `<circle cx="${point.x}" cy="${safeH - point.y}" r="${((active ? 7 : 6) * mpp).toFixed(2)}" fill="${active ? handleStroke : '#faf9f4'}" stroke="${handleStroke}" stroke-width="${(2 * mpp).toFixed(2)}" class="terrain-vertex${active ? ' selected' : ''}" data-testid="terrain-vertex-handle" data-vertex-index="${index}" data-feature-id="${escapeXml(String(selected.id))}"><title>Vertex ${index + 1}: drag to move, Delete removes it</title></circle>`;
         })
         .join('');
     }
