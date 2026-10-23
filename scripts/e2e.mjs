@@ -7,7 +7,7 @@
 // reloads, and reopens the scenario from the library with identical values.
 // Records `e2e-report/report.json` plus `e2e-report/trace.log` for the CI
 // artifact upload.
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -121,11 +121,19 @@ try {
     viewport: { width: 1440, height: 900 },
     acceptDownloads: true,
   });
+  // A Playwright trace of the whole run lands in e2e-report/ next to
+  // report.json and trace.log, so the CI artifact carries the failure
+  // context, not just the check list.
+  await context.tracing.start({ screenshots: true, snapshots: true });
   const page = await context.newPage();
   page.on('console', (message) => log(`browser console: ${message.text()}`));
   page.on('pageerror', (error) => log(`browser pageerror: ${String(error)}`));
 
-  const title = `E2E Probe ${Date.now()}`;
+  // The ten-step editor acceptance scenario (#4) plus persistence steps
+  // 1-6 and 8 (#5) run as one coherent story against this scenario, in
+  // acceptance order, so the saved, reopened, duplicated, exported, and
+  // imported document is the one built in steps 1-8.
+  const title = 'Acceptance plain';
 
   await page.goto(`${base}/`, { waitUntil: 'networkidle' });
   check('library screen loads', await page.getByTestId('app').isVisible());
@@ -154,6 +162,28 @@ try {
     'battlefield map uses the default true-scale dimensions',
     mapWidth === '1200' && mapHeight === '800',
     `data-width=${mapWidth} data-height=${mapHeight}`,
+  );
+
+  // Acceptance step 1: a description and a 1400 x 900 m battlefield. The map
+  // navigation checks below run against the resized battlefield.
+  await page.getByTestId('inspector-description').fill('Editor acceptance probe: steps 1-10.');
+  await page.locator('.map-caption').click();
+  await page.getByTestId('inspector-width').fill('1400');
+  await page.locator('.map-caption').click();
+  await page.getByTestId('inspector-height').fill('900');
+  await page.locator('.map-caption').click();
+  check(
+    'acceptance step 1 keeps the description',
+    (await page.getByTestId('inspector-description').inputValue()) ===
+      'Editor acceptance probe: steps 1-10.',
+  );
+  await page.getByTestId('save-scenario').click();
+  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  const resizedDims = await page.getByTestId('battlefield-dims').textContent();
+  check(
+    'acceptance step 1 sets the battlefield to 1400 x 900 m',
+    resizedDims?.includes('1400 × 900') ?? false,
+    resizedDims ?? '',
   );
 
   // Map navigation (issue #75): zoom, pan, fit, and the coordinate readout.
@@ -331,9 +361,9 @@ try {
   const coordInside =
     coordMatch !== null &&
     Number(coordMatch[1]) >= 0 &&
-    Number(coordMatch[1]) <= 1200 &&
+    Number(coordMatch[1]) <= 1400 &&
     Number(coordMatch[2]) >= 0 &&
-    Number(coordMatch[2]) <= 800;
+    Number(coordMatch[2]) <= 900;
   check('cursor coordinates read out in metres', coordInside, coords ?? '');
 
   // Grid and labels toggle on and off.
@@ -389,10 +419,10 @@ try {
   check(
     'reopened scenario keeps identical values',
     reopenedTitle === title &&
-      (reopenedDims?.includes('1200 × 800') ?? false) &&
+      (reopenedDims?.includes('1400 × 900') ?? false) &&
       inspectorTitle === title &&
-      inspectorWidth === '1200' &&
-      inspectorHeight === '800' &&
+      inspectorWidth === '1400' &&
+      inspectorHeight === '900' &&
       reopenedA === 'true' &&
       reopenedB === 'true',
     `title=${reopenedTitle} dims=${reopenedDims} inspector=${inspectorTitle}/${inspectorWidth}/${inspectorHeight}`,
@@ -513,6 +543,31 @@ try {
   await page.keyboard.press('Enter');
   const groundRow = page.getByTestId('terrain-ground-row');
   check('drawing a forest adds a ground row', (await groundRow.count()) === 1);
+
+  // Acceptance step 2 also draws rough ground and a settlement.
+  await page.getByTestId('terrain-new-category').selectOption('rough');
+  await page.getByTestId('terrain-draw-area').click();
+  for (const [vx, vy] of [
+    [1150, 600],
+    [1300, 620],
+    [1280, 740],
+    [1140, 720],
+  ]) {
+    await clickMap(vx, vy);
+  }
+  await page.keyboard.press('Enter');
+  await page.getByTestId('terrain-new-category').selectOption('settlement');
+  await page.getByTestId('terrain-draw-area').click();
+  for (const [vx, vy] of [
+    [150, 120],
+    [300, 120],
+    [310, 230],
+    [220, 260],
+  ]) {
+    await clickMap(vx, vy);
+  }
+  await page.keyboard.press('Enter');
+  check('drawing rough and settlement adds two more rows', (await groundRow.count()) === 3);
   check(
     'the forest renders on the map',
     (await page.getByTestId('terrain-ground').count()) === 1,
@@ -533,7 +588,7 @@ try {
   check('overlapping ground is refused', await page.getByTestId('terrain-refusal').isVisible());
   check(
     'a refused overlap leaves the feature count unchanged',
-    (await groundRow.count()) === 1,
+    (await groundRow.count()) === 3,
   );
   check(
     'a refused overlap highlights the candidate',
@@ -562,7 +617,7 @@ try {
   );
   check(
     'a refused bowtie leaves the feature count unchanged',
-    (await groundRow.count()) === 1,
+    (await groundRow.count()) === 3,
   );
   await page.keyboard.press('Escape');
 
@@ -734,9 +789,9 @@ try {
 
   // Deleting the area is undoable.
   await page.getByTestId('terrain-delete-feature').click();
-  check('deleting the area removes its row', (await groundRow.count()) === 0);
+  check('deleting the area removes its row', (await groundRow.count()) === 2);
   await page.getByTestId('undo').click();
-  check('undo restores the deleted area', (await groundRow.count()) === 1);
+  check('undo restores the deleted area', (await groundRow.count()) === 3);
 
   // Terrain persists through a save.
   await page.getByTestId('save-scenario').click();
@@ -751,6 +806,24 @@ try {
   check(
     'battle mode restores the order of battle',
     await page.getByTestId('oob-tab-all').isVisible(),
+  );
+
+  // Acceptance step 4: rename the sides Athens and Sparta. The empty-side
+  // warnings stay until units are fielded.
+  await page.getByTestId('inspector-side-0').fill('Athens');
+  await page.locator('.map-caption').click();
+  await page.getByTestId('inspector-side-1').fill('Sparta');
+  await page.locator('.map-caption').click();
+  check(
+    'acceptance step 4 renames the sides Athens and Sparta',
+    (await page.getByTestId('inspector-side-0').inputValue()) === 'Athens' &&
+      (await page.getByTestId('inspector-side-1').inputValue()) === 'Sparta',
+  );
+  const renamedWarnings = await page.getByTestId('issue-warning').allTextContents();
+  check(
+    'renamed sides still warn while empty',
+    renamedWarnings.length === 2 && renamedWarnings.every((warning) => /has no units/.test(warning)),
+    renamedWarnings.join(' | '),
   );
 
   // Issue #77: order of battle — add, select, edit, duplicate, delete.
@@ -1069,6 +1142,123 @@ try {
       (await page.getByTestId('issue-warning').count()) === 2,
   );
 
+  // Acceptance steps 5-8: three units per side from at least two troop types,
+  // a spacing preset change, a rotation to 30 degrees, and a refused
+  // battlefield shrink. The scenario built here is what steps 9-10 and the
+  // persistence steps save, reopen, duplicate, export, and import.
+  async function addAcceptanceUnit(spec) {
+    await page.getByTestId('oob-add').click();
+    await page.waitForFunction(
+      (expected) => document.querySelectorAll('[data-testid="oob-unit"]').length === expected,
+      spec.rowCount,
+    );
+    await page.getByTestId('unit-name').fill(spec.name);
+    await page.locator('.map-caption').click();
+    await page.getByTestId('unit-side').selectOption({ label: spec.side });
+    await page.getByTestId('unit-troop').selectOption(spec.troopType);
+    await page.getByTestId('unit-soldiers').fill(String(spec.soldiers));
+    await page.locator('.map-caption').click();
+    await page.getByTestId('unit-files').fill(String(spec.files));
+    await page.locator('.map-caption').click();
+    await page.getByTestId('unit-position-x').fill(String(spec.x));
+    await page.locator('.map-caption').click();
+    await page.getByTestId('unit-position-y').fill(String(spec.y));
+    await page.locator('.map-caption').click();
+    await page.getByTestId('unit-facing').fill(String(spec.facing));
+    await page.locator('.map-caption').click();
+  }
+
+  const acceptanceUnits = [
+    { name: 'I Athenian taxis', side: 'Athens', troopType: 'hoplite', soldiers: 256, files: 16, x: 500, y: 600, facing: 180, rowCount: 1 },
+    { name: 'Athenian peltasts', side: 'Athens', troopType: 'peltast', soldiers: 120, files: 12, x: 750, y: 620, facing: 180, rowCount: 2 },
+    { name: 'Athenian cavalry', side: 'Athens', troopType: 'cavalry', soldiers: 80, files: 10, x: 1000, y: 600, facing: 150, rowCount: 3 },
+    { name: 'I Spartan mora', side: 'Sparta', troopType: 'hoplite', soldiers: 320, files: 16, x: 550, y: 300, facing: 0, rowCount: 4 },
+    { name: 'Spartan archers', side: 'Sparta', troopType: 'archer', soldiers: 100, files: 14, x: 800, y: 280, facing: 0, rowCount: 5 },
+    { name: 'Skiritae peltasts', side: 'Sparta', troopType: 'peltast', soldiers: 120, files: 12, x: 1050, y: 300, facing: 30, rowCount: 6 },
+  ];
+  for (const spec of acceptanceUnits) {
+    await addAcceptanceUnit(spec);
+  }
+  check('acceptance step 5 fields three units per side', (await oobUnit.count()) === 6);
+  check(
+    'acceptance step 5 clears the empty-side warnings',
+    (await page.getByTestId('issue-warning').count()) === 0,
+  );
+  await page.locator('[data-testid="oob-unit"]', { hasText: 'I Athenian taxis' }).click();
+  const taxisDerived = (await page.getByTestId('unit-derived').textContent()) ?? '';
+  check(
+    'the inspector derives ranks, frontage, and depth',
+    /16 ranks/.test(taxisDerived) &&
+      /16\.0 m frontage/.test(taxisDerived) &&
+      /16\.0 m depth/.test(taxisDerived),
+    taxisDerived.trim().slice(0, 120),
+  );
+  await page.locator('[data-testid="oob-unit"]', { hasText: 'Athenian peltasts' }).click();
+  await page.getByTestId('unit-preset').selectOption('open');
+  check(
+    'acceptance step 5 applies the open spacing preset',
+    (await page.getByTestId('unit-spacing-lateral').inputValue()) === '3' &&
+      (await page.getByTestId('unit-spacing-depth').inputValue()) === '3',
+  );
+  await page.locator('[data-testid="oob-unit"]', { hasText: 'Skiritae peltasts' }).click();
+  check(
+    'acceptance step 5 rotates a unit to 30 degrees',
+    (await page.getByTestId('unit-facing').inputValue()) === '30',
+  );
+
+  // Acceptance step 7: shrinking the battlefield past a unit is refused and
+  // names the blocking unit; the stored size is untouched.
+  await page.getByTestId('inspector-width').fill('400');
+  await page.locator('.map-caption').click();
+  const shrinkError = await page.getByTestId('inspector-width-error').textContent().catch(() => null);
+  check(
+    'acceptance step 7 refuses a shrink past a unit',
+    (await page.getByTestId('inspector-width-error').isVisible()) &&
+      /taxis|peltasts|cavalry|mora|archers|Skiritae/i.test(shrinkError ?? ''),
+    (shrinkError ?? '').replace(/\s+/g, ' ').slice(0, 160),
+  );
+  await page.getByTestId('inspector-width').fill('1400');
+  await page.locator('.map-caption').click();
+  check(
+    'the refused shrink leaves the stored size alone',
+    (await page.getByTestId('inspector-width-error').count()) === 0 &&
+      (await page.getByTestId('inspector-width').inputValue()) === '1400',
+  );
+
+  // Acceptance step 8 runs across the whole script: undo and redo cover
+  // properties, terrain, and units (title, road width, area delete, unit move
+  // and delete above). Save the finished scenario and prove step 9 through
+  // the browser: reload and reopen identical to 0.1 m with empty undo history.
+  await page.getByTestId('save-scenario').click();
+  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  check(
+    'acceptance step 9 reloads the finished scenario',
+    (await page.getByTestId('header-title').textContent()) === title,
+  );
+  check(
+    'acceptance step 9 keeps every value identical to 0.1 m',
+    ((await page.getByTestId('battlefield-dims').textContent()) ?? '').includes('1400 × 900') &&
+      (await page.getByTestId('inspector-width').inputValue()) === '1400' &&
+      (await page.getByTestId('inspector-height').inputValue()) === '900' &&
+      (await page.getByTestId('oob-unit').count()) === 6 &&
+      (await page.getByTestId('issue-warning').count()) === 0 &&
+      (await page.getByTestId('terrain-ground-row').count()) === 3 &&
+      (await page.getByTestId('terrain-hill-row').count()) === 2 &&
+      (await page.getByTestId('terrain-linear-row').count()) === 2,
+  );
+  await page.locator('[data-testid="oob-unit"]', { hasText: 'I Athenian taxis' }).click();
+  check(
+    'acceptance step 9 keeps unit positions identical to 0.1 m',
+    (await page.getByTestId('unit-position-x').inputValue()) === '500' &&
+      (await page.getByTestId('unit-position-y').inputValue()) === '600',
+  );
+  check(
+    'acceptance step 9 reopens with empty undo history',
+    (await undoButton.isDisabled()) && (await redoButton.isDisabled()),
+  );
+
   // Leaving the editor with unsaved changes asks for confirmation.
   await page.getByTestId('inspector-description').fill('Revised description.');
   await page.locator('.map-caption').click();
@@ -1139,18 +1329,21 @@ try {
   );
   check('delete with confirmation removes the copy', true);
 
-  // Export then import round-trips every value identical to 0.1 m; the import
-  // gets a new id.
+  // Persistence steps 2-3: export the finished scenario, delete it from the
+  // library, import the file as a new copy with a new identifier and
+  // identical content, import the same file again, and prove the two copies
+  // are independent. Every value round-trips identical to 0.1 m.
   await page.getByTestId('inspector-title').waitFor({ state: 'detached', timeout: 1000 }).catch(() => {});
-  const exportRow = page.getByTestId('scenario-row').filter({ hasText: title });
+  const exportRow = page.getByTestId('scenario-row').filter({ hasText: title }).first();
   await exportRow.getByTestId('open-scenario').click();
   await page.getByTestId('editor').waitFor({ timeout: 15000 });
-  await page.getByTestId('inspector-width').fill('1200.05');
+  await page.getByTestId('inspector-width').fill('1400.05');
   await page.getByTestId('inspector-width').blur();
   await page.getByTestId('save-scenario').click();
   await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
   const exportUrl = new URL(page.url());
   const exportedId = exportUrl.searchParams.get('scenario');
+  const unitsBeforeExport = await page.getByTestId('oob-unit').count();
   const [firstDownload] = await Promise.all([
     page.waitForEvent('download', { timeout: 15000 }),
     page.getByTestId('export-open-scenario').click(),
@@ -1160,13 +1353,30 @@ try {
   const firstDoc = JSON.parse(firstJson);
   check(
     'export rounds stored values to 0.1 m',
-    firstDoc.battlefield.width === 1200.1,
+    firstDoc.battlefield.width === 1400.1,
     `width=${firstDoc.battlefield.width}`,
+  );
+  check(
+    'export carries the acceptance units and terrain',
+    firstDoc.units.length === 6 &&
+      firstDoc.terrainFeatures.length === 7 &&
+      firstDoc.sides[0].name === 'Athens' &&
+      firstDoc.sides[1].name === 'Sparta',
+    `units=${firstDoc.units.length} terrain=${firstDoc.terrainFeatures.length}`,
   );
   const roundTripFile = path.join(reportDir, 'round-trip.json');
   writeFileSync(roundTripFile, firstJson);
   await page.getByTestId('back-to-library').click();
   await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  const deleteRow = page.getByTestId('scenario-row').filter({ hasText: title }).first();
+  const libCountBeforeDelete = await page.getByTestId('scenario-row').count();
+  await deleteRow.getByTestId('delete-scenario').click();
+  await page.getByText('Scenario deleted.').waitFor({ timeout: 10000 });
+  await page.waitForFunction(
+    (expected) => document.querySelectorAll('[data-testid="scenario-row"]').length === expected,
+    libCountBeforeDelete - 1,
+  );
+  check('persistence step 2 deletes the scenario from the library', true);
   const libCountBefore = await page.getByTestId('scenario-row').count();
   await page.getByTestId('import-file').setInputFiles(roundTripFile);
   await page.getByTestId('editor').waitFor({ timeout: 15000 });
@@ -1174,22 +1384,93 @@ try {
   const importedId = importedUrl.searchParams.get('scenario');
   check('import assigns a new id', !!importedId && importedId !== exportedId, `${exportedId} → ${importedId}`);
   const importedWidth = await page.getByTestId('inspector-width').inputValue();
-  check('import round-trips values identical to 0.1 m', importedWidth === '1200.1', `width=${importedWidth}`);
+  check('import round-trips values identical to 0.1 m', importedWidth === '1400.1', `width=${importedWidth}`);
+  check(
+    'import restores the units and terrain identical to 0.1 m',
+    (await page.getByTestId('oob-unit').count()) === unitsBeforeExport &&
+      (await page.getByTestId('terrain-ground-row').count()) === 3 &&
+      (await page.getByTestId('terrain-hill-row').count()) === 2 &&
+      (await page.getByTestId('terrain-linear-row').count()) === 2 &&
+      ((await page.getByTestId('oob-side-a').textContent()) ?? '').includes('Athens'),
+  );
   await page.getByTestId('back-to-library').click();
   await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
   const libCountAfter = await page.getByTestId('scenario-row').count();
   check('import stores a new copy', libCountAfter === libCountBefore + 1, `${libCountBefore} → ${libCountAfter}`);
 
-  // Malformed, wrong-kind, and newer-format files are rejected with specific
-  // messages and nothing is stored.
+  // Persistence step 3: importing the same file again stores a second
+  // independent copy; editing one never touches the other.
+  await page.getByTestId('import-file').setInputFiles(roundTripFile);
+  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  const secondCopyId = new URL(page.url()).searchParams.get('scenario');
+  check(
+    'the second import gets its own id',
+    !!secondCopyId && secondCopyId !== importedId,
+    `${importedId} → ${secondCopyId}`,
+  );
+  await page.getByTestId('back-to-library').click();
+  await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  const copiesRow = page.getByTestId('scenario-row').filter({ hasText: title });
+  check('two independent copies share the title', (await copiesRow.count()) === 2);
+  await copiesRow.nth(0).getByTestId('open-scenario').click();
+  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page.getByTestId('inspector-title').fill('Acceptance plain (edited copy)');
+  await page.locator('.map-caption').click();
+  await page.getByTestId('save-scenario').click();
+  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await page.getByTestId('back-to-library').click();
+  await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  const siblingTitles = await page.getByTestId('scenario-row-title').allTextContents();
+  check(
+    'editing one copy does not change the other',
+    siblingTitles.includes('Acceptance plain (edited copy)') && siblingTitles.includes(title),
+    siblingTitles.join(' | '),
+  );
+  const editedRow = page.getByTestId('scenario-row').filter({ hasText: 'Acceptance plain (edited copy)' });
+  await editedRow.getByTestId('delete-scenario').click();
+  await page.getByText('Scenario deleted.').waitFor({ timeout: 10000 });
+  await page.waitForFunction(
+    (expected) => document.querySelectorAll('[data-testid="scenario-row"]').length === expected,
+    libCountAfter,
+  );
+  check('the edited copy deletes, leaving one import', true);
+
+  // Persistence step 5: malformed, wrong-kind, newer-format, unknown-ruleset,
+  // and overlapping-units files are each rejected with a specific message and
+  // nothing is stored.
   const badJson = path.join(reportDir, 'bad-json.json');
   const badKind = path.join(reportDir, 'bad-kind.json');
   const badVersion = path.join(reportDir, 'bad-version.json');
+  const badRuleset = path.join(reportDir, 'bad-ruleset.json');
+  const badOverlap = path.join(reportDir, 'bad-overlap.json');
   writeFileSync(badJson, '{{{ not json');
   writeFileSync(badKind, `${JSON.stringify({ kind: 'battle', formatVersion: 1, title: 'Nope' })}\n`);
   writeFileSync(
     badVersion,
     `${JSON.stringify({ kind: 'scenario', formatVersion: 99, title: 'Future', ruleset: { id: 'polis-classical', version: '0.1' } })}\n`,
+  );
+  writeFileSync(
+    badRuleset,
+    `${JSON.stringify({ kind: 'scenario', formatVersion: 1, title: 'Foreign', ruleset: { id: 'other-rules', version: '1.0' }, sides: [], units: [], terrainFeatures: [] })}\n`,
+  );
+  writeFileSync(
+    badOverlap,
+    `${JSON.stringify({
+      kind: 'scenario',
+      formatVersion: 1,
+      title: 'Overlapping',
+      ruleset: { id: 'polis-classical', version: '0.1' },
+      battlefield: { width: 1400, height: 900 },
+      sides: [
+        { id: 'side-a', name: 'Athens', color: '#1d4ed8' },
+        { id: 'side-b', name: 'Sparta', color: '#b91c1c' },
+      ],
+      units: [
+        { id: '00000000-0000-4000-8000-000000000001', name: 'First', side: 'side-a', troopType: 'hoplite', soldiers: 100, files: 10, lateralInterval: 1, rankDepth: 1, position: { x: 600, y: 400 }, facing: 0 },
+        { id: '00000000-0000-4000-8000-000000000002', name: 'Second', side: 'side-a', troopType: 'hoplite', soldiers: 100, files: 10, lateralInterval: 1, rankDepth: 1, position: { x: 600, y: 400 }, facing: 0 },
+      ],
+      terrainFeatures: [],
+    })}\n`,
   );
   const rowsBeforeBad = await page.getByTestId('scenario-row').count();
   await page.getByTestId('import-file').setInputFiles(badJson);
@@ -1216,6 +1497,28 @@ try {
     'newer-format file is rejected whole',
     /newer than the supported version/i.test(badVersionMsg ?? ''),
     badVersionMsg ?? '',
+  );
+  await page.getByTestId('import-file').setInputFiles(badRuleset);
+  await page.waitForFunction(
+    (text) => document.querySelector('[data-testid="import-error"]')?.textContent?.includes(text),
+    'unknown ruleset',
+  );
+  const badRulesetMsg = await page.getByTestId('import-error').textContent();
+  check(
+    'unknown-ruleset file is rejected whole',
+    /unknown ruleset/i.test(badRulesetMsg ?? ''),
+    badRulesetMsg ?? '',
+  );
+  await page.getByTestId('import-file').setInputFiles(badOverlap);
+  await page.waitForFunction(
+    (text) => document.querySelector('[data-testid="import-error"]')?.textContent?.includes(text),
+    'overlap',
+  );
+  const badOverlapMsg = await page.getByTestId('import-error').textContent();
+  check(
+    'overlapping-units file is rejected whole',
+    /overlap/i.test(badOverlapMsg ?? ''),
+    badOverlapMsg ?? '',
   );
   check(
     'rejected files store nothing',
@@ -1302,6 +1605,18 @@ try {
   check(
     'order of battle marks the unknown troop type',
     await page.getByTestId('unknown-troop-badge').isVisible().catch(() => false),
+  );
+  // Persistence step 6: the unknown key saves and survives a reopen verbatim.
+  await page.getByTestId('save-scenario').click();
+  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  const reopenedTroopWarning = await page.getByTestId('unknown-troop-warning').textContent().catch(() => null);
+  check(
+    'the unknown key survives save and reopen',
+    !!reopenedTroopWarning && /mystery-phalanx-xyz/i.test(reopenedTroopWarning) &&
+      (await page.getByTestId('unknown-troop-badge').isVisible().catch(() => false)),
+    reopenedTroopWarning ?? 'no warning',
   );
   await page.getByTestId('back-to-library').click();
   await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
@@ -1778,9 +2093,21 @@ try {
   check('deleting removes the battle', true);
 
   await battleContext.close();
+
+  try {
+    await context.tracing.stop({ path: path.join(reportDir, 'trace.zip') });
+    check('playwright trace recorded', existsSync(path.join(reportDir, 'trace.zip')));
+  } catch (traceError) {
+    check('playwright trace recorded', false, String(traceError).split('\n')[0]);
+  }
   await context.close();
 } catch (error) {
   check('browser test completes', false, String(error).split('\n')[0]);
+  try {
+    await context.tracing.stop({ path: path.join(reportDir, 'trace.zip') });
+  } catch {
+    // The trace is best-effort on an already-torn-down context.
+  }
 } finally {
   await browser.close();
   await new Promise((resolve) => server.close(resolve));
