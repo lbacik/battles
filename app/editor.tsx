@@ -19,11 +19,15 @@ import {
   deleteUnit,
   duplicateUnit,
   isProvisionalRuleset,
+  normalizeFacing,
+  proposeUnitPatch,
   removeElevationFeature,
   removeGroundCoverFeature,
   resizeBattlefield,
   rulesetCompatibilityNotice,
   unitDerived,
+  unitFacingDeg,
+  unitPosition,
   updateElevationFeature,
   updateGroundCoverFeature,
   updateScenarioDescription,
@@ -90,6 +94,17 @@ function DraftField({
       setDraft(value);
     }
   }, [value, focused]);
+
+  // A refused commit reverts the field to the last committed value (the
+  // document keeps it throughout): the typed value was never committed.
+  const errorKey = error ?? '';
+  useEffect(() => {
+    if (errorKey) {
+      setDraft(value);
+    }
+    // Revert only when a refusal appears, not while typing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [errorKey]);
 
   function commit(raw: string) {
     if (raw !== value) {
@@ -245,6 +260,16 @@ export default function Editor({
   // Placement refusals (no free spot in the current view): the document is
   // untouched, so the message lives outside the field errors.
   const [notice, setNotice] = useState<string | null>(null);
+  // Units the last refused placement would conflict with (the edited unit
+  // plus every overlap partner). Display-only, like the selection: the
+  // document keeps the last valid values, and the highlight mirrors the
+  // refused edit until the next committed change clears it.
+  const [unitConflictIds, setUnitConflictIds] = useState<string[]>([]);
+
+  // A committed change supersedes the last refusal highlight.
+  useEffect(() => {
+    setUnitConflictIds([]);
+  }, [document]);
 
   // Terrain mode (Map editor tab): the polygon being drawn, the selected
   // feature and vertex, and the last refused edit. All display-only: only
@@ -433,6 +458,13 @@ export default function Editor({
   const selectedSpacingClass = selectedUnit
     ? spacingClass(selectedUnit.troopType, selectedUnit.lateralInterval)
     : null;
+  // Exact placement on the map: the front-edge midpoint in metres and the
+  // compass facing in degrees, matching what the drag and rotation handle edit.
+  const selectedPosition = selectedUnit ? unitPosition(selectedUnit) : null;
+  const selectedFacing =
+    selectedUnit && Number.isFinite(Number(selectedUnit.facing))
+      ? normalizeFacing(Number(selectedUnit.facing))
+      : null;
 
   // Which spacing preset the selected unit's spacings match, or 'custom'.
   function presetKeyFor(unit: ScenarioDocument): string {
@@ -966,6 +998,72 @@ export default function Editor({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   });
+  // --- Unit placement (map drag, rotation handle, inspector fields) ----------
+  // Every geometry change goes through proposeUnitPatch: a change whose
+  // footprint would overlap another unit or leave the battlefield is refused,
+  // the value is never committed, the field reverts, and every conflicting
+  // unit is highlighted on the map and in the order of battle. Touching
+  // edge to edge is accepted. Each committed change is one undo step.
+  function commitUnitGeometry(
+    unitId: string,
+    patch: { position?: { x: number; y: number }; facing?: number },
+    field: string,
+  ) {
+    const proposal = proposeUnitPatch(document, unitId, patch);
+    if (!proposal.ok) {
+      setFieldErrors({ [field]: proposal.errors[0] || 'This placement is not allowed.' });
+      setUnitConflictIds(proposal.conflictIds ?? []);
+      return;
+    }
+    setFieldErrors({});
+    setNotice(null);
+    onChange(proposal.document);
+  }
+
+  function handleMoveUnit(unitId: string, position: { x: number; y: number }) {
+    setSelectedUnitId(unitId);
+    commitUnitGeometry(unitId, { position }, 'unit-position');
+  }
+
+  function handleRotateUnit(unitId: string, facing: number) {
+    setSelectedUnitId(unitId);
+    commitUnitGeometry(unitId, { facing }, 'unit-facing');
+  }
+
+  // Exact placement on the map: the front-edge midpoint in metres and the
+  // compass facing in degrees.
+  function commitUnitPositionAxis(unit: ScenarioDocument, axis: 'x' | 'y', raw: string) {
+    const trimmed = raw.trim();
+    if (!trimmed || !Number.isFinite(Number(trimmed))) {
+      setFieldErrors({ 'unit-position': 'Position must hold finite X and Y metre coordinates.' });
+      setUnitConflictIds(unit?.id ? [unit.id] : []);
+      return;
+    }
+    const current = unitPosition(unit);
+    const position = {
+      x: axis === 'x' ? Number(trimmed) : (current?.x ?? Number.NaN),
+      y: axis === 'y' ? Number(trimmed) : (current?.y ?? Number.NaN),
+    };
+    if (current && position.x === current.x && position.y === current.y) {
+      setFieldErrors({});
+      return;
+    }
+    commitUnitGeometry(unit?.id, { position }, 'unit-position');
+  }
+
+  function commitUnitFacing(unit: ScenarioDocument, raw: string) {
+    const trimmed = raw.trim();
+    if (!trimmed || !Number.isFinite(Number(trimmed))) {
+      setFieldErrors({ 'unit-facing': 'Facing must be a compass bearing in degrees.' });
+      setUnitConflictIds(unit?.id ? [unit.id] : []);
+      return;
+    }
+    if (normalizeFacing(Number(trimmed)) === normalizeFacing(Number(unit?.facing))) {
+      setFieldErrors({});
+      return;
+    }
+    commitUnitGeometry(unit?.id, { facing: Number(trimmed) }, 'unit-facing');
+  }
 
   function fieldError(field: string) {
     return fieldErrors[field] ? (
@@ -1374,20 +1472,24 @@ export default function Editor({
                   ) : (
                     sideUnits.map((unit) => {
                       const unknownTroop = !isKnownTroopType(unit?.troopType);
+                      const inConflict = (unit?.id ? unitConflictIds : []).includes(unit?.id);
                       return (
                         <button
                           type="button"
                           className={
-                            unit?.id === selectedUnitId ? 'unit-row selected' : 'unit-row'
+                            (unit?.id === selectedUnitId ? 'unit-row selected' : 'unit-row') +
+                            (inConflict ? ' conflict' : '')
                           }
                           key={unit?.id ?? unit?.name}
                           data-testid="oob-unit"
                           data-unit-id={unit?.id ?? ''}
                           data-selected={unit?.id === selectedUnitId ? 'true' : 'false'}
+                          data-conflict={inConflict ? 'true' : 'false'}
                           aria-pressed={unit?.id === selectedUnitId}
                           onClick={() => {
                             setSelectedUnitId(unit?.id ?? null);
                             setNotice(null);
+                            setUnitConflictIds([]);
                           }}
                         >
                           <span
@@ -1443,6 +1545,7 @@ export default function Editor({
             onSelectUnit={(id: string | null) => {
               setSelectedUnitId(id);
               setNotice(null);
+              setUnitConflictIds([]);
             }}
             terrainFeatures={document.terrainFeatures}
             selectedTerrainId={selectedTerrainId}
@@ -1468,10 +1571,16 @@ export default function Editor({
             onVertexCommit={(featureId, index, point) =>
               commitTerrainVertex(featureId, index, point)
             }
+            unitConflictIds={unitConflictIds}
+            onMoveUnit={handleMoveUnit}
+            onRotateUnit={handleRotateUnit}
           />
           <p className="map-hint">
-            Scroll to zoom around the cursor · hand tool or Space to pan · V selects, H pans ·
-            G toggles the grid, L the labels, C the contours, 0 fits the battlefield
+            Click a unit to select it · drag to place it (a refused drop returns and highlights
+            the conflict) · drag the round handle to rotate about the front midpoint (snaps to
+            15°, hold Shift for free rotation) · scroll to zoom around the cursor · hand tool or
+            Space to pan · V selects, H pans · G toggles the grid, L the labels, C the contours,
+            0 fits the battlefield
             {inTerrainMode
               ? ' · click the map to add terrain vertices, Enter finishes, Esc cancels'
               : null}
@@ -1654,6 +1763,54 @@ export default function Editor({
                 <p className="preset-note">
                   A spacing preset pre-fills both spacings in metres; the scenario stores the
                   metres (the preset itself is not stored).
+                </p>
+                <div className="field-pair">
+                  <div>
+                    <label className="field">
+                      Position X — front midpoint (m)
+                      <DraftField
+                        testid="unit-position-x"
+                        type="number"
+                        step={0.1}
+                        value={selectedPosition ? String(selectedPosition.x) : ''}
+                        error={fieldErrors['unit-position'] ?? null}
+                        onCommit={(raw) => commitUnitPositionAxis(selectedUnit, 'x', raw)}
+                      />
+                    </label>
+                  </div>
+                  <div>
+                    <label className="field">
+                      Position Y — front midpoint (m)
+                      <DraftField
+                        testid="unit-position-y"
+                        type="number"
+                        step={0.1}
+                        value={selectedPosition ? String(selectedPosition.y) : ''}
+                        error={fieldErrors['unit-position'] ?? null}
+                        onCommit={(raw) => commitUnitPositionAxis(selectedUnit, 'y', raw)}
+                      />
+                    </label>
+                  </div>
+                </div>
+                {fieldError('unit-position')}
+                <label className="field">
+                  Facing (°)
+                  <DraftField
+                    testid="unit-facing"
+                    type="number"
+                    min={0}
+                    max={360}
+                    step={1}
+                    value={selectedFacing !== null ? String(selectedFacing) : ''}
+                    error={fieldErrors['unit-facing'] ?? null}
+                    onCommit={(raw) => commitUnitFacing(selectedUnit, raw)}
+                  />
+                </label>
+                {fieldError('unit-facing')}
+                <p className="preset-note">
+                  Position is the midpoint of the front edge in metres; facing is a compass
+                  bearing (0 = north, clockwise). Dragging the footprint or its round handle
+                  edits the same values.
                 </p>
                 <div className="unit-actions">
                   <button

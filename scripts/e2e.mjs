@@ -766,6 +766,173 @@ try {
     selectedUnitTitle ?? '',
   );
 
+  // Issue #78: placing and rotating units on the map. The first unit is
+  // selected (from the map click above); the duplicate is the second row.
+  const secondUnitId = await oobUnit.nth(1).getAttribute('data-unit-id');
+  check(
+    'rotation handle appears for the selected unit',
+    await page.getByTestId('rotate-handle').isVisible(),
+  );
+
+  // Numeric facing edit commits.
+  await page.getByTestId('unit-facing').fill('30');
+  await page.locator('.map-caption').click();
+  check(
+    'numeric facing edit commits',
+    (await page.getByTestId('unit-facing').inputValue()) === '30',
+  );
+
+  // Centre the unit so rotations stay inside the battlefield whatever the
+  // default placement is; the second unit stays far away near the top.
+  await page.getByTestId('unit-position-x').fill('600');
+  await page.getByTestId('unit-position-y').fill('400');
+  await page.locator('.map-caption').click();
+  check(
+    'numeric position edit commits',
+    (await page.getByTestId('unit-position-x').inputValue()) === '600' &&
+      (await page.getByTestId('unit-position-y').inputValue()) === '400',
+  );
+
+  // Rotation handle snaps to 15 degrees: dragging the grip due east of the
+  // footprint centre puts the bearing exactly on 90 (the front midpoint
+  // sits at the same height as the centre once facing runs east).
+  {
+    const handleBox = await page.getByTestId('rotate-handle').boundingBox();
+    const footBox = await page
+      .locator('[data-testid="map-unit"][data-selected="true"] [data-testid="unit-footprint"]')
+      .boundingBox();
+    await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(footBox.x + footBox.width / 2 + 180, footBox.y + footBox.height / 2, {
+      steps: 12,
+    });
+    await page.mouse.up();
+  }
+  check(
+    'dragging the rotation handle snaps to 15 degrees',
+    (await page.getByTestId('unit-facing').inputValue()) === '90',
+  );
+
+  // Holding Shift disables snapping: the same drag with a southward offset
+  // lands off the 15-degree grid.
+  await page.keyboard.down('Shift');
+  {
+    const handleBox = await page.getByTestId('rotate-handle').boundingBox();
+    const footBox = await page
+      .locator('[data-testid="map-unit"][data-selected="true"] [data-testid="unit-footprint"]')
+      .boundingBox();
+    await page.mouse.move(handleBox.x + handleBox.width / 2, handleBox.y + handleBox.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(footBox.x + footBox.width / 2 + 137, footBox.y + footBox.height / 2 + 23, {
+      steps: 12,
+    });
+    await page.mouse.up();
+  }
+  await page.keyboard.up('Shift');
+  const freeFacing = Number(await page.getByTestId('unit-facing').inputValue());
+  check(
+    'holding Shift rotates freely without snapping',
+    Number.isFinite(freeFacing) && Math.abs(freeFacing % 15) > 0.01,
+    `facing=${freeFacing}`,
+  );
+
+  // Dragging moves the unit; the move is one undo step.
+  const beforeX = await page.getByTestId('unit-position-x').inputValue();
+  {
+    const footBox = await page
+      .locator('[data-testid="map-unit"][data-selected="true"] [data-testid="unit-footprint"]')
+      .boundingBox();
+    const cx = footBox.x + footBox.width / 2;
+    const cy = footBox.y + footBox.height / 2;
+    await page.mouse.move(cx, cy);
+    await page.mouse.down();
+    await page.mouse.move(cx + 80, cy, { steps: 10 });
+    await page.mouse.up();
+  }
+  const afterX = await page.getByTestId('unit-position-x').inputValue();
+  check(
+    'dragging moves the unit',
+    Number(afterX) > Number(beforeX),
+    `${beforeX} → ${afterX}`,
+  );
+  await undoButton.click();
+  check(
+    'the move is one undo step',
+    (await page.getByTestId('unit-position-x').inputValue()) === beforeX,
+  );
+  await redoButton.click();
+  check(
+    'redo re-applies the move',
+    (await page.getByTestId('unit-position-x').inputValue()) === afterX,
+  );
+
+  // Dropping onto another unit is refused: the unit returns and both units
+  // are highlighted as the conflict.
+  await page.locator(`[data-testid="oob-unit"][data-unit-id="${secondUnitId}"]`).click();
+  const targetBox = await page
+    .locator(`[data-testid="map-unit"][data-unit-id="${firstUnitId}"] [data-testid="unit-footprint"]`)
+    .boundingBox();
+  const draggedBox = await page
+    .locator('[data-testid="map-unit"][data-selected="true"] [data-testid="unit-footprint"]')
+    .boundingBox();
+  const committedBeforeDrop = await page
+    .getByTestId('unit-position-x')
+    .getAttribute('data-committed');
+  await page.mouse.move(draggedBox.x + draggedBox.width / 2, draggedBox.y + draggedBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(targetBox.x + targetBox.width / 2, targetBox.y + targetBox.height / 2, {
+    steps: 12,
+  });
+  await page.mouse.up();
+  check(
+    'dropping onto another unit is refused with a highlight',
+    (await page.getByTestId('unit-position-x').inputValue()) === committedBeforeDrop &&
+      (await page.getByTestId('inspector-unit-position-error').isVisible()) &&
+      (await page.locator('[data-testid="map-unit"][data-conflict="true"]').count()) === 2,
+  );
+
+  // An out-of-bounds position is refused the same way (the same proposal
+  // path backs the drag and the numeric field).
+  const committedBeforeOob = await page
+    .getByTestId('unit-position-x')
+    .getAttribute('data-committed');
+  await page.getByTestId('unit-position-x').fill('5000');
+  await page.locator('.map-caption').click();
+  check(
+    'an out-of-bounds position is refused',
+    (await page.getByTestId('inspector-unit-position-error').isVisible()) &&
+      (await page.getByTestId('unit-position-x').getAttribute('data-committed')) ===
+        committedBeforeOob &&
+      (await page.locator('[data-testid="map-unit"][data-conflict="true"]').count()) === 1,
+  );
+
+  // Touching edge to edge is accepted: park the second unit beside the first
+  // with the flank edges flush (both face 180, so the same Y and an X offset
+  // of half the frontages keeps every corner inside and apart).
+  await page.locator(`[data-testid="oob-unit"][data-unit-id="${firstUnitId}"]`).click();
+  await page.getByTestId('unit-facing').fill('180');
+  await page.locator('.map-caption').click();
+  const firstX = Number(await page.getByTestId('unit-position-x').inputValue());
+  const firstY = Number(await page.getByTestId('unit-position-y').inputValue());
+  const firstDerived = (await page.getByTestId('unit-derived').textContent()) ?? '';
+  const firstFront = Number(/([\d.]+) m frontage/.exec(firstDerived)?.[1]);
+  await page.locator(`[data-testid="oob-unit"][data-unit-id="${secondUnitId}"]`).click();
+  await page.getByTestId('unit-facing').fill('180');
+  await page.locator('.map-caption').click();
+  const secondDerived = (await page.getByTestId('unit-derived').textContent()) ?? '';
+  const secondFront = Number(/([\d.]+) m frontage/.exec(secondDerived)?.[1]);
+  const touchX = Math.round((firstX + (firstFront + secondFront) / 2) * 10) / 10;
+  await page.getByTestId('unit-position-x').fill(String(touchX));
+  await page.locator('.map-caption').click();
+  await page.getByTestId('unit-position-y').fill(String(firstY));
+  await page.locator('.map-caption').click();
+  check(
+    'touching edge to edge is accepted',
+    (await page.getByTestId('inspector-unit-position-error').count()) === 0 &&
+      (await page.getByTestId('unit-position-x').inputValue()) === String(touchX),
+    `touchX=${touchX}`,
+  );
+
   // Structural refusals: files beyond soldiers, a duplicate name, and a
   // spacing outside the application limit.
   await page.getByTestId('unit-files').fill('200');
