@@ -1715,8 +1715,7 @@ export default function Editor({
               <div className="kv">
                 <dt>Vertices</dt>
                 <dd>
-                  {terrainDraft.points.length}{' '}
-                  {terrainDraft.points.length === 1 ? '(at least 3 to finish)' : '(at least 3 to finish)'}
+                  {terrainDraft.points.length} (at least 3 to finish)
                 </dd>
               </div>
               {terrainDraft.error ? (
