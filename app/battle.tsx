@@ -29,6 +29,7 @@ import { normalizeFacing } from '../domain/scenario.js';
 import { round1 } from '../domain/geometry.js';
 import { isBattleFinished } from '../domain/battles.js';
 import {
+  changedUnitsForTurn,
   describeBattleEvent,
   groupLogEvents,
   lastResolvedTurnNumber,
@@ -50,6 +51,9 @@ interface BattleScreenProps {
   announcement: string | null;
   resolving: boolean;
   resolveError: string | null;
+  awaitingHandoff: boolean;
+  handoffSide: string | null;
+  onHandoff: () => void;
   onCommitEmpty: () => void;
   onCommitDraft: (orders: any[]) => void;
   onContinueAutomated: () => void;
@@ -82,6 +86,9 @@ export default function BattleScreen({
   announcement,
   resolving,
   resolveError,
+  awaitingHandoff,
+  handoffSide,
+  onHandoff,
   onCommitEmpty,
   onCommitDraft,
   onContinueAutomated,
@@ -126,9 +133,14 @@ export default function BattleScreen({
     units.find((unit) => unit?.id === selectedUnitId) ?? null;
 
   // Drafting is a human Orders-phase activity only: automated sides resolve
-  // through the runner, and nothing drafts outside the Orders phase.
+  // through the runner, nothing drafts outside the Orders phase, and nothing
+  // drafts behind the device handoff — "<Side> — begin your turn" unlocks it.
   const canDraft =
-    !finished && !automated && battle?.phase === TURN_PHASE_ORDERS && !resolving;
+    !finished &&
+    !automated &&
+    battle?.phase === TURN_PHASE_ORDERS &&
+    !resolving &&
+    !awaitingHandoff;
 
   function ownUnit(unitId: string | null): any {
     if (!unitId) return null;
@@ -386,6 +398,45 @@ export default function BattleScreen({
     }
   }, [battle, lastResolved]);
 
+  // Each rout, loss, and cohesion change shows its chance outcome: the
+  // rout-test, shooting/combat-loss, and rally/withdraw-cohesion draws that
+  // decided it.
+  const drawsFor = (purposes: string[], unitIds: string[]) =>
+    (summary?.draws || []).filter(
+      (event: any) =>
+        purposes.includes(event.purpose) &&
+        (!unitIds ||
+          unitIds.includes(event.unitId) ||
+          unitIds.includes(event.targetId) ||
+          unitIds.includes(event.opponentId)),
+    );
+  const lossDraws = drawsFor(
+    ['shooting-loss', 'combat-loss'],
+    (summary?.losses || []).map((loss: any) => loss.unitId),
+  );
+  const cohesionDraws = drawsFor(
+    ['rally', 'withdraw-cohesion'],
+    (summary?.cohesion || []).map((entry: any) => entry.unitId),
+  );
+  const routDraws = drawsFor(
+    ['rout-test'],
+    (summary?.routs || []).map((entry: any) => entry.unitId),
+  );
+
+  // The units the last resolved turn changed (losses, cohesion, rout, flight,
+  // or destruction), as a unit-id → reasons map for the order-of-battle and
+  // map highlights. A null turn means no resolved turn yet: nothing highlights.
+  const changedByUnit = useMemo(() => {
+    if (lastResolved === null || lastResolved === undefined) return new Map<string, string[]>();
+    try {
+      return new Map(
+        changedUnitsForTurn(battle, lastResolved).map((entry: any) => [entry.unitId, entry.reasons]),
+      );
+    } catch {
+      return new Map<string, string[]>();
+    }
+  }, [battle, lastResolved]);
+
   const result = battle?.result && typeof battle.result === 'object' ? battle.result : null;
   const winnerName = battle?.winner ? sideName(battle, battle.winner) : null;
 
@@ -443,33 +494,39 @@ export default function BattleScreen({
                     ? 'No units'
                     : `${sideUnits.length} ${sideUnits.length === 1 ? 'unit' : 'units'} · ${soldiers.toLocaleString('en')} soldiers`}
                 </p>
-                {sideUnits.map((unit: any) => (
-                  <button
-                    type="button"
-                    className={
-                      unit?.id === selectedUnitId ? 'unit-row selected' : 'unit-row selectable'
-                    }
-                    key={unit?.id ?? unit?.name}
-                    data-testid="battle-oob-unit"
-                    data-unit-id={unit?.id ?? ''}
-                    data-selected={unit?.id === selectedUnitId ? 'true' : 'false'}
-                    aria-pressed={unit?.id === selectedUnitId}
-                    onClick={() => setSelectedUnitId(unit?.id ?? null)}
-                  >
-                    <span
-                      className="swatch"
-                      style={{ background: side?.color ?? '#888' }}
-                      aria-hidden="true"
-                    />
-                    <span>
-                      <span className="unit-name">{unit?.name || 'Unit'}</span>
-                      <span className="unit-detail">
-                        {unit?.troopType} · {unit?.soldiers} soldiers · {unit?.cohesion || ''}
-                        {unit?.status && unit.status !== 'active' ? ` · ${unit.status}` : ''}
+                {sideUnits.map((unit: any) => {
+                  const changedReasons = changedByUnit.get(unit?.id) || [];
+                  const changed = changedReasons.length > 0;
+                  return (
+                    <button
+                      type="button"
+                      className={
+                        `unit-row selectable${unit?.id === selectedUnitId ? ' selected' : ''}${changed ? ' changed' : ''}`
+                      }
+                      key={unit?.id ?? unit?.name}
+                      data-testid="battle-oob-unit"
+                      data-unit-id={unit?.id ?? ''}
+                      data-selected={unit?.id === selectedUnitId ? 'true' : 'false'}
+                      data-changed={changed ? 'true' : 'false'}
+                      aria-pressed={unit?.id === selectedUnitId}
+                      onClick={() => setSelectedUnitId(unit?.id ?? null)}
+                    >
+                      <span
+                        className="swatch"
+                        style={{ background: side?.color ?? '#888' }}
+                        aria-hidden="true"
+                      />
+                      <span>
+                        <span className="unit-name">{unit?.name || 'Unit'}</span>
+                        <span className="unit-detail">
+                          {unit?.troopType} · {unit?.soldiers} soldiers · {unit?.cohesion || ''}
+                          {unit?.status && unit.status !== 'active' ? ` · ${unit.status}` : ''}
+                          {changed ? ` · changed: ${changedReasons.join(', ')}` : ''}
+                        </span>
                       </span>
-                    </span>
-                  </button>
-                ))}
+                    </button>
+                  );
+                })}
               </section>
             );
           })}
@@ -483,6 +540,9 @@ export default function BattleScreen({
             {canDraft
               ? 'click a unit, then draft from the inspector: click the map for Move legs, drag the round handle to rotate'
               : 'read-only'}
+            {lastResolved !== null && lastResolved !== undefined
+              ? ' · amber outlines mark the units the last turn changed'
+              : ''}
           </div>
           <BattlefieldMap
             width={scenario?.battlefield?.width}
@@ -493,6 +553,7 @@ export default function BattleScreen({
             onSelectUnit={(id: string | null) => setSelectedUnitId(id)}
             terrainFeatures={scenario?.terrainFeatures}
             unitConflictIds={[...conflictUnitIds()]}
+            changedUnitIds={[...changedByUnit.keys()]}
             battleClickable={canDraft}
             onBattleMapClick={handleBattleMapClick}
             battleGhosts={battleGhosts}
@@ -685,7 +746,24 @@ export default function BattleScreen({
                   <dt>Phase</dt>
                   <dd data-testid="phase">{battle?.phase}</dd>
                 </div>
-                {automated ? (
+                {awaitingHandoff && handoffSide ? (
+                  <div className="handoff" data-testid="handoff-panel">
+                    <p>
+                      Turn {battle?.turnNumber} resolved. Pass the device, then begin the next turn.
+                    </p>
+                    <div className="handoff-actions">
+                      <button
+                        type="button"
+                        className="btn-primary"
+                        data-testid="handoff"
+                        disabled={resolving}
+                        onClick={onHandoff}
+                      >
+                        {sideName(battle, handoffSide)} — begin your turn
+                      </button>
+                    </div>
+                  </div>
+                ) : automated ? (
                   <div className="handoff" data-testid="automated-turn">
                     <p>
                       {sideName(battle, activeSide)} is automated ({controller} test player). Its
@@ -883,6 +961,86 @@ export default function BattleScreen({
                     {String(sideName(battle, summary.side ?? '')).toUpperCase()}
                   </span>
                   <dl className="result">
+                    <dt>Contacts</dt>
+                    <dd>
+                      <ul className="result-list">
+                        {summary.contacts.length > 0 ? (
+                          summary.contacts.map((event: any, index: number) => (
+                            <li key={index}>{describeBattleEvent(event, battle)}</li>
+                          ))
+                        ) : (
+                          <li className="empty-result">No new contacts.</li>
+                        )}
+                      </ul>
+                    </dd>
+                    <dt>Losses</dt>
+                    <dd>
+                      <ul className="result-list">
+                        {summary.losses.length > 0 || lossDraws.length > 0 ? (
+                          <>
+                            {summary.losses.map((loss: any, index: number) => (
+                              <li key={`loss-${index}`}>
+                                <strong>{unitDisplayName(loss.unitId)}</strong> lost {loss.losses}{' '}
+                                {loss.kind === 'shot' ? 'shot' : 'in combat'}
+                                {loss.before !== null && loss.before !== undefined
+                                  ? ` (${loss.before} → ${loss.after})`
+                                  : ''}
+                                {loss.byUnitId ? ` — by ${unitDisplayName(loss.byUnitId)}` : ''}
+                              </li>
+                            ))}
+                            {lossDraws.map((event: any, index: number) => (
+                              <li className="chance" key={`loss-draw-${index}`}>
+                                {describeBattleEvent(event, battle)}
+                              </li>
+                            ))}
+                          </>
+                        ) : (
+                          <li className="empty-result">No losses.</li>
+                        )}
+                      </ul>
+                    </dd>
+                    <dt>Cohesion</dt>
+                    <dd>
+                      <ul className="result-list">
+                        {summary.cohesion.length > 0 || cohesionDraws.length > 0 ? (
+                          <>
+                            {summary.cohesion.map((event: any, index: number) => (
+                              <li key={`cohesion-${index}`}>
+                                {describeBattleEvent(event, battle)}
+                              </li>
+                            ))}
+                            {cohesionDraws.map((event: any, index: number) => (
+                              <li className="chance" key={`cohesion-draw-${index}`}>
+                                {describeBattleEvent(event, battle)}
+                              </li>
+                            ))}
+                          </>
+                        ) : (
+                          <li className="empty-result">No cohesion changes.</li>
+                        )}
+                      </ul>
+                    </dd>
+                    <dt>Routs &amp; removals</dt>
+                    <dd>
+                      <ul className="result-list">
+                        {summary.routs.length > 0 || routDraws.length > 0 ? (
+                          <>
+                            {summary.routs.map((event: any, index: number) => (
+                              <li key={`rout-${index}`}>
+                                {describeBattleEvent(event, battle)}
+                              </li>
+                            ))}
+                            {routDraws.map((event: any, index: number) => (
+                              <li className="chance" key={`rout-draw-${index}`}>
+                                {describeBattleEvent(event, battle)}
+                              </li>
+                            ))}
+                          </>
+                        ) : (
+                          <li className="empty-result">No routs, flights, or destroyed units.</li>
+                        )}
+                      </ul>
+                    </dd>
                     <dt>Orders carried out</dt>
                     <dd>
                       <ul className="result-list">
@@ -895,23 +1053,28 @@ export default function BattleScreen({
                         )}
                       </ul>
                     </dd>
-                    <dt>Losses</dt>
-                    <dd>
-                      <ul className="result-list">
-                        {summary.losses.length > 0 ? (
-                          summary.losses.map((loss: any, index: number) => (
-                            <li key={index}>
-                              {loss.unitId} lost {loss.losses}
-                              {loss.before !== null && loss.before !== undefined
-                                ? ` (${loss.before} → ${loss.after})`
-                                : ''}
-                            </li>
-                          ))
-                        ) : (
-                          <li className="empty-result">No losses.</li>
-                        )}
-                      </ul>
-                    </dd>
+                    {summary.fallbacks.length > 0 ? (
+                      <>
+                        <dt>Substitutions</dt>
+                        <dd>
+                          <ul className="result-list">
+                            {summary.fallbacks.map((event: any, index: number) => (
+                              <li key={index}>{describeBattleEvent(event, battle)}</li>
+                            ))}
+                          </ul>
+                        </dd>
+                      </>
+                    ) : null}
+                    {summary.ended ? (
+                      <>
+                        <dt>Battle end</dt>
+                        <dd>
+                          <ul className="result-list">
+                            <li>{describeBattleEvent(summary.ended, battle)}</li>
+                          </ul>
+                        </dd>
+                      </>
+                    ) : null}
                   </dl>
                 </section>
               </>
@@ -920,36 +1083,37 @@ export default function BattleScreen({
             <span className="eyebrow">BATTLE LOG</span>
             <div className="battle-log-scroll">
               <ol className="log-list log-grouped" data-testid="battle-log">
-                {logGroups.map((group: any, index: number) => (
-                  <li className="log-turn" key={index}>
-                    <span className="log-turn-head">
-                      {group.turnNumber === 0
-                        ? 'Battle start'
-                        : `Round ${group.round} · Turn ${group.turnNumber} — ${sideName(battle, group.side)}`}
-                    </span>
-                    <ul className="log-phases">
-                      {(group.sections || []).map((section: any, other: number) => (
-                        <li className="log-phase" key={other}>
-                          <span className="log-phase-head">{section.phase}</span>
-                          <ul className="log-lines">
-                            {(section.events || []).map((event: any, line: number) => (
-                              <li key={line}>{describeBattleEvent(event, battle)}</li>
-                            ))}
-                          </ul>
-                        </li>
-                      ))}
-                      {group.turnNumber === 0
-                        ? (group.events || []).map((event: any, line: number) => (
-                            <li className="log-phase" key={`start-${line}`}>
-                              <ul className="log-lines">
-                                <li>{describeBattleEvent(event, battle)}</li>
-                              </ul>
-                            </li>
-                          ))
-                        : null}
-                    </ul>
-                  </li>
-                ))}
+                {logGroups.map((group: any, index: number) =>
+                  group.turnNumber === 0 ? (
+                    <li className="log-turn" key={index}>
+                      <span className="log-turn-head">Battle start</span>
+                      <ul className="log-lines">
+                        {(group.events || []).map((event: any, line: number) => (
+                          <li key={line}>{describeBattleEvent(event, battle)}</li>
+                        ))}
+                      </ul>
+                    </li>
+                  ) : (
+                    <li className="log-turn" key={index}>
+                      <span className="log-turn-head">
+                        Round {group.round} · Turn {group.turnNumber} —{' '}
+                        {sideName(battle, group.side)}
+                      </span>
+                      <ul className="log-phases">
+                        {(group.sections || []).map((section: any, other: number) => (
+                          <li className="log-phase" key={other}>
+                            <span className="log-phase-head">{section.phase}</span>
+                            <ul className="log-lines">
+                              {(section.events || []).map((event: any, line: number) => (
+                                <li key={line}>{describeBattleEvent(event, battle)}</li>
+                              ))}
+                            </ul>
+                          </li>
+                        ))}
+                      </ul>
+                    </li>
+                  ),
+                )}
               </ol>
             </div>
           </section>
