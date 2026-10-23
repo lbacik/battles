@@ -517,6 +517,11 @@ textarea:focus-visible {
   background: #eef2e4;
 }
 
+.unit-row.conflict {
+  border-color: #b76e5a;
+  background: #f9e9e4;
+}
+
 .unit-row .swatch {
   margin-top: 3px;
 }
@@ -630,6 +635,24 @@ textarea:focus-visible {
 
 .map-viewport.panning #battle-svg {
   cursor: grabbing;
+}
+
+.map-viewport.unit-dragging #battle-svg {
+  cursor: grabbing;
+}
+
+#battle-svg .rotate-hit {
+  cursor: grab;
+  pointer-events: all;
+}
+
+#battle-svg .rotate-grip {
+  cursor: grab;
+  pointer-events: all;
+}
+
+#battle-svg .rotate-stem {
+  pointer-events: none;
 }
 
 .map-viewport svg text {
