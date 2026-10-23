@@ -1,14 +1,19 @@
-# PÓLIS — ancient battle UI prototype
+# PÓLIS — ancient battle scenarios and battles
 
 [![CI](https://github.com/lbacik/battles/actions/workflows/ci.yml/badge.svg)](https://github.com/lbacik/battles/actions/workflows/ci.yml)
 
-A throwaway interface experiment, not production code. Three layouts of the same application explore **how formation design, formation management on the map, and terrain preparation can work together in a turn-based game**.
+PÓLIS prepares scenarios and plays battles governed by a shared ruleset.
+An author builds a scenario in the library and editor — battlefield size,
+sides, terrain, and the order of battle with true-scale footprints — then
+starts a battle from it, assigns a controller per side (Human or the Random
+and Passive test players), and plays alternating turns with sequential
+orders until an end condition, concession, or rematch.
 
 ## Running the app
 
-The production application is Next.js (App Router, TypeScript) with a static
-export; it is client-only and runs locally. Requires Node.js — install
-dependencies from the lockfile first:
+The application is Next.js (App Router, TypeScript) with a static export;
+it is client-only and runs locally. Requires Node.js — install dependencies
+from the lockfile first:
 
 ```sh
 npm ci
@@ -17,7 +22,8 @@ npm run dev
 
 Open <http://localhost:3000>. Create a scenario with a title, see its empty
 battlefield in the editor, save it, reload the browser, and reopen it from
-the library.
+the library. From a saved scenario, start a battle, assign controllers, and
+play turns; the battles list resumes battles in progress.
 
 ```sh
 npm run build
@@ -25,152 +31,16 @@ npm run build
 
 produces the static production site in `out/` (build metadata in `dist/`);
 `npm run test:e2e` serves that build over loopback HTTP and drives a
-headless browser through create → empty battlefield → save → reload → reopen
-(requires the Playwright Chromium browser: `npx playwright install chromium`;
-CI installs it before running the test and uploads `e2e-report/` on failure).
+headless browser through the editor acceptance scenario (create → properties
+→ terrain → order of battle → save → reload → reopen → duplicate, delete,
+export/import round-trips, rejected files) and the local battle gate
+(playability refusal, Human vs Passive orders with reorder and commit, turn
+result, battle log, reload-resume, concession, rematch, and a seeded
+Human vs Random run to an end condition). It requires the Playwright
+Chromium browser (`npx playwright install chromium`; CI installs it before
+running the test and uploads `e2e-report/` on failure).
 
-## Running the prototype
-
-Requires Node.js. No dependencies to install:
-
-```sh
-npm run prototype
-```
-
-Open <http://localhost:4173/prototype/?variant=A>.
-
-| Variant | Design question | URL |
-| --- | --- | --- |
-| A · Tactical table | Do an army roster, a map, and a persistent inspector make a convenient command view? | <http://localhost:4173/prototype/?variant=A> |
-| B · Battlefield | Does a map with floating panels provide better spatial awareness? | <http://localhost:4173/prototype/?variant=B> |
-| C · Scenario workshop | Do a formation library, an order queue, and a bottom inspector make scenario preparation easier? | <http://localhost:4173/prototype/?variant=C> |
-
-The switcher at the bottom or the ← / → keys change variants without resetting state. The URL parameter preserves the selected layout on refresh. The switcher is only available on localhost.
-
-## What you can explore
-
-- Create and edit formations: name, side, type, soldier count, files, ranks, and spacing, with a formation preview.
-- Select units on the map or in the roster; change their layout, rotate, duplicate, and delete them.
-- Plan movement by dragging a unit or choosing a destination. An arrow and a translucent formation show the future position.
-- Execute all orders simultaneously with “Execute turn”, hold positions, and clear the movement plan.
-- Add hills, forests, buildings, rough ground, lakes, and rivers. Click or drag to use the brush; draw polygons and rivers with points, then confirm with the button or Enter.
-- Edit hill heights and river widths, and delete terrain features.
-- Pan and zoom the map, toggle the grid, labels, and contours, and undo changes.
-- Inspect the full state with the “State” button or in the console after each view update.
-
-Shortcuts: **V** select, **H** pan map, **M** plan move, **Esc** cancel, **⌘/Ctrl Z** undo.
-
-## Experiment assumptions
-
-State lives only in memory. Refreshing the page restores the scenario. The user controls both sides to compare interactions. The example is a fictional deployment inspired by antiquity, without claiming historical accuracy.
-
-Movement waits for turn execution; formation and terrain edits take effect immediately. There is no combat, collision handling, pathfinding, movement limit, or terrain effect yet. Formation symbols are enlarged relative to the map scale. Soldier count and the number of markers in the diagram are independent.
-
-## Outcome and next decision
-
-**Status: awaiting user evaluation; no variant has been approved yet.** A is a starting point for discussion: all command tools remain available. B explores a focus on the map, while C explores scenario preparation. Selected elements can be combined after comparison.
-
-The prototype source is in `prototype/`. It remains a disposable experiment; the chosen direction requires a separate production implementation. There is no implementation issue yet to record the decision against.
-
-## Verification
-
-Manual browser checks cover formation creation, map selection, movement planning by clicking and dragging, turn execution, river drawing, and state preservation across all three variants. Layouts have been inspected at desktop and narrow widths. JavaScript syntax has been checked; in keeping with the prototype's scope, it has no automated test suite or dependencies.
-
-## Tracer bullet: scenario library and editor
-
-The first editor-first slice (layout A from the prototype: order of battle on the
-left, map in the centre, inspector on the right). No dependencies, no build step:
-
-- `domain/scenario.js` — framework-free scenario model (imports
-  nothing from React or Next.js): generated immutable UUIDs, required titles,
-  optional descriptions, a default 1200 × 800 m battlefield within the 2000 m
-  application limit, two sides with default names and distinct colours, units
-  (soldiers, files, spacings in metres, front-midpoint position, compass
-  facing), ground cover, elevation, and linear terrain features, and the
-  `polis-classical 0.1` ruleset reference. Stored documents carry kind
-  `scenario` and integer format version 1; stored metre values are rounded to
-  0.1 m; the revision counter stays in library metadata (ADR 0003). Pure
-  structural validation covers counts, spacings, names, footprints (derived
-  as ranks = ceil(soldiers/files), frontage × depth, anchored at the front
-  midpoint), and terrain geometry. File exchange exports the stored document
-  and imports a file as a new copy, rejecting bad files with specific
-  messages. Map coordinates follow ADR 0001 (origin south-west, x east,
-  y north, metres); only rendering flips the vertical axis.
-- `domain/geometry.js` — true-scale footprint derivation and polygon
-  predicates (simple rings, overlap with positive area, elevation nesting).
-- `domain/polis-classical.js` — provisional `polis-classical 0.1`
-  troop-type catalogue (six keys with display names, close/normal/open
-  presets, permitted ranges, and spacing-class thresholds; placeholders).
-- `domain/fixtures/acceptance-plain.json` — reference scenario as an
-  exported file; it round-trips through import and export identically.
-- `domain/store.js` — the narrow scenario store interface with an
-  in-memory implementation for tests.
-- `domain/browser/idb.js` — the IndexedDB implementation used by the editor.
-- `prototype/editor.html` — the application: library → new scenario → empty
-  battlefield → save → reload → reopen. The inspector edits the title,
-  description, battlefield size (shrinking clips terrain to the new bounds),
-  and both sides; every change is undoable within the session, unsaved
-  changes are marked, and the issues panel warns when a side fields no
-  units. Viewports narrower than 1280 px show a
-  notice instead of a broken layout.
-- `prototype/e2e.html` — browser end-to-end test: the ten-step editor
-  acceptance scenario (#4) plus persistence steps 1–6 and 8 (#5) against a
-  separate IndexedDB test database; save, export, and import round-trips keep
-  every value identical to 0.1 m.
-
-Format version 1 is frozen from this release: the first scenario editor
-release fixes the stored scenario document (kind `scenario`, integer format
-version 1), and every later format change ships a forward migration — older
-documents migrate forward on load and nothing is ever migrated backwards
-(ADR 0003). Development builds before this release carry no compatibility
-guarantee.
-
-Deliberately not Next.js yet: this repository ships a dependency-free browser
-prototype with no build step, so the tracer is implemented in that same style.
-The seams the Next.js application needs are already in place — the framework-free
-domain package in `domain/` (scenario model, geometry, ruleset, and battle
-engine alongside their unit tests, with shared fixtures in
-`domain/fixtures/` and the browser IndexedDB stores in the browser-only
-`domain/browser/` module), and storage behind the narrow store
-interface — so a Next.js shell can adopt them without changing the model.
-
-### Run the application
-
-```sh
-npm run prototype
-```
-
-Open <http://localhost:4173/prototype/editor.html>. Create a scenario with a
-title, see its empty battlefield in the editor, save it, reload the browser,
-and reopen it from the library.
-
-### Run the unit tests
-
-```sh
-npm test
-```
-
-Covers scenario defaults and structural validation, the map convention, the
-store interface (save → list → load, revision kept apart from the document, id
-immutability), save/export/import round-trips identical to 0.1 m, multi-kind
-undo/redo, duplicate and save-conflict handling, import rejections, quota
-failures, ruleset reference compatibility, and framework independence of the
-domain package.
-
-### Run the end-to-end test
-
-```sh
-npm run prototype
-```
-
-Open <http://localhost:4173/prototype/e2e.html?autostart=1>. The page runs the
-ten-step editor acceptance scenario plus persistence steps 1–6 and 8 against
-IndexedDB — create, draw, save, reload, reopen with every value identical to
-0.1 m, duplicate and delete, export/import copies, the two-tab save conflict,
-rejected files, the unknown troop-type key, and a simulated quota failure —
-and reports PASS/FAIL with the compared values (also logged to the console).
-
-### Run all checks
+## Run all checks
 
 Requires the Node.js version in `.nvmrc` (also declared in the `engines`
 field). Install from the lockfile only, then run the same scripts CI runs:
@@ -187,16 +57,79 @@ npm run test:e2e
 
 | Script | Check |
 | --- | --- |
-| `npm run lint` | Syntax check of every JavaScript file outside `prototype/` |
+| `npm run lint` | Syntax check of every JavaScript and TypeScript file |
 | `npm run format:check` | No trailing whitespace, exactly one trailing newline |
-| `npm run typecheck` | `tsc --noEmit` once TypeScript sources exist (none yet) |
+| `npm run typecheck` | `tsc --noEmit` |
 | `npm test` | Unit tests (`node --test` over `domain/`) |
-| `npm run build` | Version coherence check, emits the `dist/` artifact |
-| `npm run test:e2e` | Headless smoke test against the `dist/` build |
+| `npm run build` | Version coherence check, emits the static export in `out/` plus the `dist/` artifact |
+| `npm run test:e2e` | Headless browser test against the `out/` build |
 
-`prototype/` is a throwaway and is excluded from every check; `npm test`
-covers the framework-free domain package in `domain/`, which the tracer
-imports. The end-to-end script
-serves the current placeholder build over loopback HTTP; the browser harness
-arrives with the Next.js editor slice, and CI already uploads
-`e2e-report/` (report plus trace log) as an artifact when it fails.
+## Domain package
+
+The rules live in the framework-free domain package in `domain/` — it
+imports nothing from React or Next.js, so the app shell can adopt it
+without changing the model:
+
+- `domain/scenario.js` — scenario model: generated immutable UUIDs,
+  required titles, optional descriptions, a default 1200 × 800 m
+  battlefield within the 2000 m application limit, two sides with default
+  names and distinct colours, units (soldiers, files, spacings in metres,
+  front-midpoint position, compass facing), ground cover, elevation, and
+  linear terrain features, and the `polis-classical 0.1` ruleset reference.
+  Stored documents carry kind `scenario` and integer format version 1;
+  stored metre values are rounded to 0.1 m; the revision counter stays in
+  library metadata (ADR 0003). Pure structural validation covers counts,
+  spacings, names, footprints (derived as ranks = ceil(soldiers/files),
+  frontage × depth, anchored at the front midpoint), and terrain geometry.
+  File exchange exports the stored document and imports a file as a new
+  copy, rejecting bad files with specific messages. Map coordinates follow
+  ADR 0001 (origin south-west, x east, y north, metres); only rendering
+  flips the vertical axis.
+- `domain/geometry.js` — true-scale footprint derivation and polygon
+  predicates (simple rings, overlap with positive area, elevation nesting).
+- `domain/polis-classical.js` — `polis-classical 0.1` troop-type catalogue
+  (six keys with display names, close/normal/open presets, permitted
+  ranges, and spacing-class thresholds).
+- `domain/turn.js`, `domain/movement.js`, `domain/charge.js`,
+  `domain/shoot.js`, `domain/combat.js`, `domain/cohesion.js`,
+  `domain/battle.js`, and related modules — the battle engine: alternating
+  turns with sequential orders (ADR 0004), validated drafts, turn
+  resolution, and end conditions.
+- `domain/players.js` — Human, Passive, and Random (seeded) controllers.
+- `domain/store.js`, `domain/library.js`, `domain/battles.js` — the narrow
+  store interfaces and library trust helpers (duplicate, save conflicts,
+  import classification) that the app and the tests share.
+- `domain/browser/` — the IndexedDB implementations used by the app.
+- `domain/fixtures/` — shared fixtures, including
+  `acceptance-plain.json`, the reference scenario as an exported file; it
+  round-trips through import and export identically.
+
+`npm test` covers scenario defaults and structural validation, the map
+convention, the store interfaces (save → list → load, revision kept apart
+from the document, id immutability), save/export/import round-trips
+identical to 0.1 m, multi-kind undo/redo, duplicate and save-conflict
+handling, import rejections, quota failures, ruleset reference
+compatibility, turn validation and resolution, and framework independence
+of the domain package.
+
+## Scenario format and migration
+
+Format version 1 is frozen: the stored scenario document (kind
+`scenario`, integer format version 1) is fixed, and every later format
+change ships a forward migration — older documents migrate forward on load
+and nothing is ever migrated backwards (ADR 0003). The library sits behind
+the narrow store interface, so server storage can later replace the
+browser store without changing the editor. Exports carry the document
+kind, the format version, and the ruleset reference, so a file always says
+what it needs to load.
+
+## Moving scenarios from the old tracer
+
+The dependency-free browser tracer that preceded this app is removed; only
+history keeps it (`git log` before the removal). Its exported scenario
+files load in this app unchanged: in an old checkout, open the tracer's
+editor library and export the scenario to a JSON file, then in the app use
+the library's import to store it as a new copy (a fresh id, identical
+content to 0.1 m). Files the app cannot read — malformed JSON, wrong
+document kind, a newer format version, an unknown ruleset, overlapping
+units — are rejected whole with a specific message and nothing is stored.

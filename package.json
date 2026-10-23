@@ -4,7 +4,6 @@
   "engines": { "node": "22" },
   "scripts": {
     "dev": "next dev",
-    "prototype": "node prototype/server.mjs",
     "lint": "node scripts/lint.mjs",
     "format:check": "node scripts/format-check.mjs",
     "typecheck": "node scripts/typecheck.mjs",

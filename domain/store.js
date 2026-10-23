@@ -1,4 +1,4 @@
-// PÓLIS tracer bullet — the narrow scenario store interface (ADR 0003).
+// PÓLIS scenario library — the narrow scenario store interface (ADR 0003).
 //
 // The scenario library sits behind this interface so browser storage
 // (IndexedDB) can later be replaced by server storage without changing the

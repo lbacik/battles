@@ -20,7 +20,7 @@
 // automatically: only an explicit concede decision from the player concedes,
 // and every fallback commits (possibly empty) orders instead.
 //
-// The Passive player always commits no orders. It is the tracer-bullet
+// The Passive player always commits no orders. It is the baseline
 // opponent for the whole turn contract: Passive vs Passive must play round
 // after round without exceptions.
 //

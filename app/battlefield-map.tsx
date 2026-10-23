@@ -1,6 +1,6 @@
 'use client';
 
-// Shared tactical map (prototype variant A styling).
+// Shared tactical map (tactical-table styling).
 //
 // The editor and the battle screen render the same true-scale battlefield
 // through this component: the battlefield rectangle, its units, and the
@@ -1026,7 +1026,7 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
   const origin = toScreenPoint({ x: 0, y: 0 }, safeH);
   const centre = toScreenPoint({ x: safeW / 2, y: safeH / 2 }, safeH);
 
-  // Terrain in prototype variant A styling, drawn true to scale from the
+  // Terrain in the tactical-table styling, drawn true to scale from the
   // stored vertices and always under the units. String-built like the grid
   // and unit layers; clicks delegate through data attributes.
   const terrain = useMemo(() => {

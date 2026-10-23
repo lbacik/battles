@@ -1816,7 +1816,7 @@ function numericField(unit, names) {
 }
 
 // Read the map position of a unit. Accepts { position: { x, y } } as well as
-// flat { x, y } shapes used across prototype sketches. Returns null when the
+// flat { x, y } shapes used by older callers. Returns null when the
 // position is missing or not finite.
 export function unitPosition(unit) {
   if (!unit || typeof unit !== 'object') return null;
@@ -1838,7 +1838,7 @@ export function unitPosition(unit) {
 }
 
 // Compass bearing of the unit's front in degrees (0 = north, 90 = east).
-// Accepts `facingDeg`, `facing`, or `angle` spellings from prototype data.
+// Accepts `facingDeg`, `facing`, or `angle` spellings from older documents.
 export function unitFacingDeg(unit) {
   const value = numericField(unit, ['facingDeg', 'facing', 'angle', 'headingDeg']);
   if (value === undefined) return 0;

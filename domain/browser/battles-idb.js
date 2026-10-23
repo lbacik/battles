@@ -1,4 +1,4 @@
-// PÓLIS tracer bullet — IndexedDB implementation of the battle store
+// PÓLIS battle library — IndexedDB implementation of the battle store
 // interface. This is a storage adapter, not domain code: it imports only the
 // framework-free domain model, never React or Next.js.
 //

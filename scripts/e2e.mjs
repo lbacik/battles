@@ -1531,7 +1531,7 @@ try {
     `rows=${rowsBeforeBad}`,
   );
 
-  // Ruleset mismatch and unknown troop-type notices appear as in the tracer.
+  // Ruleset mismatch and unknown troop-type notices appear in the library.
   const olderRuleset = {
     kind: 'scenario',
     formatVersion: 1,

@@ -1,6 +1,5 @@
-// Lint for the production tree.
+// Lint for the whole tree (dependency-free).
 //
-// `prototype/` is a throwaway experiment and is excluded from every check.
 // JavaScript files must parse under `node --check`; TypeScript sources are
 // syntax-checked through the installed `typescript` compiler so the app tree
 // (`app/`, `lib/`, `e2e/`, scripts) is covered alongside the framework-free
@@ -11,7 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const EXCLUDED = new Set(['.git', 'node_modules', 'prototype', 'dist', 'out', '.next', 'e2e-report']);
+const EXCLUDED = new Set(['.git', 'node_modules', 'dist', 'out', '.next', 'e2e-report']);
 const JS_EXTENSIONS = new Set(['.js', '.mjs', '.cjs']);
 const TS_EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts']);
 
@@ -85,5 +84,5 @@ if (failed > 0) {
   process.exit(1);
 }
 console.log(
-  `lint: ${jsFiles.length} JavaScript and ${tsFiles.length} TypeScript file(s) parsed cleanly (prototype/ excluded).`,
+  `lint: ${jsFiles.length} JavaScript and ${tsFiles.length} TypeScript file(s) parsed cleanly.`,
 );

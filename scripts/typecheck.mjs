@@ -1,8 +1,7 @@
-// Typecheck for the production tree.
+// Typecheck for the whole tree.
 //
-// `prototype/` is excluded. No TypeScript sources exist yet, so there is
-// nothing to check; once `*.ts` files appear outside `prototype/`, this
-// script requires `typescript` plus a `tsconfig.json` and runs `tsc --noEmit`.
+// Runs `tsc --noEmit` over the TypeScript sources via `typescript` plus
+// `tsconfig.json`; reports when there is nothing to check.
 import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -10,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const EXCLUDED = new Set(['.git', 'node_modules', 'prototype', 'dist', 'out', '.next', 'e2e-report']);
+const EXCLUDED = new Set(['.git', 'node_modules', 'dist', 'out', '.next', 'e2e-report']);
 const EXTENSIONS = new Set(['.ts', '.tsx', '.mts', '.cts']);
 
 function collect(dir, out = []) {
@@ -29,7 +28,7 @@ function collect(dir, out = []) {
 
 const files = collect(root);
 if (files.length === 0) {
-  console.log('typecheck: no TypeScript sources (prototype/ excluded); nothing to check.');
+  console.log('typecheck: no TypeScript sources; nothing to check.');
   process.exit(0);
 }
 

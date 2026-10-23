@@ -1,7 +1,8 @@
-/* PÓLIS app style — prototype variant A (tactical table).
+/* PÓLIS app style — tactical table: command view with a roster, a map,
+   and a persistent inspector.
    PÓLIS brand header, palette, typography, and the three-column editor
    layout: order of battle left, map centre, inspector right. No avatar or
-   account control, no prototype badge, no variant switcher: the editor is a
+   account control: the editor is a
    separate screen from battles, so there is no turn bar or Execute turn. */
 :root {
   --bg: #f5f4ed;
@@ -1073,7 +1074,7 @@ textarea:focus-visible {
 
 /* Terrain mode (issue #79): the Map editor tab swaps the order of battle
    for the terrain panel. Ground cover areas and hills render true-scale on
-   the map in prototype variant A styling; these rules cover the panel. */
+   the map in the tactical-table styling; these rules cover the panel. */
 .terrain-actions {
   display: flex;
   gap: 8px;
@@ -1226,8 +1227,8 @@ textarea:focus-visible {
   pointer-events: none;
 }
 
-/* Battle flow (issue #83): setup, refusal, battle screen layout A with a
-   permanent turn bar, battles list. Mirrors prototype/battle.css. */
+/* Battle flow (issue #83): setup, refusal, battle screen with a
+   permanent turn bar, battles list. */
 .setup {
   max-width: 860px;
   margin: 0 auto;
@@ -1682,9 +1683,9 @@ textarea:focus-visible {
 }
 
 /* Move drafting (issue #84): the human turn draft list, the inspector draft
-   editor, and the map ghost/path/conflict overlays. Mirrors
-   prototype/battle.css — accepted drafts draw a ghost footprint of their
-   movement preview, rejected drafts highlight their conflict. */
+   editor, and the map ghost/path/conflict overlays — accepted drafts draw a
+   ghost footprint of their movement preview, rejected drafts highlight
+   their conflict. */
 #battle-svg [data-testid='draft-ghost'],
 #battle-svg [data-testid='draft-path'],
 #battle-svg [data-testid='draft-vertex'],

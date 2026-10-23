@@ -205,7 +205,7 @@ function troopDisplayName(troopType: unknown): string {
   return entry?.displayName || String(troopType ?? 'Unknown');
 }
 
-// Prototype variant A's formation diagram: one dot per file and rank,
+// The formation diagram: one dot per file and rank,
 // capped to fit the inspector. Dots only — the footprint on the map is the
 // true-scale rectangle, never enlarged for display.
 function FormationDiagram({ files, ranks }: { files: number; ranks: number }) {
@@ -321,7 +321,7 @@ export default function Editor({
   })();
   const unitsForSide = (sideId: unknown): ScenarioDocument[] =>
     typeof sideId === 'string' ? (unitsBySide.get(sideId) ?? []) : [];
-  // Issues panel, as in the tracer: structural errors block saving while
+  // Issues panel: structural errors block saving while
   // completeness warnings, unknown troop-type warnings, and the ruleset
   // notice never do. Saving stays allowed with warnings; the editor keeps
   // unknown keys verbatim. The completeness warnings include the empty-side

@@ -37,7 +37,6 @@
   ],
   "exclude": [
     "node_modules",
-    "prototype",
     "dist",
     "out",
     "e2e-report",

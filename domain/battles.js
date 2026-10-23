@@ -1,4 +1,4 @@
-// PÓLIS tracer bullet — the narrow battle store interface.
+// PÓLIS battle library — the narrow battle store interface.
 //
 // Battles survive reloads: every committed turn is saved, and a Battles list
 // resumes battles in progress. The battle library sits behind this interface

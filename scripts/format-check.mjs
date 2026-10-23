@@ -1,7 +1,7 @@
-// Format check for the production tree (dependency-free).
+// Format check for the whole tree (dependency-free).
 //
-// `prototype/` is a throwaway and is excluded, as is the generated
-// `package-lock.json`. Every other text file must have no trailing whitespace
+// The generated `package-lock.json` is excluded. Every other text file must
+// have no trailing whitespace
 // and must end with exactly one newline. When the Next.js slice picks a
 // formatter (item 13 of #8), this script will delegate to it.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const EXCLUDED = new Set(['.git', 'node_modules', 'prototype', 'dist', 'out', '.next', 'e2e-report']);
+const EXCLUDED = new Set(['.git', 'node_modules', 'dist', 'out', '.next', 'e2e-report']);
 const EXCLUDED_FILES = new Set(['package-lock.json', 'tsconfig.tsbuildinfo']);
 
 function collect(dir, out = []) {
@@ -46,4 +46,4 @@ if (violations.length > 0) {
   for (const violation of violations) console.error(`  ${violation}`);
   process.exit(1);
 }
-console.log('format:check: all covered files are formatted (prototype/ excluded).');
+console.log('format:check: all covered files are formatted.');

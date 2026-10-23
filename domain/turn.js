@@ -510,7 +510,7 @@ export function availableActions(battle, side) {
 // A submission is `{ formatVersion, battleId, turnNumber, side, orders[] }`
 // and an order is `{ unitId, kind, ...parameters }` (Hold takes no
 // parameters). The schema below parses untrusted input: `parseSubmission`
-// enforces it by hand — the prototype has no dependencies — and returns a
+// enforces it by hand — the domain package has no dependencies — and returns a
 // deep copy, throwing a `SubmissionParseError` that names the first problem.
 
 // JSON Schema (draft 2020-12) for a turn submission. Kept as data so the

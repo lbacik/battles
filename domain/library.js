@@ -1,4 +1,4 @@
-// PÓLIS tracer bullet — scenario library trust helpers (framework-free).
+// PÓLIS scenario library — trust helpers (framework-free).
 //
 // The editor manages the scenario library through the narrow scenario store
 // interface (ADR 0003). This module holds the pure rules that keep authors

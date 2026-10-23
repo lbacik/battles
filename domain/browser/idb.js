@@ -1,4 +1,4 @@
-// PÓLIS tracer bullet — IndexedDB implementation of the scenario store
+// PÓLIS scenario library — IndexedDB implementation of the scenario store
 // interface (ADR 0003). This is a storage adapter, not domain code: it
 // imports only the framework-free domain model, never React or Next.js.
 //

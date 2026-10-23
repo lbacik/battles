@@ -1,6 +1,6 @@
 'use client';
 
-// The battle screen (prototype layout A): order of battle left, the map
+// The battle screen: order of battle left, the map
 // shared with the editor centre, the selected unit's inspector right, and the
 // bottom turn bar showing round and round limit, the active side in its
 // colour, and the phase.
