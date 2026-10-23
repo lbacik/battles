@@ -131,7 +131,7 @@ export default function Home() {
   const dirty = !!document && !!savedDocument && !documentsMatch(document, savedDocument);
 
   return (
-    <div className="app" data-testid="app">
+    <>
       <div id="narrow-notice" role="alert">
         <h1>PÓLIS scenario editor</h1>
         <p>
@@ -140,6 +140,7 @@ export default function Home() {
           a larger display.
         </p>
       </div>
+      <div className="app" data-testid="app">
       <header className="app-header">
         <div className="brand">
           PÓLIS<small>ANCIENT BATTLE LAB</small>
@@ -160,7 +161,7 @@ export default function Home() {
       {document && openId ? (
         <Editor
           document={document}
-          savedDocument={savedDocument}
+          dirty={dirty}
           saveError={saveError}
           saving={saving}
           onChange={setDocument}
@@ -180,6 +181,7 @@ export default function Home() {
       <div id="toast" role="status" aria-live="polite" className={toast ? 'visible' : ''}>
         {toast}
       </div>
-    </div>
+      </div>
+    </>
   );
 }

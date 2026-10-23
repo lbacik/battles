@@ -2,13 +2,12 @@
 
 import { useMemo, useState } from 'react';
 import BattlefieldMap from './battlefield-map';
-import { documentsMatch } from '../lib/store';
 
 type ScenarioDocument = any;
 
 interface EditorProps {
   document: ScenarioDocument;
-  savedDocument: ScenarioDocument | null;
+  dirty: boolean;
   saveError: string | null;
   saving: boolean;
   onChange: (next: ScenarioDocument) => void;
@@ -22,7 +21,7 @@ function setField(document: ScenarioDocument, patch: Record<string, unknown>): S
 
 export default function Editor({
   document,
-  savedDocument,
+  dirty,
   saveError,
   saving,
   onChange,
@@ -30,19 +29,30 @@ export default function Editor({
   onBack,
 }: EditorProps) {
   const [mode, setMode] = useState<'battle' | 'map'>('battle');
-  const dirty = useMemo(
-    () => !!savedDocument && !documentsMatch(document, savedDocument),
-    [document, savedDocument],
-  );
 
   const units: ScenarioDocument[] = Array.isArray(document.units) ? document.units : [];
   const sides: ScenarioDocument[] = Array.isArray(document.sides) ? document.sides : [];
+  const unitsBySide = useMemo(() => {
+    const grouped = new Map<string, ScenarioDocument[]>();
+    for (const unit of units) {
+      if (!unit || typeof unit.side !== 'string') continue;
+      const list = grouped.get(unit.side);
+      if (list) {
+        list.push(unit);
+      } else {
+        grouped.set(unit.side, [unit]);
+      }
+    }
+    return grouped;
+  }, [units]);
+  const unitsForSide = (sideId: unknown): ScenarioDocument[] =>
+    typeof sideId === 'string' ? (unitsBySide.get(sideId) ?? []) : [];
   const warnings = useMemo(
     () =>
       sides
-        .filter((side) => units.filter((unit) => unit && unit.side === side?.id).length === 0)
+        .filter((side) => unitsForSide(side?.id).length === 0)
         .map((side) => `Side "${side?.name ?? side?.id}" has no units`),
-    [sides, units],
+    [sides, unitsBySide],
   );
 
   function updateBattlefield(dimension: 'width' | 'height', raw: string) {
@@ -116,7 +126,7 @@ export default function Editor({
           </div>
           <h2>Order of battle</h2>
           {sides.map((side) => {
-            const sideUnits = units.filter((unit) => unit && unit.side === side?.id);
+            const sideUnits = unitsForSide(side?.id);
             return (
               <section
                 className="side"

@@ -24,7 +24,7 @@ export interface LibraryEntry {
   title: string;
   revision: number | null;
   updatedAt: string | null;
-  status: string;
+  status: 'ok' | 'unreadable' | 'unsupported-version';
   cause: string | null;
 }
 
@@ -35,7 +35,19 @@ export function formatSavedAt(updatedAt: string | null): string {
   return date.toLocaleString();
 }
 
-// The scenario differs from the last saved version.
+// True when two scenario documents hold identical content. Key order is
+// ignored so a reload or clone that reorders keys still counts as unchanged.
+function canonicalize(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .map(([key, entry]) => [key, canonicalize(entry)] as const)
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return Object.fromEntries(entries);
+  }
+  return value;
+}
+
 export function documentsMatch(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
+  return JSON.stringify(canonicalize(a)) === JSON.stringify(canonicalize(b));
 }

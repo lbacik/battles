@@ -145,6 +145,13 @@ try {
   const mapBox = await page.getByTestId('battlefield-map').boundingBox();
   const mapScale = mapBox && mapBox.width > 0 && mapBox.height > 0;
   check('battlefield map is drawn to scale', !!mapScale, JSON.stringify(mapBox));
+  const mapWidth = await page.getByTestId('battlefield-map').getAttribute('data-width');
+  const mapHeight = await page.getByTestId('battlefield-map').getAttribute('data-height');
+  check(
+    'battlefield map uses the default true-scale dimensions',
+    mapWidth === '1200' && mapHeight === '800',
+    `data-width=${mapWidth} data-height=${mapHeight}`,
+  );
   const sideAEmpty = await page.getByTestId('oob-side-a').getAttribute('data-empty');
   const sideBEmpty = await page.getByTestId('oob-side-b').getAttribute('data-empty');
   check('order of battle is empty for both sides', sideAEmpty === 'true' && sideBEmpty === 'true');
