@@ -614,6 +614,95 @@ try {
   check('a refused hill leaves the hill count unchanged', (await hillRow.count()) === 2);
   await page.keyboard.press('Escape');
 
+  // Issue #80: rivers and roads — draw a river crossing the forest, then a
+  // road crossing both, and change a width. Linear features may cross ground
+  // cover, elevation, and each other, so both finishes succeed.
+  await page.getByTestId('terrain-new-linear-category').selectOption('river');
+  await page.getByTestId('terrain-new-linear-width').fill('18');
+  await page.getByTestId('terrain-draw-linear').click();
+  check('drawing shows the river hint', await page.getByTestId('map-terrain-hint').isVisible());
+  for (const [vx, vy] of [
+    [300, 100],
+    [300, 350],
+    [300, 700],
+  ]) {
+    await clickMap(vx, vy);
+  }
+  await page.keyboard.press('Enter');
+  const linearRow = page.getByTestId('terrain-linear-row');
+  check('drawing a river adds a river row', (await linearRow.count()) === 1);
+  check(
+    'the river renders on the map at true scale',
+    (await page.getByTestId('terrain-linear').count()) === 1,
+  );
+  check(
+    'the river line is 18 m wide',
+    (await page.getByTestId('terrain-linear').first().getAttribute('stroke-width')) === '18',
+  );
+
+  await page.getByTestId('terrain-new-linear-category').selectOption('road');
+  await page.getByTestId('terrain-new-linear-width').fill('6');
+  await page.getByTestId('terrain-draw-linear').click();
+  for (const [vx, vy] of [
+    [100, 300],
+    [500, 300],
+    [1100, 300],
+  ]) {
+    await clickMap(vx, vy);
+  }
+  await page.keyboard.press('Enter');
+  check('drawing a road adds a second row', (await linearRow.count()) === 2);
+  check(
+    'the road crosses the river on the map',
+    (await page.getByTestId('terrain-linear').count()) === 2,
+  );
+
+  // Escape cancels a river or road draft without adding a feature.
+  await page.getByTestId('terrain-draw-linear').click();
+  await clickMap(600, 100);
+  await page.keyboard.press('Escape');
+  check(
+    'escape cancels the linear draft',
+    (await linearRow.count()) === 2 &&
+      (await page.getByTestId('map-terrain-hint').count()) === 0,
+  );
+
+  // A width change in the inspector redraws the line to scale and is undoable.
+  await linearRow.nth(1).getByTestId('terrain-select').click();
+  await page.getByTestId('terrain-linear-width').fill('8');
+  await page.keyboard.press('Enter');
+  check(
+    'widening the road updates its row',
+    ((await linearRow.nth(1).textContent()) ?? '').includes('8 m'),
+  );
+  check(
+    'widening the road redraws its line',
+    (await page.getByTestId('terrain-linear').nth(1).getAttribute('stroke-width')) === '8',
+  );
+  await page.getByTestId('undo').click();
+  check(
+    'undo restores the road width',
+    ((await linearRow.nth(1).textContent()) ?? '').includes('6 m'),
+  );
+  await page.getByTestId('redo').click();
+  check(
+    'redo restores the width change',
+    ((await linearRow.nth(1).textContent()) ?? '').includes('8 m'),
+  );
+
+  // A road vertex can be inserted on an edge and deleted again.
+  const linearVertex = page.getByTestId('terrain-vertex-handle');
+  const linearBefore = await linearVertex.count();
+  check('the road shows its vertices', linearBefore === 3);
+  await page.getByTestId('terrain-edge-handle').first().click();
+  check(
+    'inserting a road vertex adds a handle',
+    (await linearVertex.count()) === linearBefore + 1,
+  );
+  await linearVertex.first().click();
+  await page.keyboard.press('Delete');
+  check('deleting a road vertex removes its handle', (await linearVertex.count()) === linearBefore);
+
   // Recategorise the forest, insert a vertex on an edge, delete it again.
   await groundRow.first().getByTestId('terrain-select').click();
   await page.getByTestId('terrain-category').selectOption('rough');

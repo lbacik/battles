@@ -12,8 +12,10 @@ import {
 } from '../domain/polis-classical.js';
 import {
   GROUND_COVER_CATEGORIES,
+  LINEAR_FEATURE_CATEGORIES,
   addElevationFeature,
   addGroundCoverFeature,
+  addLinearFeature,
   collectWarnings,
   createUnit,
   deleteUnit,
@@ -21,11 +23,13 @@ import {
   isProvisionalRuleset,
   removeElevationFeature,
   removeGroundCoverFeature,
+  removeLinearFeature,
   resizeBattlefield,
   rulesetCompatibilityNotice,
   unitDerived,
   updateElevationFeature,
   updateGroundCoverFeature,
+  updateLinearFeature,
   updateScenarioDescription,
   updateScenarioTitle,
   updateSideColor,
@@ -37,6 +41,7 @@ import {
   updateUnitTroopType,
   validateElevationCandidate,
   validateGroundCoverCandidate,
+  validateLinearCandidate,
   validateScenario,
 } from '../domain/scenario.js';
 import { polygonArea, round1 } from '../domain/geometry.js';
@@ -251,19 +256,25 @@ export default function Editor({
   // committed documents reach onChange, so every terrain change is one undo
   // step and refusals never touch the document.
   interface TerrainDraft {
-    kind: 'ground' | 'elevation';
+    kind: 'ground' | 'elevation' | 'linear';
     category: string;
     points: { x: number; y: number }[];
+    // A river or road draft carries its width in metres; polygon drafts leave
+    // it undefined. The width travels with the finished line.
+    width?: number;
     error: string;
   }
   const [terrainDraft, setTerrainDraft] = useState<TerrainDraft | null>(null);
   const [draftCategory, setDraftCategory] = useState<string>('forest');
+  const [draftLinearCategory, setDraftLinearCategory] = useState<string>('river');
+  const [draftLinearWidth, setDraftLinearWidth] = useState<string>('10');
   const [selectedTerrainId, setSelectedTerrainId] = useState<string | null>(null);
   const [selectedVertexIndex, setSelectedVertexIndex] = useState<number | null>(null);
   const [terrainRefusal, setTerrainRefusal] = useState<{
     ring: { x: number; y: number }[];
     reason: string;
     conflictId?: string | null;
+    kind?: 'ground' | 'elevation' | 'linear';
   } | null>(null);
 
   const units: ScenarioDocument[] = Array.isArray(document.units) ? document.units : [];
@@ -324,6 +335,9 @@ export default function Editor({
   );
   const hillFeatures: ScenarioDocument[] = (document.terrainFeatures || []).filter(
     (feature: any) => feature && feature.kind === 'elevation',
+  );
+  const linearFeatures: ScenarioDocument[] = (document.terrainFeatures || []).filter(
+    (feature: any) => feature && feature.kind === 'linear',
   );
   const selectedTerrain = terrainFeatureById(document, selectedTerrainId);
   const inTerrainMode = mode === 'map';
@@ -617,11 +631,27 @@ export default function Editor({
       : 'Ground cover';
   }
 
+  const LINEAR_LABELS: Record<string, string> = {
+    river: 'River',
+    road: 'Road',
+  };
+
+  function linearLabel(category: unknown): string {
+    return typeof category === 'string' && LINEAR_LABELS[category]
+      ? LINEAR_LABELS[category]
+      : 'River or road';
+  }
+
   const GROUND_FILLS_FOR_PANEL: Record<string, { fill: string }> = {
     forest: { fill: '#aebc9c' },
     rough: { fill: '#d8d2b8' },
     water: { fill: '#b3cece' },
     settlement: { fill: '#d8cbb2' },
+  };
+
+  const LINEAR_FILLS_FOR_PANEL: Record<string, { fill: string }> = {
+    river: { fill: '#7fb3c8' },
+    road: { fill: '#c9b98f' },
   };
 
   function terrainFeatureById(doc: ScenarioDocument, id: string | null): any {
@@ -630,7 +660,9 @@ export default function Editor({
       (doc?.terrainFeatures || []).find(
         (feature: any) =>
           feature?.id === id &&
-          (feature.kind === 'ground' || feature.kind === 'elevation'),
+          (feature.kind === 'ground' ||
+            feature.kind === 'elevation' ||
+            feature.kind === 'linear'),
       ) || null
     );
   }
@@ -648,13 +680,24 @@ export default function Editor({
     return (after?.terrainFeatures || []).find((feature: any) => feature && !ids.has(feature.id));
   }
 
-  function startTerrainDraft(kind: 'ground' | 'elevation') {
+  function startTerrainDraft(kind: 'ground' | 'elevation' | 'linear') {
     if (terrainDraft) return;
-    setTerrainDraft(
-      kind === 'elevation'
-        ? { kind: 'elevation', category: 'hill', points: [], error: '' }
-        : { kind: 'ground', category: draftCategory, points: [], error: '' },
-    );
+    if (kind === 'linear') {
+      const width = Number(draftLinearWidth);
+      setTerrainDraft({
+        kind: 'linear',
+        category: draftLinearCategory,
+        points: [],
+        width: Number.isFinite(width) && width > 0 ? width : 10,
+        error: '',
+      });
+    } else {
+      setTerrainDraft(
+        kind === 'elevation'
+          ? { kind: 'elevation', category: 'hill', points: [], error: '' }
+          : { kind: 'ground', category: draftCategory, points: [], error: '' },
+      );
+    }
     setSelectedTerrainId(null);
     setSelectedVertexIndex(null);
     setTerrainRefusal(null);
@@ -692,6 +735,54 @@ export default function Editor({
   function finishTerrainDraft() {
     if (!terrainDraft) return;
     const draft = terrainDraft;
+    // Rivers and roads are polylines with a width in metres: two vertices
+    // suffice, crossings are never refused, and only degenerate input or an
+    // invalid width stops the finish.
+    if (draft.kind === 'linear') {
+      if (draft.points.length < 2) {
+        setTerrainDraft({ ...draft, error: 'A river or road needs at least 2 vertices.' });
+        return;
+      }
+      const width = Number(draft.width);
+      if (!Number.isFinite(width) || width <= 0) {
+        setTerrainDraft({ ...draft, error: 'Width must be a positive number of metres.' });
+        return;
+      }
+      const check = validateLinearCandidate(document, draft.points);
+      if (!check.ok) {
+        const detail = check.reason ?? 'invalid shape';
+        const reason = `Cannot add a river or road: ${detail}.`;
+        setTerrainDraft({
+          ...draft,
+          error: `${detail[0].toUpperCase()}${detail.slice(1)}.`,
+        });
+        setTerrainRefusal({ ring: check.path, reason, kind: 'linear' });
+        return;
+      }
+      let next: ScenarioDocument;
+      try {
+        next = addLinearFeature(document, {
+          category: draft.category,
+          path: draft.points,
+          width,
+        });
+      } catch (error) {
+        const reason = errorMessage(error);
+        setTerrainDraft({ ...draft, error: reason });
+        setTerrainRefusal({ ring: draft.points, reason, kind: 'linear' });
+        return;
+      }
+      const added = addedTerrainFeature(document, next);
+      setDraftLinearCategory(draft.category);
+      setDraftLinearWidth(String(width));
+      setTerrainDraft(null);
+      setSelectedTerrainId(added ? added.id : null);
+      setSelectedVertexIndex(null);
+      setTerrainRefusal(null);
+      setFieldErrors({});
+      onChange(next);
+      return;
+    }
     if (draft.kind === 'elevation') {
       if (draft.points.length < 3) {
         setTerrainDraft({ ...draft, error: 'A hill needs at least 3 vertices.' });
@@ -783,15 +874,50 @@ export default function Editor({
     onChange(next);
   }
 
+  function commitLinearCategory(id: string, category: string) {
+    let next: ScenarioDocument;
+    try {
+      next = updateLinearFeature(document, id, { category });
+    } catch (error) {
+      const feature = terrainFeatureById(document, id);
+      setTerrainRefusal({
+        ring: Array.isArray(feature?.path) ? feature.path : [],
+        reason: errorMessage(error),
+        kind: 'linear',
+      });
+      return;
+    }
+    setTerrainRefusal(null);
+    setFieldErrors({});
+    onChange(next);
+  }
+
+  function commitLinearWidth(id: string, raw: string) {
+    const trimmed = raw.trim();
+    if (!trimmed || !Number.isFinite(Number(trimmed)) || Number(trimmed) <= 0) {
+      fail('terrain-linear-width', 'Width must be a positive number of metres.');
+      return;
+    }
+    try {
+      onChange(updateLinearFeature(document, id, { width: Number(trimmed) }));
+      setFieldErrors({});
+      setTerrainRefusal(null);
+    } catch (error) {
+      fail('terrain-linear-width', errorMessage(error));
+    }
+  }
+
   function deleteTerrainFeature(id: string) {
     const feature = terrainFeatureById(document, id);
     if (!feature) return;
     let next: ScenarioDocument;
     try {
       next =
-        feature.kind === 'elevation'
-          ? removeElevationFeature(document, id)
-          : removeGroundCoverFeature(document, id);
+        feature.kind === 'linear'
+          ? removeLinearFeature(document, id)
+          : feature.kind === 'elevation'
+            ? removeElevationFeature(document, id)
+            : removeGroundCoverFeature(document, id);
     } catch (error) {
       setTerrainRefusal({
         ring: Array.isArray(feature?.polygon) ? feature.polygon : [],
@@ -825,7 +951,35 @@ export default function Editor({
 
   function insertTerrainVertex(featureId: string, edgeIndex: number) {
     const feature = terrainFeatureById(document, featureId);
-    if (!feature || !Array.isArray(feature.polygon)) return;
+    if (!feature) return;
+    // A river or road is an open polyline: edges run between consecutive
+    // vertices only, never wrapping from the last back to the first.
+    if (feature.kind === 'linear') {
+      if (!Array.isArray(feature.path)) return;
+      const a = feature.path[edgeIndex];
+      const b = feature.path[edgeIndex + 1];
+      if (!a || !b) return;
+      const path = [
+        ...feature.path.slice(0, edgeIndex + 1),
+        { x: round1((a.x + b.x) / 2), y: round1((a.y + b.y) / 2) },
+        ...feature.path.slice(edgeIndex + 1),
+      ];
+      const check = validateLinearCandidate(document, path);
+      if (!check.ok) {
+        setTerrainRefusal({
+          ring: check.path,
+          reason: `Cannot insert a vertex: ${check.reason}.`,
+          kind: 'linear',
+        });
+        return;
+      }
+      setTerrainRefusal(null);
+      onChange(updateLinearFeature(document, featureId, { path: check.path }));
+      setSelectedTerrainId(featureId);
+      setSelectedVertexIndex(edgeIndex + 1);
+      return;
+    }
+    if (!Array.isArray(feature.polygon)) return;
     const ring = feature.polygon;
     const a = ring[edgeIndex];
     const b = ring[(edgeIndex + 1) % ring.length];
@@ -852,7 +1006,34 @@ export default function Editor({
 
   function deleteTerrainVertex(featureId: string, index: number) {
     const feature = terrainFeatureById(document, featureId);
-    if (!feature || !feature.polygon?.[index]) return;
+    if (!feature) return;
+    if (feature.kind === 'linear') {
+      if (!feature.path?.[index]) return;
+      if (feature.path.length <= 2) {
+        setTerrainRefusal({
+          ring: feature.path,
+          reason: 'A river or road needs at least 2 vertices: the vertex stays.',
+          kind: 'linear',
+        });
+        return;
+      }
+      const path = feature.path.filter((_: unknown, other: number) => other !== index);
+      const check = validateLinearCandidate(document, path);
+      if (!check.ok) {
+        setTerrainRefusal({
+          ring: check.path,
+          reason: `Cannot delete the vertex: ${check.reason}.`,
+          kind: 'linear',
+        });
+        return;
+      }
+      setTerrainRefusal(null);
+      onChange(updateLinearFeature(document, featureId, { path: check.path }));
+      setSelectedTerrainId(featureId);
+      setSelectedVertexIndex(null);
+      return;
+    }
+    if (!feature.polygon?.[index]) return;
     if (feature.polygon.length <= 3) {
       setTerrainRefusal({
         ring: feature.polygon,
@@ -885,7 +1066,28 @@ export default function Editor({
     point: { x: number; y: number },
   ) {
     const feature = terrainFeatureById(document, featureId);
-    if (!feature || !feature.polygon?.[index]) return;
+    if (!feature) return;
+    if (feature.kind === 'linear') {
+      if (!feature.path?.[index]) return;
+      const path = feature.path.map((vertex: { x: number; y: number }, other: number) =>
+        other === index ? { x: round1(point.x), y: round1(point.y) } : vertex,
+      );
+      const check = validateLinearCandidate(document, path);
+      if (!check.ok) {
+        setTerrainRefusal({
+          ring: check.path,
+          reason: `Cannot move the vertex: ${check.reason}.`,
+          kind: 'linear',
+        });
+        return;
+      }
+      setTerrainRefusal(null);
+      onChange(updateLinearFeature(document, featureId, { path: check.path }));
+      setSelectedTerrainId(featureId);
+      setSelectedVertexIndex(index);
+      return;
+    }
+    if (!feature.polygon?.[index]) return;
     const polygon = feature.polygon.map((vertex: { x: number; y: number }, other: number) =>
       other === index ? { x: round1(point.x), y: round1(point.y) } : vertex,
     );
@@ -1080,15 +1282,17 @@ export default function Editor({
           </div>
           {inTerrainMode ? (
             <div data-testid="terrain-panel">
-              <span className="eyebrow">GROUND COVER · HILLS</span>
+              <span className="eyebrow">GROUND COVER · HILLS · RIVERS AND ROADS</span>
               <h2>Terrain</h2>
               {terrainDraft ? (
                 <div className="terrain-drafting">
                   <p>
                     Drawing{' '}
-                    {terrainDraft.kind === 'elevation'
-                      ? 'hill'
-                      : groundCoverLabel(terrainDraft.category)}{' '}
+                    {terrainDraft.kind === 'linear'
+                      ? `${linearLabel(terrainDraft.category)} (${terrainDraft.width} m wide)`
+                      : terrainDraft.kind === 'elevation'
+                        ? 'hill'
+                        : groundCoverLabel(terrainDraft.category)}{' '}
                     — click the map to add vertices ({terrainDraft.points.length}).
                   </p>
                   {terrainDraft.error ? (
@@ -1101,7 +1305,11 @@ export default function Editor({
                       type="button"
                       className="btn-primary"
                       data-testid="terrain-draw-finish"
-                      disabled={terrainDraft.points.length < 3}
+                      disabled={
+                        terrainDraft.kind === 'linear'
+                          ? terrainDraft.points.length < 2
+                          : terrainDraft.points.length < 3
+                      }
                       onClick={finishTerrainDraft}
                     >
                       Finish (Enter)
@@ -1116,9 +1324,9 @@ export default function Editor({
                     </button>
                   </div>
                   <p className="terrain-hint">
-                    Enter finishes · Escape cancels · Backspace removes the last vertex. Shapes
-                    reaching past the edge are clipped to the battlefield; overlapping areas and
-                    hills that break nesting are refused, never auto-adjusted.
+                    {terrainDraft.kind === 'linear'
+                      ? 'Enter finishes · Escape cancels · Backspace removes the last vertex. Lines reaching past the edge are clipped to the battlefield; rivers and roads may cross areas and each other.'
+                      : 'Enter finishes · Escape cancels · Backspace removes the last vertex. Shapes reaching past the edge are clipped to the battlefield; overlapping areas and hills that break nesting are refused, never auto-adjusted.'}
                   </p>
                 </div>
               ) : (
@@ -1155,9 +1363,45 @@ export default function Editor({
                       Draw hill
                     </button>
                   </div>
+                  <label className="field">
+                    New river or road
+                    <select
+                      data-testid="terrain-new-linear-category"
+                      value={draftLinearCategory}
+                      onChange={(event) => setDraftLinearCategory(event.target.value)}
+                    >
+                      {LINEAR_FEATURE_CATEGORIES.map((category) => (
+                        <option key={category} value={category}>
+                          {linearLabel(category)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="field">
+                    Width (m)
+                    <input
+                      type="number"
+                      data-testid="terrain-new-linear-width"
+                      min={0.1}
+                      step={0.1}
+                      value={draftLinearWidth}
+                      onChange={(event) => setDraftLinearWidth(event.target.value)}
+                    />
+                  </label>
+                  <div className="terrain-actions">
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      data-testid="terrain-draw-linear"
+                      onClick={() => startTerrainDraft('linear')}
+                    >
+                      Draw river or road
+                    </button>
+                  </div>
                   <p className="terrain-hint">
                     Click vertices on the map, then finish from the keyboard. A refused shape is
-                    highlighted in red.
+                    highlighted in red. Rivers and roads may cross ground cover, elevation, and
+                    each other.
                   </p>
                 </>
               )}
@@ -1284,6 +1528,68 @@ export default function Editor({
                 Hills nest: a hill wholly inside level n becomes level n + 1. Crossing,
                 straddling, and self-intersecting shapes are refused. Deleting a hill promotes
                 its nested hills. Elevation is independent of ground cover.
+              </p>
+              <h3 className="terrain-subhead">Rivers and roads</h3>
+              {linearFeatures.length > 0 ? (
+                <ul className="terrain-list">
+                  {linearFeatures.map((feature) => {
+                    const selected = feature.id === selectedTerrainId;
+                    return (
+                      <li
+                        className={selected ? 'terrain-row selected' : 'terrain-row'}
+                        key={feature.id}
+                        data-testid="terrain-linear-row"
+                        data-category={feature.category}
+                      >
+                        <button
+                          type="button"
+                          className="terrain-select"
+                          data-testid="terrain-select"
+                          aria-pressed={selected}
+                          onClick={() => selectTerrain(feature.id)}
+                        >
+                          <span
+                            className="swatch"
+                            style={{
+                              background:
+                                (
+                                  LINEAR_FILLS_FOR_PANEL[feature.category] || { fill: '#cccccc' }
+                                ).fill,
+                            }}
+                            aria-hidden="true"
+                          />
+                          <span>
+                            <span className="unit-name">
+                              {linearLabel(feature.category)} · {feature.width} m
+                            </span>
+                            <span className="unit-detail">
+                              {feature.path.length} vertices · {feature.path.length - 1}{' '}
+                              {feature.path.length - 1 === 1 ? 'segment' : 'segments'}
+                            </span>
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-quiet btn-danger"
+                          data-testid="terrain-delete"
+                          title="Delete this river or road (undoable)"
+                          onClick={() => deleteTerrainFeature(feature.id)}
+                        >
+                          Delete
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : (
+                <p className="empty-terrain">
+                  No rivers or roads yet. Draw a river or road, give it a width in metres, and
+                  edit its vertices on the map.
+                </p>
+              )}
+              <p className="readonly-note">
+                Rivers and roads may cross ground cover, hills, and each other. Lines reaching
+                past the edge are clipped to the battlefield.
               </p>
             </div>
           ) : (
@@ -1453,6 +1759,7 @@ export default function Editor({
                     kind: terrainDraft.kind,
                     category: terrainDraft.category,
                     points: terrainDraft.points,
+                    width: terrainDraft.width,
                   }
                 : null
             }
@@ -1681,15 +1988,59 @@ export default function Editor({
           {terrainDraft ? (
             <section
               className="terrain-inspector"
-              aria-label={terrainDraft.kind === 'elevation' ? 'Hill being drawn' : 'Area being drawn'}
+              aria-label={
+                terrainDraft.kind === 'linear'
+                  ? 'River or road being drawn'
+                  : terrainDraft.kind === 'elevation'
+                    ? 'Hill being drawn'
+                    : 'Area being drawn'
+              }
               data-testid="terrain-inspector"
             >
               <h3>
-                {terrainDraft.kind === 'elevation'
-                  ? 'New hill'
-                  : `New ${groundCoverLabel(terrainDraft.category)} area`}
+                {terrainDraft.kind === 'linear'
+                  ? `New ${linearLabel(terrainDraft.category)}`
+                  : terrainDraft.kind === 'elevation'
+                    ? 'New hill'
+                    : `New ${groundCoverLabel(terrainDraft.category)} area`}
               </h3>
-              {terrainDraft.kind === 'elevation' ? (
+              {terrainDraft.kind === 'linear' ? (
+                <>
+                  <label className="field">
+                    Category
+                    <select
+                      data-testid="terrain-draft-linear-category"
+                      value={terrainDraft.category}
+                      onChange={(event) =>
+                        setTerrainDraft({ ...terrainDraft, category: event.target.value, error: '' })
+                      }
+                    >
+                      {LINEAR_FEATURE_CATEGORIES.map((category) => (
+                        <option key={category} value={category}>
+                          {linearLabel(category)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="field">
+                    Width (m)
+                    <input
+                      type="number"
+                      data-testid="terrain-draft-linear-width"
+                      min={0.1}
+                      step={0.1}
+                      value={String(terrainDraft.width ?? '')}
+                      onChange={(event) =>
+                        setTerrainDraft({
+                          ...terrainDraft,
+                          width: Number(event.target.value),
+                          error: '',
+                        })
+                      }
+                    />
+                  </label>
+                </>
+              ) : terrainDraft.kind === 'elevation' ? (
                 <div className="kv">
                   <dt>Level</dt>
                   <dd>Derived from nesting when finished (inside level n becomes level n + 1)</dd>
@@ -1715,7 +2066,8 @@ export default function Editor({
               <div className="kv">
                 <dt>Vertices</dt>
                 <dd>
-                  {terrainDraft.points.length} (at least 3 to finish)
+                  {terrainDraft.points.length}{' '}
+                  {terrainDraft.kind === 'linear' ? '(at least 2 to finish)' : '(at least 3 to finish)'}
                 </dd>
               </div>
               {terrainDraft.error ? (
@@ -1723,9 +2075,99 @@ export default function Editor({
                   {terrainDraft.error}
                 </p>
               ) : null}
+              {terrainDraft.kind === 'linear' ? (
+                <p className="terrain-hint">
+                  Set the category and width here; both travel with the finished line.
+                </p>
+              ) : null}
             </section>
           ) : null}
-          {selectedTerrain && !terrainDraft ? (
+          {selectedTerrain && selectedTerrain.kind === 'linear' && !terrainDraft ? (
+            <section
+              className="terrain-inspector"
+              aria-label="Selected river or road"
+              data-testid="terrain-inspector"
+            >
+              <h3>{linearLabel(selectedTerrain.category)}</h3>
+              <label className="field">
+                Category
+                <select
+                  data-testid="terrain-linear-category"
+                  value={selectedTerrain.category}
+                  onChange={(event) =>
+                    commitLinearCategory(selectedTerrain.id, event.target.value)
+                  }
+                >
+                  {LINEAR_FEATURE_CATEGORIES.map((category) => (
+                    <option key={category} value={category}>
+                      {linearLabel(category)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="field">
+                Width (m)
+                <DraftField
+                  testid="terrain-linear-width"
+                  type="number"
+                  min={0.1}
+                  step={0.1}
+                  value={String(selectedTerrain.width ?? '')}
+                  error={fieldErrors['terrain-linear-width'] ?? null}
+                  onCommit={(raw) => commitLinearWidth(selectedTerrain.id, raw)}
+                />
+              </label>
+              {fieldError('terrain-linear-width')}
+              <div className="kv">
+                <dt>Vertices</dt>
+                <dd>{selectedTerrain.path.length}</dd>
+              </div>
+              <ol className="terrain-vertex-list" data-testid="terrain-vertex-list">
+                {selectedTerrain.path.map(
+                  (point: { x: number; y: number }, index: number) => {
+                    const active = index === selectedVertexIndex;
+                    return (
+                      <li
+                        className={active ? 'terrain-vertex-row selected' : 'terrain-vertex-row'}
+                        key={index}
+                        data-testid="terrain-vertex-row"
+                      >
+                        <span className="mono">
+                          {index + 1}. ({point.x.toFixed(1)}, {point.y.toFixed(1)})
+                        </span>
+                        <button
+                          type="button"
+                          className="btn-quiet btn-danger"
+                          data-testid="terrain-vertex-delete"
+                          data-index={index}
+                          disabled={selectedTerrain.path.length <= 2}
+                          onClick={() => deleteTerrainVertex(selectedTerrain.id, index)}
+                        >
+                          Delete
+                        </button>
+                      </li>
+                    );
+                  },
+                )}
+              </ol>
+              <div className="terrain-actions">
+                <button
+                  type="button"
+                  className="btn-secondary btn-danger"
+                  data-testid="terrain-delete-feature"
+                  onClick={() => deleteTerrainFeature(selectedTerrain.id)}
+                >
+                  Delete river or road
+                </button>
+              </div>
+              <p className="terrain-hint">
+                Drag a vertex on the map · click a small edge dot to insert a vertex · select a
+                vertex and press Delete to remove it (at least two stay). Rivers and roads may
+                cross everything.
+              </p>
+            </section>
+          ) : null}
+          {selectedTerrain && selectedTerrain.kind !== 'linear' && !terrainDraft ? (
             <section
               className="terrain-inspector"
               aria-label={
