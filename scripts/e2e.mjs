@@ -117,7 +117,10 @@ try {
 }
 
 try {
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  const context = await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+    acceptDownloads: true,
+  });
   const page = await context.newPage();
   page.on('console', (message) => log(`browser console: ${message.text()}`));
   page.on('pageerror', (error) => log(`browser pageerror: ${String(error)}`));
@@ -483,6 +486,412 @@ try {
   await page.getByTestId('back-to-library').click();
   await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
   check('confirming the warning leaves the editor', true);
+  // The scenario library is complete and safe: duplicate, delete with
+  // confirmation, export/import round-trip, rejected files, save conflicts,
+  // quota failures, and ruleset/unknown-troop notices. The earlier
+  // unsaved-changes guard registered its own dialog handler, which has served
+  // its purpose; drop it so the handler below is the only one answering
+  // confirmation dialogs from here on.
+  page.removeAllListeners('dialog');
+  const dialogAction = { next: 'accept' };
+  page.on('dialog', async (dialog) => {
+    log(`browser dialog: ${dialog.type()} ${dialog.message()}`);
+    if (dialogAction.next === 'dismiss') {
+      await dialog.dismiss();
+    } else {
+      await dialog.accept();
+    }
+    dialogAction.next = 'accept';
+  });
+
+  // Duplicate creates a new copy; deleting it asks for confirmation.
+  // The previous section already left the editor, so the library is showing.
+  await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  const countBeforeDup = await page.getByTestId('scenario-row').count();
+  const dupRow = page.getByTestId('scenario-row').filter({ hasText: title });
+  await dupRow.getByTestId('duplicate-scenario').click();
+  await page.getByText(/Duplicated as/).waitFor({ timeout: 10000 });
+  await page.waitForFunction(
+    (expected) => document.querySelectorAll('[data-testid="scenario-row"]').length === expected,
+    countBeforeDup + 1,
+  );
+  check('duplicate adds a new copy', true, `rows=${countBeforeDup} → ${countBeforeDup + 1}`);
+  const dupTitles = await page.getByTestId('scenario-row-title').allTextContents();
+  check(
+    'duplicate suffixes the copy title',
+    dupTitles.some((entry) => entry === `${title} (copy)`),
+    dupTitles.join(' | '),
+  );
+  const copyRow = page.getByTestId('scenario-row').filter({ hasText: `${title} (copy)` });
+  dialogAction.next = 'dismiss';
+  await copyRow.getByTestId('delete-scenario').click();
+  await page.waitForTimeout(300);
+  check(
+    'delete asks for confirmation (dismiss keeps the copy)',
+    (await page.getByTestId('scenario-row').count()) === countBeforeDup + 1,
+  );
+  await copyRow.getByTestId('delete-scenario').click();
+  await page.getByText('Scenario deleted.').waitFor({ timeout: 10000 });
+  await page.waitForFunction(
+    (expected) => document.querySelectorAll('[data-testid="scenario-row"]').length === expected,
+    countBeforeDup,
+  );
+  check('delete with confirmation removes the copy', true);
+
+  // Export then import round-trips every value identical to 0.1 m; the import
+  // gets a new id.
+  await page.getByTestId('inspector-title').waitFor({ state: 'detached', timeout: 1000 }).catch(() => {});
+  const exportRow = page.getByTestId('scenario-row').filter({ hasText: title });
+  await exportRow.getByTestId('open-scenario').click();
+  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page.getByTestId('inspector-width').fill('1200.05');
+  await page.getByTestId('inspector-width').blur();
+  await page.getByTestId('save-scenario').click();
+  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  const exportUrl = new URL(page.url());
+  const exportedId = exportUrl.searchParams.get('scenario');
+  const [firstDownload] = await Promise.all([
+    page.waitForEvent('download', { timeout: 15000 }),
+    page.getByTestId('export-open-scenario').click(),
+  ]);
+  const firstPath = await firstDownload.path();
+  const firstJson = readFileSync(firstPath, 'utf8');
+  const firstDoc = JSON.parse(firstJson);
+  check(
+    'export rounds stored values to 0.1 m',
+    firstDoc.battlefield.width === 1200.1,
+    `width=${firstDoc.battlefield.width}`,
+  );
+  const roundTripFile = path.join(reportDir, 'round-trip.json');
+  writeFileSync(roundTripFile, firstJson);
+  await page.getByTestId('back-to-library').click();
+  await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  const libCountBefore = await page.getByTestId('scenario-row').count();
+  await page.getByTestId('import-file').setInputFiles(roundTripFile);
+  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  const importedUrl = new URL(page.url());
+  const importedId = importedUrl.searchParams.get('scenario');
+  check('import assigns a new id', !!importedId && importedId !== exportedId, `${exportedId} → ${importedId}`);
+  const importedWidth = await page.getByTestId('inspector-width').inputValue();
+  check('import round-trips values identical to 0.1 m', importedWidth === '1200.1', `width=${importedWidth}`);
+  await page.getByTestId('back-to-library').click();
+  await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  const libCountAfter = await page.getByTestId('scenario-row').count();
+  check('import stores a new copy', libCountAfter === libCountBefore + 1, `${libCountBefore} → ${libCountAfter}`);
+
+  // Malformed, wrong-kind, and newer-format files are rejected with specific
+  // messages and nothing is stored.
+  const badJson = path.join(reportDir, 'bad-json.json');
+  const badKind = path.join(reportDir, 'bad-kind.json');
+  const badVersion = path.join(reportDir, 'bad-version.json');
+  writeFileSync(badJson, '{{{ not json');
+  writeFileSync(badKind, `${JSON.stringify({ kind: 'battle', formatVersion: 1, title: 'Nope' })}\n`);
+  writeFileSync(
+    badVersion,
+    `${JSON.stringify({ kind: 'scenario', formatVersion: 99, title: 'Future', ruleset: { id: 'polis-classical', version: '0.1' } })}\n`,
+  );
+  const rowsBeforeBad = await page.getByTestId('scenario-row').count();
+  await page.getByTestId('import-file').setInputFiles(badJson);
+  await page.waitForFunction(
+    (text) => document.querySelector('[data-testid="import-error"]')?.textContent?.includes(text),
+    'not valid JSON',
+  );
+  const badJsonMsg = await page.getByTestId('import-error').textContent();
+  check('malformed file is rejected whole', /not valid JSON/i.test(badJsonMsg ?? ''), badJsonMsg ?? '');
+  await page.getByTestId('import-file').setInputFiles(badKind);
+  await page.waitForFunction(
+    (text) => document.querySelector('[data-testid="import-error"]')?.textContent?.includes(text),
+    'not a scenario',
+  );
+  const badKindMsg = await page.getByTestId('import-error').textContent();
+  check('wrong-kind file is rejected whole', /not a scenario/i.test(badKindMsg ?? ''), badKindMsg ?? '');
+  await page.getByTestId('import-file').setInputFiles(badVersion);
+  await page.waitForFunction(
+    (text) => document.querySelector('[data-testid="import-error"]')?.textContent?.includes(text),
+    'newer than the supported version',
+  );
+  const badVersionMsg = await page.getByTestId('import-error').textContent();
+  check(
+    'newer-format file is rejected whole',
+    /newer than the supported version/i.test(badVersionMsg ?? ''),
+    badVersionMsg ?? '',
+  );
+  check(
+    'rejected files store nothing',
+    (await page.getByTestId('scenario-row').count()) === rowsBeforeBad,
+    `rows=${rowsBeforeBad}`,
+  );
+
+  // Ruleset mismatch and unknown troop-type notices appear as in the tracer.
+  const olderRuleset = {
+    kind: 'scenario',
+    formatVersion: 1,
+    id: '00000000-0000-4000-8000-000000000001',
+    title: 'E2E Older Ruleset',
+    description: '',
+    battlefield: { width: 1200, height: 800 },
+    sides: [
+      { id: 'side-a', name: 'Athenians', color: '#1d4ed8' },
+      { id: 'side-b', name: 'Spartans', color: '#b91c1c' },
+    ],
+    ruleset: { id: 'polis-classical', version: '0.0' },
+    units: [],
+    terrainFeatures: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  const olderFile = path.join(reportDir, 'older-ruleset.json');
+  writeFileSync(olderFile, `${JSON.stringify(olderRuleset, null, 2)}\n`);
+  await page.getByTestId('import-file').setInputFiles(olderFile);
+  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  check('older ruleset imports against the current catalogue', true);
+  const rulesetNotice = await page.getByTestId('ruleset-notice').textContent().catch(() => null);
+  check(
+    'editor shows the ruleset mismatch notice',
+    !!rulesetNotice && /Saving rebinds/i.test(rulesetNotice),
+    rulesetNotice ?? 'no notice',
+  );
+  check(
+    'editor badges the provisional ruleset',
+    await page.getByTestId('provisional-badge').isVisible().catch(() => false),
+  );
+  await page.getByTestId('back-to-library').click();
+  await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+
+  const unknownTroop = {
+    kind: 'scenario',
+    formatVersion: 1,
+    id: '00000000-0000-4000-8000-000000000002',
+    title: 'E2E Unknown Troop',
+    description: '',
+    battlefield: { width: 1200, height: 800 },
+    sides: [
+      { id: 'side-a', name: 'Athenians', color: '#1d4ed8' },
+      { id: 'side-b', name: 'Spartans', color: '#b91c1c' },
+    ],
+    ruleset: { id: 'polis-classical', version: '0.1' },
+    units: [
+      {
+        id: '00000000-0000-4000-8000-000000000011',
+        name: 'Mystery Unit',
+        side: 'side-a',
+        troopType: 'mystery-phalanx-xyz',
+        soldiers: 100,
+        files: 10,
+        lateralInterval: 1.8,
+        rankDepth: 1.8,
+        position: { x: 600, y: 400 },
+        facing: 0,
+      },
+    ],
+    terrainFeatures: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  const unknownFile = path.join(reportDir, 'unknown-troop.json');
+  writeFileSync(unknownFile, `${JSON.stringify(unknownTroop, null, 2)}\n`);
+  await page.getByTestId('import-file').setInputFiles(unknownFile);
+  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  const troopWarning = await page.getByTestId('unknown-troop-warning').textContent().catch(() => null);
+  check(
+    'editor warns about the unknown troop type',
+    !!troopWarning && /unknown troop type/i.test(troopWarning),
+    troopWarning ?? 'no warning',
+  );
+  check(
+    'order of battle marks the unknown troop type',
+    await page.getByTestId('unknown-troop-badge').isVisible().catch(() => false),
+  );
+  await page.getByTestId('back-to-library').click();
+  await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+
+  // Stored records with an unknown ruleset or a newer format list as
+  // unreadable with their cause and offer only raw export or delete.
+  await page.evaluate(() => new Promise((resolve, reject) => {
+    const open = indexedDB.open('polis-scenarios', 1);
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const db = open.result;
+      const tx = db.transaction('scenarios', 'readwrite');
+      const store = tx.objectStore('scenarios');
+      const now = new Date().toISOString();
+      const base = {
+        kind: 'scenario',
+        formatVersion: 1,
+        title: 'E2E Foreign Ruleset',
+        description: '',
+        battlefield: { width: 1200, height: 800 },
+        sides: [
+          { id: 'side-a', name: 'Athenians', color: '#1d4ed8' },
+          { id: 'side-b', name: 'Spartans', color: '#b91c1c' },
+        ],
+        units: [],
+        terrainFeatures: [],
+        createdAt: now,
+        updatedAt: now,
+      };
+      const foreign = { ...base, id: '00000000-0000-4000-8000-000000000021', ruleset: { id: 'other-rules', version: '1.0' } };
+      const future = {
+        ...base,
+        id: '00000000-0000-4000-8000-000000000022',
+        title: 'E2E Future Format',
+        formatVersion: 99,
+        ruleset: { id: 'polis-classical', version: '0.1' },
+      };
+      store.put({ id: foreign.id, document: foreign, revision: 1, updatedAt: now });
+      store.put({ id: future.id, document: future, revision: 1, updatedAt: now });
+      tx.oncomplete = () => { db.close(); resolve(undefined); };
+      tx.onerror = () => reject(tx.error);
+    };
+  }));
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.getByTestId('scenario-list').waitFor({ timeout: 15000 });
+  const foreignRow = page.getByTestId('scenario-row').filter({ hasText: 'E2E Foreign Ruleset' });
+  const foreignCause = await foreignRow.getByTestId('scenario-row-cause').textContent().catch(() => null);
+  check(
+    'library lists the unknown ruleset with its cause',
+    !!foreignCause && /unknown ruleset/i.test(foreignCause),
+    foreignCause ?? 'no cause',
+  );
+  check(
+    'unreadable entries offer only raw export or delete',
+    (await foreignRow.getByTestId('export-raw-scenario').count()) === 1 &&
+      (await foreignRow.getByTestId('open-scenario').count()) === 0 &&
+      (await foreignRow.getByTestId('duplicate-scenario').count()) === 0,
+  );
+  const futureRow = page.getByTestId('scenario-row').filter({ hasText: 'E2E Future Format' });
+  const futureCause = await futureRow.getByTestId('scenario-row-cause').textContent().catch(() => null);
+  check(
+    'library lists the newer format with its cause',
+    !!futureCause && /newer/i.test(futureCause),
+    futureCause ?? 'no cause',
+  );
+
+  // A two-tab save conflict is detected and the author chooses how to
+  // proceed; nothing is silently overwritten.
+  await page.getByTestId('new-scenario-title').fill(`Conflict Probe ${Date.now()}`);
+  await page.getByTestId('new-scenario-submit').click();
+  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  const conflictId = new URL(page.url()).searchParams.get('scenario');
+  check('conflict probe opens', !!conflictId, String(conflictId));
+  await page.getByTestId('save-scenario').click();
+  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  const page2 = await context.newPage();
+  page2.on('console', (message) => log(`browser2 console: ${message.text()}`));
+  page2.on('pageerror', (error) => log(`browser2 pageerror: ${String(error)}`));
+  await page2.goto(`${base}/?scenario=${encodeURIComponent(conflictId)}`, { waitUntil: 'networkidle' });
+  await page2.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page2.getByTestId('inspector-title').fill('Conflict Other Tab');
+  await page2.getByTestId('inspector-title').blur();
+  await page2.getByTestId('save-scenario').click();
+  await page2.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await page.getByTestId('inspector-title').fill('Conflict Mine');
+  await page.getByTestId('inspector-title').blur();
+  await page.getByTestId('save-scenario').click();
+  await page.getByTestId('conflict-dialog').waitFor({ timeout: 10000 });
+  const conflictText = await page.getByTestId('conflict-dialog').textContent();
+  const conflictRevs = [...(conflictText ?? '').matchAll(/revision (\d+)/g)].map((match) => match[1]);
+  check(
+    'two-tab save conflict is detected',
+    conflictRevs.length >= 2 && conflictRevs[0] !== conflictRevs[1],
+    (conflictText ?? '').replace(/\s+/g, ' ').slice(0, 200),
+  );
+  await page.getByTestId('conflict-cancel').click();
+  await page.waitForTimeout(300);
+  check('cancel keeps the conflicted edits without storing', !(await page.getByTestId('conflict-dialog').count()));
+  await page2.reload({ waitUntil: 'networkidle' });
+  await page2.getByTestId('editor').waitFor({ timeout: 15000 });
+  const storedAfterCancel = await page2.getByTestId('inspector-title').inputValue();
+  check('nothing is silently overwritten on cancel', storedAfterCancel === 'Conflict Other Tab', storedAfterCancel);
+  await page.getByTestId('save-scenario').click();
+  await page.getByTestId('conflict-dialog').waitFor({ timeout: 10000 });
+  await page.getByTestId('conflict-overwrite').click();
+  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  check('overwrite resolves the conflict', !(await page.getByTestId('conflict-dialog').count()));
+  const overwriteStatus = await page.getByTestId('save-status').textContent();
+  check('overwrite reports the saved state', overwriteStatus === 'Saved', `status=${overwriteStatus}`);
+  await page2.getByTestId('inspector-title').fill('Conflict Stale Tab');
+  await page2.getByTestId('inspector-title').blur();
+  await page2.getByTestId('save-scenario').click();
+  await page2.getByTestId('conflict-dialog').waitFor({ timeout: 10000 });
+  await page2.getByTestId('conflict-copy').click();
+  await page2.getByText(/Saved as a new copy/).waitFor({ timeout: 10000 });
+  const copyId = new URL(page2.url()).searchParams.get('scenario');
+  check('save as copy keeps both versions', !!copyId && copyId !== conflictId, `${conflictId} → ${copyId}`);
+  await page2.close();
+
+  // A quota failure is reported without losing the open scenario.
+  await page.evaluate(() => {
+    const proto = IDBObjectStore.prototype;
+    const original = proto.put;
+    let fired = false;
+    proto.put = function put(...args) {
+      if (!fired) {
+        fired = true;
+        proto.put = original;
+        const failure = new Error('QuotaExceededError: storage is full');
+        failure.name = 'QuotaExceededError';
+        throw failure;
+      }
+      return original.apply(this, args);
+    };
+  });
+  await page.getByTestId('inspector-title').fill('Conflict Mine Quota');
+  await page.getByTestId('inspector-title').blur();
+  await page.getByTestId('save-scenario').click();
+  await page.getByTestId('save-error').waitFor({ timeout: 10000 });
+  const quotaMsg = await page.getByTestId('save-error').textContent();
+  check(
+    'quota failure is reported without losing edits',
+    /quota/i.test(quotaMsg ?? '') || /storage is full/i.test(quotaMsg ?? ''),
+    quotaMsg ?? 'no message',
+  );
+  check(
+    'open scenario survives the quota failure',
+    (await page.getByTestId('inspector-title').inputValue()) === 'Conflict Mine Quota' &&
+      (await page.getByTestId('unsaved-pill').count()) === 1,
+  );
+  await page.getByTestId('save-scenario').click();
+  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  check('save succeeds after the quota failure', true);
+
+  // A refused persistent-storage request is reported in the library.
+  const storageContext = await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+    acceptDownloads: true,
+  });
+  await storageContext.addInitScript(() => {
+    try {
+      Object.defineProperty(navigator, 'storage', {
+        value: {
+          persist: async () => false,
+          persisted: async () => false,
+        },
+        configurable: true,
+      });
+    } catch {
+      // The storage note simply stays silent when it cannot be stubbed.
+    }
+  });
+  const storagePage = await storageContext.newPage();
+  storagePage.on('console', (message) => log(`storage console: ${message.text()}`));
+  storagePage.on('pageerror', (error) => log(`storage pageerror: ${String(error)}`));
+  await storagePage.goto(`${base}/`, { waitUntil: 'networkidle' });
+  await storagePage.getByTestId('app').waitFor({ timeout: 15000 });
+  await storagePage.getByTestId('new-scenario-title').fill(`Storage Probe ${Date.now()}`);
+  await storagePage.getByTestId('new-scenario-submit').click();
+  await storagePage.getByTestId('editor').waitFor({ timeout: 15000 });
+  await storagePage.getByTestId('save-scenario').click();
+  await storagePage.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await storagePage.getByTestId('back-to-library').click();
+  await storagePage.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  const storageNote = await storagePage.getByTestId('storage-note').textContent();
+  check(
+    'refused persistent storage is reported',
+    /refused|evicted|only backup/i.test(storageNote ?? ''),
+    (storageNote ?? '').replace(/\s+/g, ' ').slice(0, 200),
+  );
+  await storageContext.close();
 
   await context.close();
 } catch (error) {

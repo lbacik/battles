@@ -1,13 +1,21 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import BattlefieldMap from './battlefield-map';
 import {
+  collectUnknownTroopTypeWarnings,
+  isKnownTroopType,
+} from '../domain/polis-classical.js';
+import {
+  collectWarnings,
+  isProvisionalRuleset,
   resizeBattlefield,
+  rulesetCompatibilityNotice,
   updateScenarioDescription,
   updateScenarioTitle,
   updateSideColor,
   updateSideName,
+  validateScenario,
 } from '../domain/scenario.js';
 
 type ScenarioDocument = any;
@@ -23,6 +31,7 @@ interface EditorProps {
   onUndo: () => void;
   onRedo: () => void;
   onSave: () => Promise<void>;
+  onExport: () => void;
   onBack: () => void;
 }
 
@@ -148,6 +157,7 @@ export default function Editor({
   onUndo,
   onRedo,
   onSave,
+  onExport,
   onBack,
 }: EditorProps) {
   const [mode, setMode] = useState<'battle' | 'map'>('battle');
@@ -172,9 +182,41 @@ export default function Editor({
   })();
   const unitsForSide = (sideId: unknown): ScenarioDocument[] =>
     typeof sideId === 'string' ? (unitsBySide.get(sideId) ?? []) : [];
-  const warnings = sides
-    .filter((side) => unitsForSide(side?.id).length === 0)
-    .map((side) => `Side "${side?.name ?? side?.id}" has no units`);
+  // Issues panel, as in the tracer: structural errors block saving while
+  // completeness warnings, unknown troop-type warnings, and the ruleset
+  // notice never do. Saving stays allowed with warnings; the editor keeps
+  // unknown keys verbatim. The completeness warnings include the empty-side
+  // notices, so this memo subsumes the per-side check.
+  const { errors, warnings, catalogueWarnings, rulesetNotice } = useMemo(() => {
+    let errors: string[] = [];
+    let warnings: string[] = [];
+    try {
+      errors = validateScenario(document);
+    } catch {
+      errors = ['Scenario cannot be read.'];
+    }
+    try {
+      warnings = collectWarnings(document);
+    } catch {
+      warnings = [];
+    }
+    let catalogueWarnings: string[] = [];
+    try {
+      catalogueWarnings = collectUnknownTroopTypeWarnings(document);
+    } catch {
+      catalogueWarnings = [];
+    }
+    let rulesetNotice: string | null = null;
+    try {
+      rulesetNotice = rulesetCompatibilityNotice(document.ruleset);
+    } catch {
+      rulesetNotice = null;
+    }
+    return { errors, warnings, catalogueWarnings, rulesetNotice };
+  }, [document]);
+  const notices = rulesetNotice ? [rulesetNotice] : [];
+  const issueCount = errors.length + warnings.length + catalogueWarnings.length + notices.length;
+  const provisional = isProvisionalRuleset(document?.ruleset);
 
   // Unlimited session undo/redo over the scenario history, which never
   // includes selection or view state. The shortcut works from anywhere in the
@@ -287,6 +329,15 @@ export default function Editor({
           {document.title}
         </div>
         <span className="spacer" style={{ flex: 1 }} />
+        {provisional ? (
+          <span
+            className="provisional-badge"
+            data-testid="provisional-badge"
+            title="This scenario references a provisional 0.x ruleset version."
+          >
+            Provisional ruleset
+          </span>
+        ) : null}
         {dirty ? (
           <span className="dirty-pill" data-testid="unsaved-pill">
             <span className="dirty-dot" aria-hidden="true" />
@@ -318,6 +369,14 @@ export default function Editor({
         </button>
         <button
           type="button"
+          className="btn-secondary"
+          data-testid="export-open-scenario"
+          onClick={onExport}
+        >
+          Export
+        </button>
+        <button
+          type="button"
           className="btn-primary"
           data-testid="save-scenario"
           disabled={saving}
@@ -327,7 +386,12 @@ export default function Editor({
         </button>
       </div>
       {saveError ? (
-        <p className="validation" role="alert" style={{ margin: '12px 28px 0' }}>
+        <p
+          className="validation"
+          role="alert"
+          data-testid="save-error"
+          style={{ margin: '12px 28px 0' }}
+        >
           {saveError}
         </p>
       ) : null}
@@ -381,12 +445,25 @@ export default function Editor({
                 {sideUnits.length === 0 ? (
                   <p className="empty-oob">No units yet.</p>
                 ) : (
-                  sideUnits.map((unit) => (
-                    <div className="side-name" key={unit?.id ?? unit?.name}>
-                      <span className="swatch" style={{ background: side?.color ?? '#888' }} />
-                      {unit?.name}
-                    </div>
-                  ))
+                  sideUnits.map((unit) => {
+                    const unknownTroop = !isKnownTroopType(unit?.troopType);
+                    return (
+                      <div key={unit?.id ?? unit?.name}>
+                        <div className="side-name">
+                          <span
+                            className="swatch"
+                            style={{ background: unknownTroop ? '#9aa0a6' : (side?.color ?? '#888') }}
+                          />
+                          {unit?.name}
+                        </div>
+                        {unknownTroop ? (
+                          <p className="unknown-badge" data-testid="unknown-troop-badge">
+                            Unknown troop type &ldquo;{unit?.troopType}&rdquo; · preserved
+                          </p>
+                        ) : null}
+                      </div>
+                    );
+                  })
                 )}
               </section>
             );
@@ -516,16 +593,34 @@ export default function Editor({
             </div>
           </dl>
           <div className="issues" data-testid="issues-panel">
-            <h3>Issues</h3>
-            {warnings.length ? (
-              warnings.map((warning) => (
-                <p className="issue issue-warning" data-testid="issue-warning" key={warning}>
-                  {warning}
-                </p>
-              ))
-            ) : (
-              <p className="issues-note">No warnings.</p>
-            )}
+            <h3>
+              Issues{issueCount ? <span data-testid="issue-count"> {issueCount}</span> : null}
+            </h3>
+            {errors.map((problem) => (
+              <p className="issue issue-error" data-testid="issue-error" key={problem}>
+                {problem}
+              </p>
+            ))}
+            {warnings.map((warning) => (
+              <p className="issue issue-warning" data-testid="issue-warning" key={warning}>
+                {warning}
+              </p>
+            ))}
+            {catalogueWarnings.map((warning) => (
+              <p
+                className="issue issue-warning"
+                data-testid="unknown-troop-warning"
+                key={warning}
+              >
+                {warning}
+              </p>
+            ))}
+            {notices.map((notice) => (
+              <p className="issue issue-info" data-testid="ruleset-notice" key={notice}>
+                {notice}
+              </p>
+            ))}
+            {issueCount === 0 ? <p className="issues-note">No warnings.</p> : null}
           </div>
         </aside>
       </main>
