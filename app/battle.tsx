@@ -63,10 +63,6 @@ type OrderDraft =
   | { key: string; unitId: string; kind: 'Withdraw' }
   | { key: string; unitId: string; kind: 'Rally' };
 
-// Move drafts predate the union: the only leg-bearing draft kind besides
-// Charge approaches (which always carry a destination).
-type MoveDraft = Extract<OrderDraft, { kind: 'Move' }>;
-
 interface BattleScreenProps {
   battle: BattleDocument;
   announcement: string | null;
@@ -200,6 +196,22 @@ export default function BattleScreen({
     return (actionsEntryFor(unitId)?.permitted || []).map((item: any) => item.kind);
   }
 
+  // Charge and shoot candidates for a unit from the available actions: hints,
+  // not guarantees — earlier orders in the same turn can still block them.
+  // The map highlights them for the selected unit; clicking one drafts the
+  // order. Spacing presets come from the installed troop catalogue, in metres.
+  function chargeCandidatesOf(unitId: string): any[] {
+    return actionsEntryFor(unitId)?.chargeCandidates || [];
+  }
+
+  function shootCandidatesOf(unitId: string): any[] {
+    return actionsEntryFor(unitId)?.shootCandidates || [];
+  }
+
+  function spacingPresetsOf(unit: any): Record<string, any> | null {
+    return getTroopType(unit?.troopType)?.presets || null;
+  }
+
   // The draft submission in draft order, one order per draft. Every kind the
   // inspector can draft maps to the order shape the engine validates.
   const draftSubmission = useMemo(() => {
@@ -272,15 +284,308 @@ export default function BattleScreen({
     return verdicts.find((verdict: any) => verdict?.orderIndex === index) || null;
   }
 
+  // Per-kind draft editor for the selected unit: Move legs on the map with a
+  // facing field, Charge target/edge selects with optional approach legs,
+  // Shoot target select, Reform form with spacing presets, and Withdraw and
+  // Rally in place. Every change re-validates through the engine.
+  function draftEditor(unit: any) {
+    const draft = draftForUnit(unit.id);
+    if (!draft) return null;
+    const removeRow = (
+      <div className="draft-actions">
+        <button
+          type="button"
+          className="btn-quiet btn-danger"
+          onClick={() => removeDraft(unit.id)}
+        >
+          Remove order
+        </button>
+      </div>
+    );
+    if (draft.kind === 'Move') {
+      const legs = draft.legs;
+      return (
+        <section aria-label="Move draft" data-testid={`draft-editor-${unit.id}`}>
+          <span className="eyebrow">MOVE DRAFT</span>
+          <ol className="leg-list">
+            {legs.length === 0 ? (
+              <li className="leg-empty">No legs yet — click the map for leg 1.</li>
+            ) : (
+              legs.map((leg: any, index: number) => (
+                <li key={index}>
+                  Leg {index + 1}:{' '}
+                  {leg.to ? `(${leg.to.x.toFixed(1)}, ${leg.to.y.toFixed(1)})` : 'rotation only'}
+                  {leg.face !== null && leg.face !== undefined ? ` · face ${leg.face}°` : ''}
+                </li>
+              ))
+            )}
+          </ol>
+          <p className="draft-hint">
+            Click the map for leg {legs.length + 1} (up to {MAX_MOVE_LEGS}) · drag the round
+            handle or type a facing to rotate about the front midpoint.
+          </p>
+          <label className="field">
+            Facing (°)
+            <input
+              type="number"
+              data-testid={`draft-facing-${unit.id}`}
+              min={0}
+              max={360}
+              step={1}
+              value={
+                [...legs]
+                  .reverse()
+                  .find((leg: any) => leg.face !== null && leg.face !== undefined)?.face ?? ''
+              }
+              placeholder="—"
+              onChange={(event) => setDraftFacing(unit.id, event.target.value)}
+            />
+          </label>
+          <div className="draft-actions">
+            <button
+              type="button"
+              className="btn-secondary"
+              data-testid={`remove-last-leg-${unit.id}`}
+              disabled={legs.length === 0}
+              onClick={() => removeLastDraftLeg(unit.id)}
+            >
+              Undo leg
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              data-testid={`clear-legs-${unit.id}`}
+              disabled={legs.length === 0}
+              onClick={() => clearDraftLegs(unit.id)}
+            >
+              Clear legs
+            </button>
+          </div>
+        </section>
+      );
+    }
+    if (draft.kind === 'Charge') {
+      const candidates = chargeCandidatesOf(unit.id);
+      const approach = draft.approach;
+      return (
+        <section aria-label="Charge draft" data-testid={`draft-editor-${unit.id}`}>
+          <span className="eyebrow">CHARGE DRAFT</span>
+          <label className="field">
+            Target
+            <select
+              data-testid={`charge-target-${unit.id}`}
+              value={draft.targetId}
+              onChange={(event) => setChargeTarget(unit.id, event.target.value)}
+            >
+              {candidates.map((candidate: any) => (
+                <option key={candidate.targetId} value={candidate.targetId}>
+                  {unitDisplayName(candidate.targetId)} · {candidate.distanceM} m
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            Edge
+            <select
+              data-testid={`charge-edge-${unit.id}`}
+              value={draft.edge}
+              onChange={(event) => setChargeEdge(unit.id, event.target.value)}
+            >
+              {CHARGE_EDGES.map((edge: string) => (
+                <option key={edge} value={edge}>
+                  {edge}
+                </option>
+              ))}
+            </select>
+          </label>
+          <ol className="leg-list">
+            {approach.length === 0 ? (
+              <li className="leg-empty">
+                No approach legs — a direct charge, or click the map for approach 1.
+              </li>
+            ) : (
+              approach.map((leg: any, index: number) => (
+                <li key={index}>
+                  Approach {index + 1}: ({leg.to.x.toFixed(1)}, {leg.to.y.toFixed(1)})
+                </li>
+              ))
+            )}
+          </ol>
+          <p className="draft-hint">
+            Click the map for approach {approach.length + 1} (up to {MAX_APPROACH_LEGS},
+            optional). The ghost shows the flush contact position.
+          </p>
+          <div className="draft-actions">
+            <button
+              type="button"
+              className="btn-secondary"
+              data-testid={`remove-last-approach-${unit.id}`}
+              disabled={approach.length === 0}
+              onClick={() => removeLastApproachLeg(unit.id)}
+            >
+              Undo approach
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              data-testid={`clear-approach-${unit.id}`}
+              disabled={approach.length === 0}
+              onClick={() => clearApproachLegs(unit.id)}
+            >
+              Clear approach
+            </button>
+            <button
+              type="button"
+              className="btn-quiet btn-danger"
+              onClick={() => removeDraft(unit.id)}
+            >
+              Remove order
+            </button>
+          </div>
+        </section>
+      );
+    }
+    if (draft.kind === 'Shoot') {
+      const candidates = shootCandidatesOf(unit.id);
+      return (
+        <section aria-label="Shoot draft" data-testid={`draft-editor-${unit.id}`}>
+          <span className="eyebrow">SHOOT DRAFT</span>
+          <label className="field">
+            Target
+            <select
+              data-testid={`shoot-target-${unit.id}`}
+              value={draft.targetId}
+              onChange={(event) => setShootTarget(unit.id, event.target.value)}
+            >
+              {candidates.map((candidate: any) => (
+                <option key={candidate.targetId} value={candidate.targetId}>
+                  {unitDisplayName(candidate.targetId)} · {candidate.distanceM} m
+                </option>
+              ))}
+            </select>
+          </label>
+          <p className="draft-hint">
+            A Shoot never moves: the line marks the shot, and the Shooting phase resolves it.
+          </p>
+          {removeRow}
+        </section>
+      );
+    }
+    if (draft.kind === 'Reform') {
+      const presets = spacingPresetsOf(unit);
+      return (
+        <section aria-label="Reform draft" data-testid={`draft-editor-${unit.id}`}>
+          <span className="eyebrow">REFORM DRAFT</span>
+          <label className="field">
+            Files
+            <input
+              type="number"
+              data-testid={`reform-files-${unit.id}`}
+              min={1}
+              step={1}
+              value={draft.files ?? ''}
+              onChange={(event) => setReformField(unit.id, 'files', event.target.value)}
+            />
+          </label>
+          <label className="field">
+            Lateral interval (m)
+            <input
+              type="number"
+              data-testid={`reform-lateral-${unit.id}`}
+              min={0.1}
+              step={0.1}
+              value={draft.lateralInterval ?? ''}
+              onChange={(event) => setReformField(unit.id, 'lateralInterval', event.target.value)}
+            />
+          </label>
+          <label className="field">
+            Rank depth (m)
+            <input
+              type="number"
+              data-testid={`reform-depth-${unit.id}`}
+              min={0.1}
+              step={0.1}
+              value={draft.rankDepth ?? ''}
+              onChange={(event) => setReformField(unit.id, 'rankDepth', event.target.value)}
+            />
+          </label>
+          <div className="preset-row">
+            <span className="field-label">Spacing presets</span>
+            <div className="handoff-actions">
+              {presets ? (
+                Object.entries(presets).map(([name, preset]: [string, any]) => (
+                  <button
+                    key={name}
+                    type="button"
+                    className="btn-quiet"
+                    data-testid={`apply-preset-${unit.id}-${name}`}
+                    title={`Set ${name} spacing (${preset.lateralInterval} × ${preset.rankDepth} m)`}
+                    onClick={() => applyReformPreset(unit.id, name)}
+                  >
+                    {name} ({preset.lateralInterval}×{preset.rankDepth})
+                  </button>
+                ))
+              ) : (
+                <span className="draft-hint">No presets for this troop type.</span>
+              )}
+            </div>
+          </div>
+          <p className="draft-hint">
+            The reform anchors at the front midpoint and takes the whole turn. The ghost shows
+            the new footprint.
+          </p>
+          {removeRow}
+        </section>
+      );
+    }
+    if (draft.kind === 'Withdraw') {
+      return (
+        <section aria-label="Withdraw draft" data-testid={`draft-editor-${unit.id}`}>
+          <span className="eyebrow">WITHDRAW DRAFT</span>
+          <p className="draft-hint">
+            Withdraws straight back without turning and breaks every contact. The ghost shows
+            the step back; cohesion is tested by chance on resolution.
+          </p>
+          {removeRow}
+        </section>
+      );
+    }
+    return (
+      <section aria-label="Rally draft" data-testid={`draft-editor-${unit.id}`}>
+        <span className="eyebrow">RALLY DRAFT</span>
+        <p className="draft-hint">
+          Rallies in place and never moves. A Disordered unit regains cohesion; a Routed unit
+          attempts only with no enemy near.
+        </p>
+        {removeRow}
+      </section>
+    );
+  }
+
   // Units named as the conflict by a rejection, drawn as map highlights: the
-  // collision partner (`details.withUnitId`). The rejected unit itself is
-  // outlined by its draft row; only the other party highlights on the map.
+  // collision partner (`details.withUnitId`), the charge or shoot target
+  // (`details.targetId`), a line-of-fire blocker (`details.blockedBy`), or
+  // the nearest enemy a rally objects to (`details.nearestEnemyId`). The
+  // rejected unit itself is outlined by its draft row; the other parties
+  // highlight on the map.
   function conflictUnitIds(): Set<string> {
     const ids = new Set<string>();
+    const unitIds = new Set(units.map((unit: any) => unit?.id));
     for (const verdict of validation?.verdicts || []) {
       const details = verdict?.accepted === false ? verdict?.rejection?.details : null;
       if (!details) continue;
       if (typeof details.withUnitId === 'string') ids.add(details.withUnitId);
+      if (
+        typeof details.targetId === 'string' &&
+        details.targetId !== verdict.unitId &&
+        unitIds.has(details.targetId)
+      ) {
+        ids.add(details.targetId);
+      }
+      if (typeof details.blockedBy === 'string' && unitIds.has(details.blockedBy)) {
+        ids.add(details.blockedBy);
+      }
+      if (typeof details.nearestEnemyId === 'string') ids.add(details.nearestEnemyId);
     }
     return ids;
   }
@@ -289,9 +594,12 @@ export default function BattleScreen({
     const points: { x: number; y: number }[] = [];
     for (const verdict of validation?.verdicts || []) {
       if (verdict?.accepted !== false) continue;
-      const at = verdict?.rejection?.details?.at;
-      if (at && Number.isFinite(at?.x) && Number.isFinite(at?.y)) {
-        points.push({ x: at.x, y: at.y });
+      const details = verdict?.rejection?.details;
+      for (const key of ['at', 'aimPoint']) {
+        const point = details?.[key];
+        if (point && Number.isFinite(point?.x) && Number.isFinite(point?.y)) {
+          points.push({ x: point.x, y: point.y });
+        }
       }
     }
     return points;
@@ -301,11 +609,209 @@ export default function BattleScreen({
     if (!canDraft) return;
     if (!ownUnit(unitId)) return;
     if (!permittedKindsOf(unitId).includes('Move')) return;
+    const existing = draftForUnit(unitId);
+    if (existing) {
+      // Re-drafting Move over another kind replaces it; over Move it selects.
+      if (existing.kind !== 'Move') upsertDraft(unitId, { kind: 'Move', legs: [] });
+      else {
+        setSelectedUnitId(unitId);
+        setConfirming(false);
+      }
+      return;
+    }
+    setDrafts((prev) => [...prev, { key: `draft-${draftSeq.current++}`, unitId, kind: 'Move' as const, legs: [] }]);
+    setSelectedUnitId(unitId);
+    setConfirming(false);
+  }
+
+  // A new order draft without its key: drafting a second kind for the same
+  // unit replaces the first, so at most one draft per unit, and the button
+  // pressed names the intent.
+  type NewOrderDraft =
+    | { kind: 'Move'; legs: DraftLeg[] }
+    | { kind: 'Charge'; targetId: string; edge: string; approach: DraftLeg[] }
+    | { kind: 'Shoot'; targetId: string }
+    | { kind: 'Reform'; files: number; lateralInterval: number; rankDepth: number }
+    | { kind: 'Withdraw' }
+    | { kind: 'Rally' };
+
+  function upsertDraft(unitId: string, draft: NewOrderDraft): void {
     setDrafts((prev) => {
-      if (prev.some((draft) => draft.unitId === unitId)) return prev;
-      return [...prev, { key: `draft-${draftSeq.current++}`, unitId, legs: [] }];
+      const index = prev.findIndex((entry) => entry.unitId === unitId);
+      // Spreading a union keeps every variant's fields, so the result is
+      // cast back to the draft union once it is whole.
+      if (index < 0) {
+        const created = { key: `draft-${draftSeq.current++}`, unitId, ...draft } as OrderDraft;
+        return [...prev, created];
+      }
+      const next = [...prev];
+      if (next[index].kind !== draft.kind) {
+        // Switching kinds drops the old parameters.
+        next[index] = { key: next[index].key, unitId, ...draft } as OrderDraft;
+      } else {
+        // Same kind: the new parameters overwrite the old ones field by
+        // field, keeping the draft key.
+        next[index] = { ...next[index], ...draft } as OrderDraft;
+      }
+      return next;
     });
     setSelectedUnitId(unitId);
+    setConfirming(false);
+  }
+
+  function startChargeDraft(unitId: string, targetId: string | null = null, edge: string | null = null): void {
+    if (!canDraft) return;
+    if (!ownUnit(unitId)) return;
+    const candidates = chargeCandidatesOf(unitId);
+    const chosen =
+      candidates.find((candidate: any) => candidate.targetId === targetId) || candidates[0] || null;
+    if (!chosen) return;
+    upsertDraft(unitId, {
+      kind: 'Charge',
+      targetId: chosen.targetId,
+      edge: CHARGE_EDGES.includes(edge as any) ? (edge as string) : chosen.edge,
+      approach: [],
+    });
+  }
+
+  function startShootDraft(unitId: string, targetId: string | null = null): void {
+    if (!canDraft) return;
+    if (!ownUnit(unitId)) return;
+    const candidates = shootCandidatesOf(unitId);
+    const chosen =
+      candidates.find((candidate: any) => candidate.targetId === targetId) || candidates[0] || null;
+    if (!chosen) return;
+    upsertDraft(unitId, { kind: 'Shoot', targetId: chosen.targetId });
+  }
+
+  function startReformDraft(unitId: string): void {
+    if (!canDraft) return;
+    const unit = ownUnit(unitId);
+    if (!unit) return;
+    upsertDraft(unitId, {
+      kind: 'Reform',
+      files: unit.files,
+      lateralInterval: unit.lateralInterval,
+      rankDepth: unit.rankDepth,
+    });
+  }
+
+  function startWithdrawDraft(unitId: string): void {
+    if (!canDraft) return;
+    if (!ownUnit(unitId)) return;
+    upsertDraft(unitId, { kind: 'Withdraw' });
+  }
+
+  function startRallyDraft(unitId: string): void {
+    if (!canDraft) return;
+    if (!ownUnit(unitId)) return;
+    upsertDraft(unitId, { kind: 'Rally' });
+  }
+
+  function setChargeTarget(unitId: string, targetId: string, edge: string | null = null): void {
+    if (!canDraft) return;
+    const chosen = chargeCandidatesOf(unitId).find(
+      (candidate: any) => candidate.targetId === targetId,
+    );
+    if (!chosen) return;
+    setDrafts((prev) => prev.map((draft) => {
+      if (draft.unitId !== unitId || draft.kind !== 'Charge') return draft;
+      return {
+        ...draft,
+        targetId: chosen.targetId,
+        edge: CHARGE_EDGES.includes(edge as any) ? (edge as string) : chosen.edge,
+      };
+    }));
+    setConfirming(false);
+  }
+
+  function setChargeEdge(unitId: string, edge: string): void {
+    if (!canDraft) return;
+    if (!CHARGE_EDGES.includes(edge as any)) return;
+    setDrafts((prev) => prev.map((draft) => {
+      if (draft.unitId !== unitId || draft.kind !== 'Charge') return draft;
+      return { ...draft, edge };
+    }));
+    setConfirming(false);
+  }
+
+  function setShootTarget(unitId: string, targetId: string): void {
+    if (!canDraft) return;
+    const chosen = shootCandidatesOf(unitId).find(
+      (candidate: any) => candidate.targetId === targetId,
+    );
+    if (!chosen) return;
+    setDrafts((prev) => prev.map((draft) => {
+      if (draft.unitId !== unitId || draft.kind !== 'Shoot') return draft;
+      return { ...draft, targetId: chosen.targetId };
+    }));
+    setConfirming(false);
+  }
+
+  function setReformField(unitId: string, field: string, raw: string): void {
+    if (!canDraft) return;
+    const text = String(raw ?? '');
+    if (text.trim() === '') return;
+    if (field === 'files') {
+      const value = Number(text);
+      if (!Number.isInteger(value)) return;
+      setDrafts((prev) => prev.map((draft) => {
+        if (draft.unitId !== unitId || draft.kind !== 'Reform') return draft;
+        return { ...draft, files: value };
+      }));
+    } else if (field === 'lateralInterval' || field === 'rankDepth') {
+      const value = Number(text);
+      if (!Number.isFinite(value)) return;
+      setDrafts((prev) => prev.map((draft) => {
+        if (draft.unitId !== unitId || draft.kind !== 'Reform') return draft;
+        return { ...draft, [field]: round1(value) };
+      }));
+    } else {
+      return;
+    }
+    setConfirming(false);
+  }
+
+  function applyReformPreset(unitId: string, preset: string): void {
+    if (!canDraft) return;
+    const draft = draftForUnit(unitId);
+    const unit = ownUnit(unitId);
+    if (!draft || draft.kind !== 'Reform' || !unit) return;
+    const chosen = spacingPresetsOf(unit)?.[preset];
+    if (!chosen) return;
+    setDrafts((prev) => prev.map((entry) => {
+      if (entry.unitId !== unitId || entry.kind !== 'Reform') return entry;
+      return { ...entry, lateralInterval: chosen.lateralInterval, rankDepth: chosen.rankDepth };
+    }));
+    setConfirming(false);
+  }
+
+  function appendApproachLeg(unitId: string, point: { x: number; y: number }): void {
+    if (!canDraft) return;
+    if (!ownUnit(unitId)) return;
+    const snapped = { x: round1(point.x), y: round1(point.y) };
+    if (!Number.isFinite(snapped.x) || !Number.isFinite(snapped.y)) return;
+    setDrafts((prev) => prev.map((draft) => {
+      if (draft.unitId !== unitId || draft.kind !== 'Charge') return draft;
+      if (draft.approach.length >= MAX_APPROACH_LEGS) return draft;
+      return { ...draft, approach: [...draft.approach, { face: null, to: snapped }] };
+    }));
+    setConfirming(false);
+  }
+
+  function removeLastApproachLeg(unitId: string): void {
+    setDrafts((prev) => prev.map((draft) => {
+      if (draft.unitId !== unitId || draft.kind !== 'Charge' || draft.approach.length === 0) return draft;
+      return { ...draft, approach: draft.approach.slice(0, -1) };
+    }));
+    setConfirming(false);
+  }
+
+  function clearApproachLegs(unitId: string): void {
+    setDrafts((prev) => prev.map((draft) => {
+      if (draft.unitId !== unitId || draft.kind !== 'Charge' || draft.approach.length === 0) return draft;
+      return { ...draft, approach: [] };
+    }));
     setConfirming(false);
   }
 
@@ -336,7 +842,9 @@ export default function BattleScreen({
     const snapped = { x: round1(point.x), y: round1(point.y) };
     if (!Number.isFinite(snapped.x) || !Number.isFinite(snapped.y)) return;
     setDrafts((prev) => prev.map((draft) => {
-      if (draft.unitId !== unitId || draft.legs.length >= MAX_MOVE_LEGS) return draft;
+      if (draft.unitId !== unitId || draft.kind !== 'Move' || draft.legs.length >= MAX_MOVE_LEGS) {
+        return draft;
+      }
       return { ...draft, legs: [...draft.legs, { face: null, to: snapped }] };
     }));
     setConfirming(false);
@@ -344,16 +852,18 @@ export default function BattleScreen({
 
   function removeLastDraftLeg(unitId: string): void {
     setDrafts((prev) => prev.map((draft) => {
-      if (draft.unitId !== unitId || draft.legs.length === 0) return draft;
+      if (draft.unitId !== unitId || draft.kind !== 'Move' || draft.legs.length === 0) return draft;
       return { ...draft, legs: draft.legs.slice(0, -1) };
     }));
     setConfirming(false);
   }
 
   function clearDraftLegs(unitId: string): void {
-    setDrafts((prev) => prev.map((draft) => (draft.unitId === unitId && draft.legs.length > 0
-      ? { ...draft, legs: [] }
-      : draft)));
+    setDrafts((prev) => prev.map((draft) => (
+      draft.unitId === unitId && draft.kind === 'Move' && draft.legs.length > 0
+        ? { ...draft, legs: [] }
+        : draft
+    )));
     setConfirming(false);
   }
 
@@ -361,7 +871,7 @@ export default function BattleScreen({
     if (!canDraft) return;
     const text = String(raw ?? '').trim();
     setDrafts((prev) => prev.map((draft) => {
-      if (draft.unitId !== unitId) return draft;
+      if (draft.unitId !== unitId || draft.kind !== 'Move') return draft;
       if (text === '') {
         // Clearing the facing removes the rotation from every leg.
         return {
@@ -384,15 +894,72 @@ export default function BattleScreen({
     setConfirming(false);
   }
 
+  // Unit clicks on the map: an own unit selects it; an enemy candidate drafts
+  // (or retargets) a Charge or Shoot for the selected unit, Charge first; any
+  // other click clears the selection.
+  function handleBattleUnitSelect(unitId: string | null): void {
+    if (!canDraft || !unitId) {
+      setSelectedUnitId(unitId);
+      return;
+    }
+    const unit = units.find((entry: any) => entry?.id === unitId) || null;
+    if (!unit) {
+      setSelectedUnitId(null);
+      return;
+    }
+    if (unit.side === activeSide) {
+      setSelectedUnitId(unitId);
+      setConfirming(false);
+      return;
+    }
+    if (selectedUnitId) {
+      const kinds = permittedKindsOf(selectedUnitId);
+      const charge = kinds.includes('Charge')
+        ? chargeCandidatesOf(selectedUnitId).find(
+          (candidate: any) => candidate.targetId === unitId,
+        )
+        : null;
+      if (charge) {
+        if (draftForUnit(selectedUnitId)?.kind === 'Charge') {
+          setChargeTarget(selectedUnitId, charge.targetId, charge.edge);
+        } else {
+          startChargeDraft(selectedUnitId, charge.targetId, charge.edge);
+        }
+        return;
+      }
+      const shoot = kinds.includes('Shoot')
+        ? shootCandidatesOf(selectedUnitId).find(
+          (candidate: any) => candidate.targetId === unitId,
+        )
+        : null;
+      if (shoot) {
+        if (draftForUnit(selectedUnitId)?.kind === 'Shoot') {
+          setShootTarget(selectedUnitId, shoot.targetId);
+        } else {
+          startShootDraft(selectedUnitId, shoot.targetId);
+        }
+        return;
+      }
+    }
+    setSelectedUnitId(null);
+  }
+
+  // Open-ground clicks draft legs: up to three for the active Move draft,
+  // up to two optional approach legs for the active Charge draft.
   function handleBattleMapClick(point: { x: number; y: number }): void {
     if (!canDraft || !selectedUnitId) return;
     const draft = draftForUnit(selectedUnitId);
-    if (!draft || draft.legs.length >= MAX_MOVE_LEGS) return;
-    appendDraftLeg(selectedUnitId, point);
+    if (!draft) return;
+    if (draft.kind === 'Move' && draft.legs.length < MAX_MOVE_LEGS) {
+      appendDraftLeg(selectedUnitId, point);
+    } else if (draft.kind === 'Charge' && draft.approach.length < MAX_APPROACH_LEGS) {
+      appendApproachLeg(selectedUnitId, point);
+    }
   }
 
   function handleBattleRotate(facing: number): void {
     if (!canDraft || !selectedUnitId) return;
+    if (draftForUnit(selectedUnitId)?.kind !== 'Move') return;
     setDraftFacing(selectedUnitId, String(facing));
   }
 
@@ -400,26 +967,84 @@ export default function BattleScreen({
     return units.find((unit: any) => unit?.id === unitId)?.name || unitId;
   }
 
-  // One-line accepted detail for a draft from its verdict preview.
+  // One-line accepted detail for a draft from its verdict preview, per kind.
   function draftAcceptedDetail(verdict: any): string {
     if (verdict?.movement && Number.isFinite(verdict.movement.requiredM)) {
       return `Accepted · needs ${verdict.movement.requiredM} m of ${verdict.movement.availableM} m.`;
     }
+    if (verdict?.charge) {
+      return `Accepted · ${verdict.charge.aspect} contact, ${verdict.charge.frontageM} m, ${verdict.charge.fightingFiles} files.`;
+    }
+    if (verdict?.shoot) {
+      return `Accepted · ${verdict.shoot.distanceM} m to ${unitDisplayName(verdict.shoot.targetId)}.`;
+    }
+    if (verdict?.reform) {
+      return `Accepted · ${verdict.reform.files} files · ${verdict.reform.lateralInterval}×${verdict.reform.rankDepth} m.`;
+    }
+    if (verdict?.withdraw) {
+      return `Accepted · steps back ${verdict.withdraw.distanceM} m.`;
+    }
+    if (verdict?.rally) {
+      return `Accepted · rallies from ${verdict.rally.state}.`;
+    }
     return 'Accepted.';
   }
 
-  // Ghost footprints for accepted drafts (the Movement-phase preview) and leg
-  // paths for every draft; rejected drafts draw in red. Shoot-less Move-only
-  // slice: every draft is a Move.
+  function draftLegSummary(draft: { legs: DraftLeg[] }): string {
+    const stops = draft.legs.filter((leg) => leg.to);
+    const faces = draft.legs.filter((leg) => leg.face !== null && leg.face !== undefined);
+    const parts = [`${stops.length} ${stops.length === 1 ? 'leg' : 'legs'}`];
+    if (faces.length > 0) {
+      parts.push(`face ${faces[faces.length - 1].face}°`);
+    }
+    return parts.join(' · ');
+  }
+
+  // One-line summary per draft for the draft list, naming the kind and its
+  // parameters.
+  function draftSummary(draft: OrderDraft): string {
+    switch (draft.kind) {
+      case 'Charge': {
+        const approach = draft.approach.filter((leg) => leg.to).length;
+        return `Charge → ${unitDisplayName(draft.targetId)} (${draft.edge || '—'}) · ${approach} approach ${
+          approach === 1 ? 'leg' : 'legs'
+        }`;
+      }
+      case 'Shoot':
+        return `Shoot → ${unitDisplayName(draft.targetId)}`;
+      case 'Reform':
+        return `Reform → ${draft.files} files · ${draft.lateralInterval}×${draft.rankDepth} m`;
+      case 'Withdraw':
+        return 'Withdraw (step straight back)';
+      case 'Rally':
+        return 'Rally';
+      case 'Move':
+        return `Move · ${draftLegSummary(draft)}`;
+      default: {
+        const _exhaustive: never = draft;
+        return `Move · ${draftLegSummary(_exhaustive)}`;
+      }
+    }
+  }
+
+  // Ghost footprints for accepted drafts that move or reshape the unit (the
+  // Movement-phase preview: Move, Charge, Reform, Withdraw), approach and leg
+  // paths for every draft, and shoot lines; rejected drafts draw in red.
+  // Shoot and Rally previews match the current footprint, so they draw no
+  // ghost.
+  const GHOST_KINDS = useMemo(() => new Set(['Move', 'Charge', 'Reform', 'Withdraw']), []);
+
   const battleGhosts = useMemo(() => {
-    const ghosts: { unitId: string; corners: { x: number; y: number }[] }[] = [];
-    for (const verdict of validation?.verdicts || []) {
+    const ghosts: { unitId: string; corners: { x: number; y: number }[]; kind: string }[] = [];
+    for (const [verdictIndex, verdict] of (validation?.verdicts || []).entries()) {
       if (!verdict?.accepted || !verdict.preview?.corners) continue;
       if (!Array.isArray(verdict.preview.corners) || verdict.preview.corners.length < 3) continue;
-      ghosts.push({ unitId: verdict.unitId, corners: verdict.preview.corners });
+      const kind = drafts[verdict.orderIndex ?? verdictIndex]?.kind || 'Move';
+      if (!GHOST_KINDS.has(kind)) continue;
+      ghosts.push({ unitId: verdict.unitId, corners: verdict.preview.corners, kind });
     }
     return ghosts;
-  }, [validation]);
+  }, [validation, drafts, GHOST_KINDS]);
 
   const battlePaths = useMemo(() => {
     const paths: { points: { x: number; y: number }[]; rejected: boolean; label: string }[] = [];
@@ -428,18 +1053,65 @@ export default function BattleScreen({
       const start = mover?.position && Number.isFinite(mover.position?.x) && Number.isFinite(mover.position?.y)
         ? { x: mover.position.x, y: mover.position.y }
         : null;
-      const stops = (draft.legs || []).filter((leg) => leg.to).map((leg) => leg.to as { x: number; y: number });
+      const legs = draft.kind === 'Charge' ? draft.approach : draft.kind === 'Move' ? draft.legs : [];
+      const stops = (legs || []).filter((leg) => leg.to).map((leg) => leg.to as { x: number; y: number });
       if (!start || stops.length === 0) return;
       const verdict = verdictForDraftIndex(index);
       paths.push({
         points: [start, ...stops],
         rejected: verdict?.accepted === false,
-        label: 'Leg',
+        label: draft.kind === 'Charge' ? 'Approach' : 'Leg',
       });
     });
     return paths;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drafts, validation, units]);
+
+  // A Shoot never moves: the line marks the shot from the shooter to the
+  // target, and the Shooting phase resolves it. Rejected shots draw in red
+  // like every rejected draft.
+  const battleShootLines = useMemo(() => {
+    const lines: { from: { x: number; y: number }; to: { x: number; y: number }; rejected: boolean; shooterId: string; targetId: string }[] = [];
+    drafts.forEach((draft, index) => {
+      if (draft.kind !== 'Shoot') return;
+      const shooter = units.find((unit: any) => unit?.id === draft.unitId);
+      const target = units.find((unit: any) => unit?.id === draft.targetId);
+      const from = shooter?.position && Number.isFinite(shooter.position?.x) && Number.isFinite(shooter.position?.y)
+        ? { x: shooter.position.x, y: shooter.position.y }
+        : null;
+      const to = target?.position && Number.isFinite(target.position?.x) && Number.isFinite(target.position?.y)
+        ? { x: target.position.x, y: target.position.y }
+        : null;
+      if (!from || !to) return;
+      const verdict = verdictForDraftIndex(index);
+      lines.push({
+        from,
+        to,
+        rejected: verdict?.accepted === false,
+        shooterId: draft.unitId,
+        targetId: draft.targetId,
+      });
+    });
+    return lines;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drafts, validation, units]);
+
+  // Charge and shoot candidates for the selected unit, from the engine's
+  // available actions: highlighted on the map and listed in the inspector.
+  const battleCandidateCharges: BattleChargeCandidate[] = useMemo(() => {
+    if (!canDraft || !selectedUnitId) return [];
+    return chargeCandidatesOf(selectedUnitId).map((candidate: any) => ({
+      unitId: String(candidate.targetId),
+      edge: String(candidate.edge || ''),
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [battle, selectedUnitId, finished, canDraft]);
+
+  const battleCandidateShoots = useMemo(() => {
+    if (!canDraft || !selectedUnitId) return [];
+    return shootCandidatesOf(selectedUnitId).map((candidate: any) => String(candidate.targetId));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [battle, selectedUnitId, finished, canDraft]);
 
   const logGroups = useMemo(() => {
     try {
@@ -610,7 +1282,7 @@ export default function BattleScreen({
             units={units}
             sides={sides}
             selectedUnitId={selectedUnitId}
-            onSelectUnit={(id: string | null) => setSelectedUnitId(id)}
+            onSelectUnit={handleBattleUnitSelect}
             terrainFeatures={scenario?.terrainFeatures}
             unitConflictIds={[...conflictUnitIds()]}
             changedUnitIds={[...changedByUnit.keys()]}
@@ -618,15 +1290,20 @@ export default function BattleScreen({
             onBattleMapClick={handleBattleMapClick}
             battleGhosts={battleGhosts}
             battlePaths={battlePaths}
+            battleShootLines={battleShootLines}
+            battleCandidateCharges={battleCandidateCharges}
+            battleCandidateShoots={battleCandidateShoots}
             battleConflictPoints={conflictPoints()}
             battleRotateUnitId={
-              canDraft && selectedUnitId && draftForUnit(selectedUnitId) ? selectedUnitId : null
+              canDraft && selectedUnitId && draftForUnit(selectedUnitId)?.kind === 'Move'
+                ? selectedUnitId
+                : null
             }
             onBattleRotate={handleBattleRotate}
           />
           <p className="map-hint">
             {canDraft
-              ? `Select your unit · click the map for Move legs (up to ${MAX_MOVE_LEGS}) · drag the round handle to rotate · scroll to zoom · drag to pan`
+              ? `Select your unit · click the map for Move legs (${MAX_MOVE_LEGS}) or Charge approaches (${MAX_APPROACH_LEGS}) · click a highlighted target to Charge or Shoot · drag the round handle to rotate · scroll to zoom · drag to pan`
               : 'The map is shared with the editor and read-only here: scroll to zoom, drag to pan, 0 fits the battlefield.'}
           </p>
         </section>
@@ -686,24 +1363,128 @@ export default function BattleScreen({
                   </ul>
                 ) : null}
               </dl>
-              {canDraft &&
-              selectedUnit.side === activeSide &&
-              permittedKindsOf(selectedUnit.id).includes('Move') ? (
-                <div className="inspector-drafts">
-                  <span className="field-label">
-                    Draft an order{draftForUnit(selectedUnit.id) ? ' (now: Move)' : ''}
-                  </span>
-                  <div className="handoff-actions">
-                    <button
-                      type="button"
-                      className="btn-secondary"
-                      data-testid={`start-draft-${selectedUnit.id}`}
-                      onClick={() => startMoveDraft(selectedUnit.id)}
-                    >
-                      Draft Move
-                    </button>
+              {canDraft && selectedUnit.side === activeSide ? (
+                <>
+                  <div className="inspector-drafts">
+                    <span className="field-label">
+                      Draft an order
+                      {draftForUnit(selectedUnit.id)
+                        ? ` (now: ${draftKindOf(draftForUnit(selectedUnit.id))})`
+                        : ''}
+                    </span>
+                    <div className="handoff-actions">
+                      {permittedKindsOf(selectedUnit.id).includes('Move') ? (
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          data-testid={`start-draft-${selectedUnit.id}`}
+                          onClick={() => startMoveDraft(selectedUnit.id)}
+                        >
+                          Draft Move
+                        </button>
+                      ) : null}
+                      {permittedKindsOf(selectedUnit.id).includes('Charge') ? (
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          data-testid={`start-charge-${selectedUnit.id}`}
+                          onClick={() => startChargeDraft(selectedUnit.id)}
+                        >
+                          Draft Charge
+                        </button>
+                      ) : null}
+                      {permittedKindsOf(selectedUnit.id).includes('Shoot') ? (
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          data-testid={`start-shoot-${selectedUnit.id}`}
+                          onClick={() => startShootDraft(selectedUnit.id)}
+                        >
+                          Draft Shoot
+                        </button>
+                      ) : null}
+                      {permittedKindsOf(selectedUnit.id).includes('Reform') ? (
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          data-testid={`start-reform-${selectedUnit.id}`}
+                          onClick={() => startReformDraft(selectedUnit.id)}
+                        >
+                          Draft Reform
+                        </button>
+                      ) : null}
+                      {permittedKindsOf(selectedUnit.id).includes('Withdraw') ? (
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          data-testid={`start-withdraw-${selectedUnit.id}`}
+                          onClick={() => startWithdrawDraft(selectedUnit.id)}
+                        >
+                          Draft Withdraw
+                        </button>
+                      ) : null}
+                      {permittedKindsOf(selectedUnit.id).includes('Rally') ? (
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          data-testid={`start-rally-${selectedUnit.id}`}
+                          onClick={() => startRallyDraft(selectedUnit.id)}
+                        >
+                          Draft Rally
+                        </button>
+                      ) : null}
+                    </div>
                   </div>
-                </div>
+                  {permittedKindsOf(selectedUnit.id).includes('Charge') &&
+                  chargeCandidatesOf(selectedUnit.id).length > 0 ? (
+                    <div className="candidates">
+                      <span className="field-label">Charge candidates</span>
+                      <ul className="candidate-list">
+                        {chargeCandidatesOf(selectedUnit.id).map((candidate: any) => (
+                          <li key={candidate.targetId}>
+                            <button
+                              type="button"
+                              className="btn-quiet candidate-pick"
+                              data-testid={`charge-${selectedUnit.id}-${candidate.targetId}`}
+                              onClick={() =>
+                                startChargeDraft(selectedUnit.id, candidate.targetId, candidate.edge)
+                              }
+                            >
+                              Charge {unitDisplayName(candidate.targetId)} ({candidate.edge},{' '}
+                              {candidate.aspect}, {candidate.distanceM} m)
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  {permittedKindsOf(selectedUnit.id).includes('Shoot') &&
+                  shootCandidatesOf(selectedUnit.id).length > 0 ? (
+                    <div className="candidates">
+                      <span className="field-label">Shoot candidates</span>
+                      <ul className="candidate-list">
+                        {shootCandidatesOf(selectedUnit.id).map((candidate: any) => (
+                          <li key={candidate.targetId}>
+                            <button
+                              type="button"
+                              className="btn-quiet candidate-pick"
+                              data-testid={`shoot-${selectedUnit.id}-${candidate.targetId}`}
+                              onClick={() => startShootDraft(selectedUnit.id, candidate.targetId)}
+                            >
+                              Shoot {unitDisplayName(candidate.targetId)} ({candidate.distanceM} m)
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  {permittedKindsOf(selectedUnit.id).includes('Withdraw') ? (
+                    <p className="draft-hint">
+                      Withdraw steps straight back without turning and breaks every contact. The
+                      ghost shows the step back.
+                    </p>
+                  ) : null}
+                </>
               ) : null}
             </section>
           ) : (
@@ -714,68 +1495,9 @@ export default function BattleScreen({
           {canDraft &&
           selectedUnit &&
           selectedUnit.side === activeSide &&
-          draftForUnit(selectedUnit.id) ? (
-            <section aria-label="Move draft" data-testid={`draft-editor-${selectedUnit.id}`}>
-              <span className="eyebrow">MOVE DRAFT</span>
-              <ol className="leg-list">
-                {(draftForUnit(selectedUnit.id)?.legs || []).length === 0 ? (
-                  <li className="leg-empty">No legs yet — click the map for leg 1.</li>
-                ) : (
-                  (draftForUnit(selectedUnit.id)?.legs || []).map((leg: any, index: number) => (
-                    <li key={index}>
-                      Leg {index + 1}:{' '}
-                      {leg.to
-                        ? `(${leg.to.x.toFixed(1)}, ${leg.to.y.toFixed(1)})`
-                        : 'rotation only'}
-                      {leg.face !== null && leg.face !== undefined ? ` · face ${leg.face}°` : ''}
-                    </li>
-                  ))
-                )}
-              </ol>
-              <p className="draft-hint">
-                Click the map for leg {(draftForUnit(selectedUnit.id)?.legs || []).length + 1}{' '}
-                (up to {MAX_MOVE_LEGS}) · drag the round handle or type a facing to rotate about
-                the front midpoint.
-              </p>
-              <label className="field">
-                Facing (°)
-                <input
-                  type="number"
-                  data-testid={`draft-facing-${selectedUnit.id}`}
-                  min={0}
-                  max={360}
-                  step={1}
-                  value={
-                    [...(draftForUnit(selectedUnit.id)?.legs || [])]
-                      .reverse()
-                      .find((leg: any) => leg.face !== null && leg.face !== undefined)?.face ?? ''
-                  }
-                  placeholder="—"
-                  onChange={(event) => setDraftFacing(selectedUnit.id, event.target.value)}
-                />
-              </label>
-              <div className="draft-actions">
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  data-testid={`remove-last-leg-${selectedUnit.id}`}
-                  disabled={(draftForUnit(selectedUnit.id)?.legs || []).length === 0}
-                  onClick={() => removeLastDraftLeg(selectedUnit.id)}
-                >
-                  Undo leg
-                </button>
-                <button
-                  type="button"
-                  className="btn-secondary"
-                  data-testid={`clear-legs-${selectedUnit.id}`}
-                  disabled={(draftForUnit(selectedUnit.id)?.legs || []).length === 0}
-                  onClick={() => clearDraftLegs(selectedUnit.id)}
-                >
-                  Clear legs
-                </button>
-              </div>
-            </section>
-          ) : null}
+          draftForUnit(selectedUnit.id)
+            ? draftEditor(selectedUnit)
+            : null}
           <section aria-label="Turn" data-testid="turn-panel">
             {finished ? (
               <>
@@ -916,13 +1638,9 @@ export default function BattleScreen({
                                 >
                                   {unitDisplayName(draft.unitId)}
                                 </button>
-                                <span className="draft-kind">Move</span>
+                                <span className="draft-kind">{draftKindOf(draft)}</span>
                                 <span className="draft-meta">
-                                  Move · {(draft.legs || []).filter((leg) => leg.to).length}{' '}
-                                  {(draft.legs || []).filter((leg) => leg.to).length === 1
-                                    ? 'leg'
-                                    : 'legs'}{' '}
-                                  · order {index + 1}
+                                  {draftSummary(draft)} · order {index + 1}
                                 </span>
                               </div>
                               {rejection ? (

@@ -2663,6 +2663,13 @@ try {
       .locator(`[data-testid="map-unit"][data-unit-id="${targetId}"]`)
       .getAttribute('data-candidate-charge')) === 'true',
   );
+  await fullOwn.nth(3).click();
+  check(
+    'the Shoot candidate highlights on the map',
+    (await fullPage
+      .locator(`[data-testid="map-unit"][data-unit-id="${victimId}"]`)
+      .getAttribute('data-candidate-shoot')) === 'true',
+  );
   await fullOwn.nth(4).click();
   check(
     'inspector lists Reform among the permitted orders',
@@ -2683,6 +2690,12 @@ try {
   await fullPage.waitForTimeout(300);
   check(
     'an approach leg keeps the Charge accepted',
+    await fullPage.getByTestId(`draft-accepted-${chargerId}`).isVisible(),
+  );
+  await fullPage.getByTestId(`remove-last-approach-${chargerId}`).click();
+  await fullPage.waitForTimeout(300);
+  check(
+    'removing the approach leg keeps the direct Charge accepted',
     await fullPage.getByTestId(`draft-accepted-${chargerId}`).isVisible(),
   );
 
