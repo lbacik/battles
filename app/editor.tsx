@@ -919,9 +919,11 @@ export default function Editor({
             ? removeElevationFeature(document, id)
             : removeGroundCoverFeature(document, id);
     } catch (error) {
+      const failedRing = feature.kind === 'linear' ? feature.path : feature?.polygon;
       setTerrainRefusal({
-        ring: Array.isArray(feature?.polygon) ? feature.polygon : [],
+        ring: Array.isArray(failedRing) ? failedRing : [],
         reason: errorMessage(error),
+        ...(feature.kind === 'linear' ? { kind: 'linear' as const } : {}),
       });
       return;
     }

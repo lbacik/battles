@@ -650,7 +650,8 @@ try {
   ]) {
     await clickMap(vx, vy);
   }
-  await page.keyboard.press('Enter');
+  // The river finished from the keyboard; the road finishes from the button.
+  await page.getByTestId('terrain-draw-finish').click();
   check('drawing a road adds a second row', (await linearRow.count()) === 2);
   check(
     'the road crosses the river on the map',

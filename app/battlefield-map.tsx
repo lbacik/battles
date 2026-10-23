@@ -919,7 +919,7 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
       if (refusal.kind === 'linear' || refusal.ring.length === 2) {
         out += `<polyline points="${project(refusal.ring)}" fill="none" stroke="#b76e5a" stroke-width="${(2.5 * mpp).toFixed(2)}" stroke-dasharray="${(8 * mpp).toFixed(1)} ${(5 * mpp).toFixed(1)}" class="terrain-refused" data-testid="terrain-refusal-shape"><title>${label}</title></polyline>`;
       } else {
-        out += `<polygon points="${project(refusal.ring)}" fill="#b76e5a" fill-opacity="0.35" stroke="#b76e5a" stroke-width="${(2.5 * mpp).toFixed(2)}" stroke-dasharray="${(8 * mpp).toFixed(1)} ${(5 * mpp).toFixed(1)}" class="terrain-refused" data-testid="terrain-refusal-shape"><title>${label}</title></polyline>`;
+        out += `<polygon points="${project(refusal.ring)}" fill="#b76e5a" fill-opacity="0.35" stroke="#b76e5a" stroke-width="${(2.5 * mpp).toFixed(2)}" stroke-dasharray="${(8 * mpp).toFixed(1)} ${(5 * mpp).toFixed(1)}" class="terrain-refused" data-testid="terrain-refusal-shape"><title>${label}</title></polygon>`;
       }
     }
     if (draft && Array.isArray(draft.points) && draft.points.length > 0) {
