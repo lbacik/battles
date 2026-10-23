@@ -468,6 +468,201 @@ try {
     (await page.getByTestId('save-status').textContent()) === 'Saved',
   );
 
+  // Issue #79: terrain mode — draw, refuse overlap, nested hills.
+  // Map metres (y up from the south-west corner) to client pixels through
+  // the live SVG viewBox, so terrain vertices land on exact points.
+  async function clickMap(atX, atY) {
+    const svg = page.getByTestId('battlefield-map');
+    const box = await svg.boundingBox();
+    const viewBox = ((await svg.getAttribute('viewBox')) ?? '0 0 1200 800')
+      .split(/\s+/)
+      .map(Number);
+    const dimsText = (await page.getByTestId('battlefield-dims').textContent()) ?? '';
+    const dimsMatch = dimsText.match(/([\d.]+) × ([\d.]+)/);
+    const fieldH = dimsMatch ? Number(dimsMatch[2]) : 800;
+    const clientX = box.x + ((atX - viewBox[0]) / viewBox[2]) * box.width;
+    const clientY = box.y + ((fieldH - atY - viewBox[1]) / viewBox[3]) * box.height;
+    await page.mouse.click(clientX, clientY);
+  }
+
+  await page.getByTestId('mode-map').click();
+  check(
+    'map editor tab shows the terrain panel',
+    await page.getByTestId('terrain-panel').isVisible(),
+  );
+  await page.getByTestId('fit-view').click();
+  await page.waitForFunction(
+    (expected) =>
+      document.querySelector('[data-testid="battlefield-map"]')?.getAttribute('viewBox') ===
+      expected,
+    fittedViewBox,
+  );
+
+  // Draw a forest area and finish from the keyboard.
+  await page.getByTestId('terrain-new-category').selectOption('forest');
+  await page.getByTestId('terrain-draw-area').click();
+  check('drawing shows the map hint', await page.getByTestId('map-terrain-hint').isVisible());
+  for (const [vx, vy] of [
+    [200, 200],
+    [400, 200],
+    [400, 400],
+    [200, 400],
+  ]) {
+    await clickMap(vx, vy);
+  }
+  await page.keyboard.press('Enter');
+  const groundRow = page.getByTestId('terrain-ground-row');
+  check('drawing a forest adds a ground row', (await groundRow.count()) === 1);
+  check(
+    'the forest renders on the map',
+    (await page.getByTestId('terrain-ground').count()) === 1,
+  );
+
+  // An overlapping area is refused: the candidate highlights red, the list
+  // is unchanged, and Escape clears the refusal.
+  await page.getByTestId('terrain-draw-area').click();
+  for (const [vx, vy] of [
+    [300, 300],
+    [500, 300],
+    [500, 500],
+    [300, 500],
+  ]) {
+    await clickMap(vx, vy);
+  }
+  await page.getByTestId('terrain-draw-finish').click();
+  check('overlapping ground is refused', await page.getByTestId('terrain-refusal').isVisible());
+  check(
+    'a refused overlap leaves the feature count unchanged',
+    (await groundRow.count()) === 1,
+  );
+  check(
+    'a refused overlap highlights the candidate',
+    (await page.getByTestId('terrain-refusal-shape').count()) === 1,
+  );
+  await page.keyboard.press('Escape');
+  check(
+    'escape clears the refusal',
+    (await page.getByTestId('terrain-refusal').count()) === 0,
+  );
+
+  // A self-intersecting bowtie is refused the same way.
+  await page.getByTestId('terrain-draw-area').click();
+  for (const [vx, vy] of [
+    [600, 200],
+    [800, 400],
+    [800, 200],
+    [600, 400],
+  ]) {
+    await clickMap(vx, vy);
+  }
+  await page.getByTestId('terrain-draw-finish').click();
+  check(
+    'a self-intersecting polygon is refused',
+    await page.getByTestId('terrain-refusal').isVisible(),
+  );
+  check(
+    'a refused bowtie leaves the feature count unchanged',
+    (await groundRow.count()) === 1,
+  );
+  await page.keyboard.press('Escape');
+
+  // Hills nest: the first hill is level 1, a hill drawn inside it is level 2.
+  await page.getByTestId('terrain-draw-hill').click();
+  for (const [vx, vy] of [
+    [700, 550],
+    [950, 550],
+    [950, 750],
+    [700, 750],
+  ]) {
+    await clickMap(vx, vy);
+  }
+  await page.getByTestId('terrain-draw-finish').click();
+  const hillRow = page.getByTestId('terrain-hill-row');
+  check('drawing a hill adds a hill row', (await hillRow.count()) === 1);
+  const hillText = (await hillRow.first().textContent()) ?? '';
+  check('the outer hill derives level 1', /level 1/.test(hillText), hillText.slice(0, 80));
+  await page.getByTestId('terrain-draw-hill').click();
+  for (const [vx, vy] of [
+    [760, 610],
+    [890, 610],
+    [890, 690],
+    [760, 690],
+  ]) {
+    await clickMap(vx, vy);
+  }
+  await page.getByTestId('terrain-draw-finish').click();
+  check('a nested hill adds a second row', (await hillRow.count()) === 2);
+  const hillTexts = await hillRow.allTextContents();
+  check(
+    'the nested hill derives level 2',
+    hillTexts.some((entry) => /level 2/.test(entry)),
+    hillTexts.join(' | ').slice(0, 120),
+  );
+
+  // A hill crossing its sibling's boundary is refused.
+  await page.getByTestId('terrain-draw-hill').click();
+  for (const [vx, vy] of [
+    [900, 600],
+    [1050, 600],
+    [1050, 700],
+    [900, 700],
+  ]) {
+    await clickMap(vx, vy);
+  }
+  await page.getByTestId('terrain-draw-finish').click();
+  check('a crossing hill is refused', await page.getByTestId('terrain-refusal').isVisible());
+  check('a refused hill leaves the hill count unchanged', (await hillRow.count()) === 2);
+  await page.keyboard.press('Escape');
+
+  // Recategorise the forest, insert a vertex on an edge, delete it again.
+  await groundRow.first().getByTestId('terrain-select').click();
+  await page.getByTestId('terrain-category').selectOption('rough');
+  check(
+    'recategorising updates the row',
+    (await groundRow.first().getAttribute('data-category')) === 'rough',
+  );
+  const vertexHandle = page.getByTestId('terrain-vertex-handle');
+  const verticesBefore = await vertexHandle.count();
+  await page.getByTestId('terrain-edge-handle').first().click();
+  check(
+    'inserting a vertex on an edge adds a handle',
+    (await vertexHandle.count()) === verticesBefore + 1,
+  );
+  await vertexHandle.first().click();
+  await page.keyboard.press('Delete');
+  check(
+    'deleting a vertex removes its handle',
+    (await vertexHandle.count()) === verticesBefore,
+  );
+
+  // Contours toggle on and off.
+  const contoursBefore = await page.getByTestId('toggle-contours').getAttribute('aria-pressed');
+  await page.getByTestId('toggle-contours').click();
+  const contoursAfter = await page.getByTestId('toggle-contours').getAttribute('aria-pressed');
+  check('contours toggle on and off', contoursBefore !== contoursAfter);
+  await page.getByTestId('toggle-contours').click();
+
+  // Deleting the area is undoable.
+  await page.getByTestId('terrain-delete-feature').click();
+  check('deleting the area removes its row', (await groundRow.count()) === 0);
+  await page.getByTestId('undo').click();
+  check('undo restores the deleted area', (await groundRow.count()) === 1);
+
+  // Terrain persists through a save.
+  await page.getByTestId('save-scenario').click();
+  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  check(
+    'terrain saves',
+    (await page.getByTestId('save-status').textContent()) === 'Saved',
+  );
+
+  // Back to battle mode for the order-of-battle checks below.
+  await page.getByTestId('mode-battle').click();
+  check(
+    'battle mode restores the order of battle',
+    await page.getByTestId('oob-tab-all').isVisible(),
+  );
+
   // Issue #77: order of battle — add, select, edit, duplicate, delete.
   const oobTabAll = page.getByTestId('oob-tab-all');
   const oobTabA = page.getByTestId('oob-tab-0');
