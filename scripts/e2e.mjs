@@ -152,6 +152,196 @@ try {
     mapWidth === '1200' && mapHeight === '800',
     `data-width=${mapWidth} data-height=${mapHeight}`,
   );
+
+  // Map navigation (issue #75): zoom, pan, fit, and the coordinate readout.
+  const fittedViewBox = await page.getByTestId('battlefield-map').getAttribute('viewBox');
+  check('map starts fitted to the battlefield', !!fittedViewBox, fittedViewBox ?? '');
+  check(
+    'select is the default map tool',
+    (await page.getByTestId('map-tool-select').getAttribute('aria-pressed')) === 'true',
+  );
+  const zoomBefore = await page.getByTestId('map-zoom-level').textContent();
+  check('map zoom starts at 100%', zoomBefore === '100%', `zoom=${zoomBefore}`);
+  const scaleBefore = await page.getByTestId('scale-bar').evaluate((node) => node.style.width);
+  const scaleLabel = await page.getByTestId('scale-bar-label').textContent();
+  check(
+    'scale bar shows a round distance in metres',
+    /^(1|2|5|10|20|50|100|200|500|1000|2000) (m|km)$/.test((scaleLabel ?? '').trim()),
+    `scale=${scaleLabel} width=${scaleBefore}`,
+  );
+
+  await page.getByTestId('zoom-in').click();
+  await page.waitForFunction(
+    (expected) => document.querySelector('[data-testid="map-zoom-level"]')?.textContent !== expected,
+    zoomBefore,
+  );
+  const zoomIn = await page.getByTestId('map-zoom-level').textContent();
+  const zoomedViewBox = await page.getByTestId('battlefield-map').getAttribute('viewBox');
+  check(
+    'zoom control zooms in',
+    zoomIn !== zoomBefore && zoomedViewBox !== fittedViewBox,
+    `zoom=${zoomBefore} → ${zoomIn}`,
+  );
+  const scaleZoomed = await page.getByTestId('scale-bar').evaluate((node) => node.style.width);
+  check(
+    'scale bar stays correct at the new zoom',
+    scaleZoomed !== scaleBefore,
+    `width=${scaleBefore} → ${scaleZoomed}`,
+  );
+
+  await page.getByTestId('zoom-out').click();
+  await page.waitForFunction(
+    (expected) => document.querySelector('[data-testid="map-zoom-level"]')?.textContent === expected,
+    zoomBefore,
+  );
+  check('zoom control zooms back out', true);
+
+  // Zooming keeps the point under the cursor fixed (keyboard path): hover a
+  // map point, zoom with `+`, and the readout at the same screen pixel must
+  // not move.
+  const keyBox = (await page.getByTestId('battlefield-map').boundingBox()) ?? mapBox;
+  const keyX = keyBox.x + keyBox.width / 4;
+  const keyY = keyBox.y + keyBox.height / 4;
+  await page.mouse.move(keyX, keyY);
+  await page.waitForTimeout(200);
+  const keyAnchorBefore = await page.getByTestId('cursor-coords').textContent();
+  await page.keyboard.press('+');
+  await page.waitForFunction(
+    (expected) => document.querySelector('[data-testid="map-zoom-level"]')?.textContent !== expected,
+    zoomBefore,
+  );
+  const keyAnchorAfter = await page.getByTestId('cursor-coords').textContent();
+  check(
+    'keyboard zoom keeps the cursor point fixed',
+    keyAnchorBefore === keyAnchorAfter,
+    `${keyAnchorBefore} → ${keyAnchorAfter}`,
+  );
+  await page.getByTestId('fit-view').click();
+  await page.waitForFunction(
+    (expected) => document.querySelector('[data-testid="battlefield-map"]')?.getAttribute('viewBox') === expected,
+    fittedViewBox,
+  );
+
+  // Zoom control keeps the last map point fixed: hover, record, click `+`
+  // (the pointer travels onto the button, which must not re-anchor), move
+  // back to the same pixel, and the readout must match.
+  const btnBox = (await page.getByTestId('battlefield-map').boundingBox()) ?? mapBox;
+  const btnX = btnBox.x + btnBox.width / 4;
+  const btnY = btnBox.y + btnBox.height / 4;
+  await page.mouse.move(btnX, btnY);
+  await page.waitForTimeout(200);
+  const btnAnchorBefore = await page.getByTestId('cursor-coords').textContent();
+  await page.getByTestId('zoom-in').click();
+  await page.mouse.move(btnX, btnY);
+  await page.waitForTimeout(200);
+  const btnAnchorAfter = await page.getByTestId('cursor-coords').textContent();
+  check(
+    'zoom control keeps the cursor point fixed',
+    btnAnchorBefore === btnAnchorAfter,
+    `${btnAnchorBefore} → ${btnAnchorAfter}`,
+  );
+  await page.getByTestId('fit-view').click();
+  await page.waitForFunction(
+    (expected) => document.querySelector('[data-testid="battlefield-map"]')?.getAttribute('viewBox') === expected,
+    fittedViewBox,
+  );
+
+  // Wheel zoom around the cursor.
+  const zoomAttrBefore = await page.getByTestId('battlefield-map').getAttribute('data-zoom');
+  const wheelBox = (await page.getByTestId('battlefield-map').boundingBox()) ?? mapBox;
+  await page.mouse.move(wheelBox.x + wheelBox.width / 2, wheelBox.y + wheelBox.height / 2);
+  await page.mouse.wheel(0, -240);
+  await page.waitForFunction(
+    (expected) => document.querySelector('[data-testid="battlefield-map"]')?.getAttribute('data-zoom') !== expected,
+    zoomAttrBefore,
+  );
+  check('wheel zooms the map', true);
+
+  // Fit restores the whole battlefield.
+  await page.getByTestId('fit-view').click();
+  await page.waitForFunction(
+    (expected) => document.querySelector('[data-testid="battlefield-map"]')?.getAttribute('viewBox') === expected,
+    fittedViewBox,
+  );
+  check('fit shows the whole battlefield', true);
+
+  // Hand tool pans by dragging; V switches back to select.
+  await page.getByTestId('map-tool-hand').click();
+  check(
+    'hand tool activates',
+    (await page.getByTestId('map-tool-hand').getAttribute('aria-pressed')) === 'true',
+  );
+  const panBox = (await page.getByTestId('battlefield-map').boundingBox()) ?? mapBox;
+  const panStart = await page.getByTestId('battlefield-map').getAttribute('viewBox');
+  await page.mouse.move(panBox.x + panBox.width / 2, panBox.y + panBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(panBox.x + panBox.width / 2 + 120, panBox.y + panBox.height / 2 + 60, { steps: 8 });
+  await page.mouse.up();
+  const panEnd = await page.getByTestId('battlefield-map').getAttribute('viewBox');
+  check('hand tool pans the map', panEnd !== panStart, `${panStart} → ${panEnd}`);
+  await page.keyboard.press('v');
+  check(
+    'V switches back to the select tool',
+    (await page.getByTestId('map-tool-select').getAttribute('aria-pressed')) === 'true',
+  );
+  await page.keyboard.press('h');
+  check(
+    'H switches to the hand tool',
+    (await page.getByTestId('map-tool-hand').getAttribute('aria-pressed')) === 'true',
+  );
+  await page.keyboard.press('v');
+
+  // Fit after panning restores the fitted view.
+  await page.getByTestId('fit-view').click();
+  await page.waitForFunction(
+    (expected) => document.querySelector('[data-testid="battlefield-map"]')?.getAttribute('viewBox') === expected,
+    fittedViewBox,
+  );
+  check('fit restores the view after panning', true);
+
+  // Space-held panning: with the select tool active, holding Space and
+  // dragging pans the map. Blur first so Space isn't swallowed by a button.
+  await page.evaluate(() => {
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+  });
+  const spaceStart = await page.getByTestId('battlefield-map').getAttribute('viewBox');
+  const spaceBox = (await page.getByTestId('battlefield-map').boundingBox()) ?? mapBox;
+  await page.mouse.move(spaceBox.x + spaceBox.width / 2, spaceBox.y + spaceBox.height / 2);
+  await page.keyboard.down('Space');
+  await page.mouse.down();
+  await page.mouse.move(spaceBox.x + spaceBox.width / 2 - 90, spaceBox.y + spaceBox.height / 2 - 40, { steps: 8 });
+  await page.mouse.up();
+  await page.keyboard.up('Space');
+  const spaceEnd = await page.getByTestId('battlefield-map').getAttribute('viewBox');
+  check('space-held drag pans the map', spaceEnd !== spaceStart, `${spaceStart} → ${spaceEnd}`);
+  await page.getByTestId('fit-view').click();
+  await page.waitForFunction(
+    (expected) => document.querySelector('[data-testid="battlefield-map"]')?.getAttribute('viewBox') === expected,
+    fittedViewBox,
+  );
+
+  // Cursor coordinates read out in map metres.
+  const coordBox = (await page.getByTestId('battlefield-map').boundingBox()) ?? mapBox;
+  await page.mouse.move(coordBox.x + coordBox.width / 2, coordBox.y + coordBox.height / 2);
+  const coords = await page.getByTestId('cursor-coords').textContent();
+  const coordMatch = (coords ?? '').match(/X (-?[\d.]+) m · Y (-?[\d.]+) m/);
+  const coordInside =
+    coordMatch !== null &&
+    Number(coordMatch[1]) >= 0 &&
+    Number(coordMatch[1]) <= 1200 &&
+    Number(coordMatch[2]) >= 0 &&
+    Number(coordMatch[2]) <= 800;
+  check('cursor coordinates read out in metres', coordInside, coords ?? '');
+
+  // Grid and labels toggle on and off.
+  await page.getByTestId('toggle-grid').click();
+  check('grid toggles off', !(await page.getByTestId('map-grid').isVisible()));
+  await page.getByTestId('toggle-grid').click();
+  check('grid toggles on', await page.getByTestId('map-grid').isVisible());
+  const labelsBefore = await page.getByTestId('toggle-labels').getAttribute('aria-pressed');
+  await page.getByTestId('toggle-labels').click();
+  const labelsAfter = await page.getByTestId('toggle-labels').getAttribute('aria-pressed');
+  check('labels toggle on and off', labelsBefore !== labelsAfter, `${labelsBefore} → ${labelsAfter}`);
   const sideAEmpty = await page.getByTestId('oob-side-a').getAttribute('data-empty');
   const sideBEmpty = await page.getByTestId('oob-side-b').getAttribute('data-empty');
   check('order of battle is empty for both sides', sideAEmpty === 'true' && sideBEmpty === 'true');
