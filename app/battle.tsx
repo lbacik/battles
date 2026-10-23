@@ -386,7 +386,7 @@ export default function BattleScreen({
                 <section aria-label="Turn result" data-testid="turn-result">
                   <span className="eyebrow">
                     TURN {summary.turnNumber} RESULT ·{' '}
-                    {String(sideName(battle, summary.side)).toUpperCase()}
+                    {String(sideName(battle, summary.side ?? '')).toUpperCase()}
                   </span>
                   <dl className="result">
                     <dt>Orders carried out</dt>

@@ -882,7 +882,25 @@ export default function Home() {
             ) : null}
           </div>
         </header>
-        {document && openId ? (
+        {battle ? (
+          <BattleScreen
+            battle={battle}
+            announcement={announcement}
+            resolving={resolving}
+            resolveError={resolveError}
+            onCommitEmpty={handleCommitEmpty}
+            onContinueAutomated={handleContinueAutomated}
+            onBackToLibrary={handleBackToLibrary}
+          />
+        ) : setupDocument && setupId ? (
+          <BattleSetup
+            scenario={setupDocument}
+            problems={setupProblems}
+            onBegin={handleBegin}
+            onOpenInEditor={handleOpenSetupInEditor}
+            onBack={handleBackToLibrary}
+          />
+        ) : document && openId ? (
           <>
             <Editor
               document={document}
@@ -897,6 +915,7 @@ export default function Home() {
               onSave={handleSave}
               onExport={() => handleExport(null)}
               onBack={handleBack}
+              onStartBattle={handleStartBattleFromEditor}
             />
             {conflict ? (
               <div className="conflict-backdrop" data-testid="conflict-dialog">
@@ -943,21 +962,34 @@ export default function Home() {
             ) : null}
           </>
         ) : (
-          <Library
-            entries={entries}
-            loading={loading}
-            error={error}
-            persistent={persistent}
-            importError={importError}
-            onCreate={handleCreate}
-            onOpen={openScenario}
-            onDuplicate={handleDuplicate}
-            onDelete={handleDelete}
-            onExport={(id) => handleExport(id)}
-            onExportRaw={handleExportRaw}
-            onImportFile={handleImportFile}
-            creating={creating}
-          />
+          <>
+            <Library
+              entries={entries}
+              loading={loading}
+              error={error}
+              persistent={persistent}
+              importError={importError}
+              onCreate={handleCreate}
+              onOpen={openScenario}
+              onStartBattle={handleStartBattleFromLibrary}
+              onDuplicate={handleDuplicate}
+              onDelete={handleDelete}
+              onExport={(id) => handleExport(id)}
+              onExportRaw={handleExportRaw}
+              onImportFile={handleImportFile}
+              creating={creating}
+            />
+            {battleError ? (
+              <p className="validation" role="alert" data-testid="battle-error">
+                {battleError}
+              </p>
+            ) : null}
+            <BattlesList
+              battles={battles}
+              onResume={resumeBattle}
+              onDelete={handleDeleteBattle}
+            />
+          </>
         )}
         <div id="toast" role="status" aria-live="polite" className={toast ? 'visible' : ''}>
           {toast}
