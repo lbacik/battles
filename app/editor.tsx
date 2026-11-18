@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useEffectEvent, useMemo, useState } from 'react';
 import BattlefieldMap from './battlefield-map';
 import {
   TROOP_TYPE_CATALOGUE,
@@ -94,12 +94,15 @@ function DraftField({
   const [focused, setFocused] = useState(false);
 
   // An outside change (undo, redo, reopen) refreshes the field, but never
-  // clobbers a draft the author is still typing.
-  useEffect(() => {
+  // clobbers a draft the author is still typing. Adjusted during render, not
+  // in an effect, so the field never shows a stale value for a frame.
+  const [synced, setSynced] = useState({ value, focused });
+  if (synced.value !== value || synced.focused !== focused) {
+    setSynced({ value, focused });
     if (!focused) {
       setDraft(value);
     }
-  }, [value, focused]);
+  }
 
   // A refused commit reverts the field to the last committed value (the
   // document keeps it throughout): the typed value was never committed.
@@ -374,31 +377,34 @@ export default function Editor({
   // editor except inside an uncommitted draft: a field holding edits not yet
   // committed keeps the keystroke (native behavior), because undoing would
   // rebuild every input from the committed document and destroy the draft.
+  // An Effect Event always sees the latest onUndo/onRedo, so the listener is
+  // attached once and a keystroke never reaches a stale handler.
+  const onUndoRedoKey = useEffectEvent((event: KeyboardEvent) => {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+    const target = event.target as HTMLElement | null;
+    if (
+      target &&
+      (target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.tagName === 'SELECT')
+    ) {
+      const committed = (target as HTMLInputElement).dataset?.committed;
+      if (committed !== undefined && (target as HTMLInputElement).value !== committed) return;
+    }
+    const key = event.key.toLowerCase();
+    if (key === 'z' && !event.shiftKey) {
+      event.preventDefault();
+      onUndo();
+    } else if (key === 'y' || (key === 'z' && event.shiftKey)) {
+      event.preventDefault();
+      onRedo();
+    }
+  });
   useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
-      const target = event.target as HTMLElement | null;
-      if (
-        target &&
-        (target.tagName === 'INPUT' ||
-          target.tagName === 'TEXTAREA' ||
-          target.tagName === 'SELECT')
-      ) {
-        const committed = (target as HTMLInputElement).dataset?.committed;
-        if (committed !== undefined && (target as HTMLInputElement).value !== committed) return;
-      }
-      const key = event.key.toLowerCase();
-      if (key === 'z' && !event.shiftKey) {
-        event.preventDefault();
-        onUndo();
-      } else if (key === 'y' || (key === 'z' && event.shiftKey)) {
-        event.preventDefault();
-        onRedo();
-      }
-    };
+    const onKey = (event: KeyboardEvent) => onUndoRedoKey(event);
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [onUndo, onRedo]);
+  }, []);
 
   function fail(field: string, message: string) {
     setFieldErrors({ [field]: message });
@@ -1159,51 +1165,54 @@ export default function Editor({
   // Terrain drawing and vertex keys. Enter finishes the polygon, Escape
   // cancels it, Backspace removes the last vertex; with no draft, Delete
   // removes the selected vertex and Escape clears the selection. Typing in a
-  // field is never stolen. Undo and redo keep their own shortcut.
-  useEffect(() => {
+  // field is never stolen. Undo and redo keep their own shortcut. An Effect
+  // Event reads the current draft and selection, so the listener is attached
+  // once and Enter right after the last vertex click finishes the full shape.
+  const onTerrainKey = useEffectEvent((event: KeyboardEvent) => {
     if (mode !== 'map') return;
-    const onKey = (event: KeyboardEvent) => {
-      const target = event.target as HTMLElement | null;
-      if (
-        target &&
-        (target.tagName === 'INPUT' ||
-          target.tagName === 'TEXTAREA' ||
-          target.tagName === 'SELECT')
-      ) {
-        return;
-      }
-      if (event.ctrlKey || event.metaKey || event.altKey) return;
-      if (terrainDraft) {
-        if (event.key === 'Enter') {
-          event.preventDefault();
-          finishTerrainDraft();
-        } else if (event.key === 'Escape') {
-          event.preventDefault();
-          cancelTerrainDraft();
-        } else if (event.key === 'Backspace') {
-          event.preventDefault();
-          popDraftVertex();
-        }
-        return;
-      }
-      if (
-        (event.key === 'Delete' || event.key === 'Backspace') &&
-        selectedTerrainId &&
-        selectedVertexIndex !== null
-      ) {
+    const target = event.target as HTMLElement | null;
+    if (
+      target &&
+      (target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.tagName === 'SELECT')
+    ) {
+      return;
+    }
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    if (terrainDraft) {
+      if (event.key === 'Enter') {
         event.preventDefault();
-        deleteTerrainVertex(selectedTerrainId, selectedVertexIndex);
-        return;
+        finishTerrainDraft();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        cancelTerrainDraft();
+      } else if (event.key === 'Backspace') {
+        event.preventDefault();
+        popDraftVertex();
       }
-      if (event.key === 'Escape' && selectedTerrainId) {
-        setSelectedTerrainId(null);
-        setSelectedVertexIndex(null);
-        setTerrainRefusal(null);
-      }
-    };
+      return;
+    }
+    if (
+      (event.key === 'Delete' || event.key === 'Backspace') &&
+      selectedTerrainId &&
+      selectedVertexIndex !== null
+    ) {
+      event.preventDefault();
+      deleteTerrainVertex(selectedTerrainId, selectedVertexIndex);
+      return;
+    }
+    if (event.key === 'Escape' && selectedTerrainId) {
+      setSelectedTerrainId(null);
+      setSelectedVertexIndex(null);
+      setTerrainRefusal(null);
+    }
+  });
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => onTerrainKey(event);
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  });
+  }, []);
   // --- Unit placement (map drag, rotation handle, inspector fields) ----------
   // Every geometry change goes through proposeUnitPatch: a change whose
   // footprint would overlap another unit or leave the battlefield is refused,
