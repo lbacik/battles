@@ -1,0 +1,50 @@
+# Project Profile for coding-agent (schema 2): the Validation Contract the
+# Worker pins from `main` at the start of every Attempt. It mirrors the gating
+# steps of .github/workflows/ci.yml, minus the end-to-end suite (see below).
+# An Attempt that edits this file changes the contract for later Attempts only.
+schema: 2
+language: typescript
+working_directory: "."
+toolchain:
+  node: "22"
+  # The image's Supported Toolchain Matrix only carries pnpm for Node, so the
+  # declaration says pnpm to pass the toolchain check. The repository itself
+  # stays on npm (package-lock.json, `npm ci` in CI): npm ships with Node in
+  # the same image, and every command below uses it.
+  package_manager: pnpm
+commands:
+  # npm's cache goes under XDG_CACHE_HOME (the Worker's persistent cache root):
+  # the image leaves the default ~/.npm owned by root, so `npm ci` as the
+  # Worker's user fails there with EACCES.
+  bootstrap: npm ci --no-audit --no-fund --cache "${XDG_CACHE_HOME:-$HOME/.cache}/npm"
+  # The same test files as `npm test` (all of domain/*.test.js). Called through
+  # `node --test` directly because reporter flags appended via `npm test --`
+  # land after the file list and are ignored, so no JUnit file is written.
+  test_all: >-
+    node --test
+    --test-reporter=spec --test-reporter-destination=stdout
+    --test-reporter=junit --test-reporter-destination={evidence_dir}/test_all.xml
+    domain/*.test.js
+  test_targeted: >-
+    node --test
+    --test-reporter=spec --test-reporter-destination=stdout
+    --test-reporter=junit --test-reporter-destination={evidence_dir}/test_targeted.xml
+    {path}
+evidence:
+  format: junit-xml
+  test_all: "{evidence_dir}/test_all.xml"
+  test_targeted: "{evidence_dir}/test_targeted.xml"
+# The CI gates besides unit tests. `npm run test:e2e` is left out: it needs
+# Playwright's Chromium plus its system libraries (`playwright install
+# --with-deps`, root), which the Worker image does not provide. CI still runs
+# it on every pull request.
+checks:
+  - name: lint
+    command: npm run lint
+  - name: format
+    command: npm run format:check
+  - name: typecheck
+    command: npm run typecheck
+  - name: build
+    command: NEXT_TELEMETRY_DISABLED=1 npm run build
+services: []
