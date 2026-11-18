@@ -32,6 +32,18 @@ function check(name, pass, detail = '') {
   log(`${pass ? 'PASS' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
 }
 
+// Waits for the save just clicked to settle. The "Scenario saved." toast
+// lingers for 2.4 s, so a save clicked while an earlier toast is still up
+// would pass a toast-only wait before it finished. The save status leaves
+// "Saving…" only once the save settles, so wait for that first.
+async function waitForSave(page) {
+  await page
+    .getByTestId('save-status')
+    .filter({ hasNotText: 'Saving…' })
+    .waitFor({ timeout: 10000 });
+  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+}
+
 function serveStatic(dir) {
   const types = {
     '.html': 'text/html; charset=utf-8',
@@ -183,7 +195,7 @@ try {
       'Editor acceptance probe: steps 1-10.',
   );
   await page.getByTestId('save-scenario').click();
-  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(page);
   const resizedDims = await page.getByTestId('battlefield-dims').textContent();
   check(
     'acceptance step 1 sets the battlefield to 1400 x 900 m',
@@ -391,7 +403,7 @@ try {
   const scenarioId = new URL(editorUrl).searchParams.get('scenario');
   check('editor URL carries the scenario id', !!scenarioId, editorUrl);
   await page.getByTestId('save-scenario').click();
-  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(page);
   const saveStatus = await page.getByTestId('save-status').textContent();
   check('save reports the saved state', saveStatus === 'Saved', `status=${saveStatus}`);
 
@@ -497,7 +509,7 @@ try {
 
   // A scenario with warnings still saves.
   await page.getByTestId('save-scenario').click();
-  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(page);
   check(
     'a scenario with warnings saves',
     (await page.getByTestId('save-status').textContent()) === 'Saved',
@@ -566,8 +578,8 @@ try {
   for (const [vx, vy] of [
     [150, 120],
     [300, 120],
-    [310, 230],
-    [220, 260],
+    [310, 190],
+    [220, 195],
   ]) {
     await clickMap(vx, vy);
   }
@@ -800,7 +812,7 @@ try {
 
   // Terrain persists through a save.
   await page.getByTestId('save-scenario').click();
-  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(page);
   check(
     'terrain saves',
     (await page.getByTestId('save-status').textContent()) === 'Saved',
@@ -1235,7 +1247,7 @@ try {
   // and delete above). Save the finished scenario and prove step 9 through
   // the browser: reload and reopen identical to 0.1 m with empty undo history.
   await page.getByTestId('save-scenario').click();
-  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(page);
   await page.reload({ waitUntil: 'networkidle' });
   await page.getByTestId('editor').waitFor({ timeout: 15000 });
   check(
@@ -1345,7 +1357,7 @@ try {
   await page.getByTestId('inspector-width').fill('1400.05');
   await page.getByTestId('inspector-width').blur();
   await page.getByTestId('save-scenario').click();
-  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(page);
   const exportUrl = new URL(page.url());
   const exportedId = exportUrl.searchParams.get('scenario');
   const unitsBeforeExport = await page.getByTestId('oob-unit').count();
@@ -1422,7 +1434,7 @@ try {
   await page.getByTestId('inspector-title').fill('Acceptance plain (edited copy)');
   await page.locator('.map-caption').click();
   await page.getByTestId('save-scenario').click();
-  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(page);
   await page.getByTestId('back-to-library').click();
   await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
   const siblingTitles = await page.getByTestId('scenario-row-title').allTextContents();
@@ -1613,7 +1625,7 @@ try {
   );
   // Persistence step 6: the unknown key saves and survives a reopen verbatim.
   await page.getByTestId('save-scenario').click();
-  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(page);
   await page.reload({ waitUntil: 'networkidle' });
   await page.getByTestId('editor').waitFor({ timeout: 15000 });
   const reopenedTroopWarning = await page.getByTestId('unknown-troop-warning').textContent().catch(() => null);
@@ -1696,7 +1708,7 @@ try {
   const conflictId = new URL(page.url()).searchParams.get('scenario');
   check('conflict probe opens', !!conflictId, String(conflictId));
   await page.getByTestId('save-scenario').click();
-  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(page);
   const page2 = await context.newPage();
   page2.on('console', (message) => log(`browser2 console: ${message.text()}`));
   page2.on('pageerror', (error) => log(`browser2 pageerror: ${String(error)}`));
@@ -1705,7 +1717,7 @@ try {
   await page2.getByTestId('inspector-title').fill('Conflict Other Tab');
   await page2.getByTestId('inspector-title').blur();
   await page2.getByTestId('save-scenario').click();
-  await page2.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(page2);
   await page.getByTestId('inspector-title').fill('Conflict Mine');
   await page.getByTestId('inspector-title').blur();
   await page.getByTestId('save-scenario').click();
@@ -1727,7 +1739,7 @@ try {
   await page.getByTestId('save-scenario').click();
   await page.getByTestId('conflict-dialog').waitFor({ timeout: 10000 });
   await page.getByTestId('conflict-overwrite').click();
-  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(page);
   check('overwrite resolves the conflict', !(await page.getByTestId('conflict-dialog').count()));
   const overwriteStatus = await page.getByTestId('save-status').textContent();
   check('overwrite reports the saved state', overwriteStatus === 'Saved', `status=${overwriteStatus}`);
@@ -1773,7 +1785,7 @@ try {
       (await page.getByTestId('unsaved-pill').count()) === 1,
   );
   await page.getByTestId('save-scenario').click();
-  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(page);
   check('save succeeds after the quota failure', true);
 
   // A refused persistent-storage request is reported in the library.
@@ -1803,7 +1815,7 @@ try {
   await storagePage.getByTestId('new-scenario-submit').click();
   await storagePage.getByTestId('editor').waitFor({ timeout: 15000 });
   await storagePage.getByTestId('save-scenario').click();
-  await storagePage.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(storagePage);
   await storagePage.getByTestId('back-to-library').click();
   await storagePage.getByTestId('scenario-list').waitFor({ timeout: 10000 });
   const storageNote = await storagePage.getByTestId('storage-note').textContent();
@@ -1851,7 +1863,7 @@ try {
     await battlePage.getByTestId('start-battle-editor').isDisabled(),
   );
   await battlePage.getByTestId('save-scenario').click();
-  await battlePage.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(battlePage);
 
   // The empty scenario is unplayable: Begin refuses with every problem.
   await battlePage.getByTestId('start-battle-editor').click();
@@ -1983,7 +1995,7 @@ try {
   await battlePage.getByTestId('oob-tab-1').click();
   await battlePage.getByTestId('oob-add').click();
   await battlePage.getByTestId('save-scenario').click();
-  await battlePage.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(battlePage);
   await battlePage.getByTestId('start-battle-editor').click();
   await battlePage.getByTestId('battle-setup').waitFor({ timeout: 10000 });
   await battlePage.getByTestId('controller-side-b').selectOption('passive');
@@ -2175,7 +2187,7 @@ try {
     (await movePage.getByTestId('oob-unit').count()) === 3,
   );
   await movePage.getByTestId('save-scenario').click();
-  await movePage.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(movePage);
   await movePage.getByTestId('start-battle-editor').click();
   await movePage.getByTestId('battle-setup').waitFor({ timeout: 10000 });
   await movePage.getByTestId('controller-side-b').selectOption('passive');
@@ -2390,7 +2402,7 @@ try {
     (await combatPage.getByTestId('oob-unit').count()) === 2,
   );
   await combatPage.getByTestId('save-scenario').click();
-  await combatPage.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(combatPage);
   await combatPage.getByTestId('start-battle-editor').click();
   await combatPage.getByTestId('battle-setup').waitFor({ timeout: 10000 });
   await combatPage.getByTestId('controller-side-b').selectOption('random');
@@ -2600,7 +2612,7 @@ try {
     (await fullPage.getByTestId('oob-unit').count()) === 8,
   );
   await fullPage.getByTestId('save-scenario').click();
-  await fullPage.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(fullPage);
   await fullPage.getByTestId('start-battle-editor').click();
   await fullPage.getByTestId('battle-setup').waitFor({ timeout: 10000 });
   await fullPage.getByTestId('controller-side-b').selectOption('passive');
@@ -2868,7 +2880,7 @@ try {
   await concedePage.getByTestId('oob-tab-1').click();
   await concedePage.getByTestId('oob-add').click();
   await concedePage.getByTestId('save-scenario').click();
-  await concedePage.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(concedePage);
   await concedePage.getByTestId('start-battle-editor').click();
   await concedePage.getByTestId('battle-setup').waitFor({ timeout: 10000 });
   await concedePage.getByTestId('begin-battle').click();
@@ -3166,7 +3178,7 @@ try {
   await gatePage.getByTestId('unit-spacing-lateral').fill('1.8');
   await gatePage.locator('.map-caption').click();
   await gatePage.getByTestId('save-scenario').click();
-  await gatePage.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(gatePage);
   check(
     'gate: the fixed reference saves',
     (await gatePage.getByTestId('save-status').textContent()) === 'Saved',
@@ -3198,7 +3210,7 @@ try {
     (await gatePage.getByTestId('oob-unit').count()) === 7,
   );
   await gatePage.getByTestId('save-scenario').click();
-  await gatePage.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(gatePage);
 
   // Step 3: start Human vs Passive from the fixed reference.
   await gatePage.getByTestId('start-battle-editor').click();
@@ -3581,7 +3593,7 @@ try {
     (await endPage.getByTestId('oob-unit').count()) === 2,
   );
   await endPage.getByTestId('save-scenario').click();
-  await endPage.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+  await waitForSave(endPage);
   await endPage.getByTestId('start-battle-editor').click();
   await endPage.getByTestId('battle-setup').waitFor({ timeout: 10000 });
   await endPage.getByTestId('controller-side-b').selectOption('random');
