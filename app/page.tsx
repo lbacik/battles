@@ -607,6 +607,17 @@ export default function Home() {
     if (dirty && !window.confirm('You have unsaved changes. Leave the editor without saving?')) {
       return;
     }
+    closeEditor();
+    const url = new URL(window.location.href);
+    url.searchParams.delete('scenario');
+    window.history.replaceState(null, '', url);
+    void refreshLibrary();
+  }
+
+  // Drops the open scenario and its editing state. A battle started from the
+  // editor keeps the scenario open underneath, so leaving the battle flow for
+  // the library must close it too, or the editor would reappear.
+  function closeEditor() {
     setOpenId(null);
     setDocument(null);
     setSavedDocument(null);
@@ -614,10 +625,6 @@ export default function Home() {
     setRevision(null);
     setSaveError(null);
     setConflict(null);
-    const url = new URL(window.location.href);
-    url.searchParams.delete('scenario');
-    window.history.replaceState(null, '', url);
-    void refreshLibrary();
   }
 
   // --- Battle flow ---------------------------------------------------------
@@ -631,6 +638,8 @@ export default function Home() {
     return side?.name || id;
   }
 
+  // Every battle step is stored before the screen shows it, so a reload
+  // right after a visible turn, start, or concession always resumes it.
   async function persistBattle(nextBattle: any, nextDecisions: any[]) {
     try {
       await getBattleStore().save(nextBattle, nextDecisions);
@@ -716,6 +725,7 @@ export default function Home() {
       return;
     }
     const startedDecisions: any[] = [];
+    await persistBattle(started, startedDecisions);
     setBattle(started);
     setDecisions(startedDecisions);
     setAnnouncement(`${battleSideName(started, started.startingSide)} begins — round 1, turn 1.`);
@@ -730,7 +740,6 @@ export default function Home() {
     setDocument(null);
     setSavedDocument(null);
     setUrlParams({ scenario: null, battle: battleId });
-    await persistBattle(started, startedDecisions);
     showToast(`${battleSideName(started, started.activeSide)} begins.`);
   }
 
@@ -764,12 +773,17 @@ export default function Home() {
       return;
     }
     const nextDecisions = [...decisions, { type: 'commit', submission }];
+    setResolving(true);
+    try {
+      await persistBattle(next, nextDecisions);
+    } finally {
+      setResolving(false);
+    }
     setBattle(next);
     setDecisions(nextDecisions);
     setAnnouncement(null);
     armHandoff(next);
     showToast(`Turn ${battle.turnNumber} resolved.`);
-    await persistBattle(next, nextDecisions);
   }
 
   // The human side commits an empty turn: all units hold. The commit is
@@ -801,12 +815,17 @@ export default function Home() {
       return;
     }
     const nextDecisions = [...decisions, { type: 'commit', submission }];
+    setResolving(true);
+    try {
+      await persistBattle(next, nextDecisions);
+    } finally {
+      setResolving(false);
+    }
     setBattle(next);
     setDecisions(nextDecisions);
     setAnnouncement(null);
     armHandoff(next);
     showToast(`Turn ${battle.turnNumber} resolved.`);
-    await persistBattle(next, nextDecisions);
   }
 
   // A concession ends the battle at once with the other side the winner (the
@@ -829,11 +848,11 @@ export default function Home() {
       return;
     }
     const nextDecisions = [...decisions, { type: 'concede', side }];
+    await persistBattle(next, nextDecisions);
     setBattle(next);
     setDecisions(nextDecisions);
     setAnnouncement(null);
     showToast(`${battleSideName(battle, side)} conceded.`);
-    await persistBattle(next, nextDecisions);
   }
 
   // A rematch starts a new battle from this battle's scenario snapshot (not
@@ -862,6 +881,7 @@ export default function Home() {
       return;
     }
     const startedDecisions: any[] = [];
+    await persistBattle(started, startedDecisions);
     setBattle(started);
     setDecisions(startedDecisions);
     setAnnouncement(
@@ -872,7 +892,6 @@ export default function Home() {
     setAwaitingHandoff(false);
     setHandoffSide(null);
     setUrlParams({ scenario: null, battle: battleId });
-    await persistBattle(started, startedDecisions);
     showToast(`${battleSideName(started, started.activeSide)} begins the rematch.`);
   }
 
@@ -924,12 +943,12 @@ export default function Home() {
       }
       const step = await runTurn(battle, players);
       const nextDecisions = [...decisions, step.decision];
+      await persistBattle(step.battle, nextDecisions);
       setBattle(step.battle);
       setDecisions(nextDecisions);
       setAnnouncement(null);
       armHandoff(step.battle);
       showToast(`Turn ${battle.turnNumber} resolved.`);
-      await persistBattle(step.battle, nextDecisions);
     } catch (automatedError) {
       setResolveError(
         automatedError instanceof Error ? automatedError.message : String(automatedError),
@@ -956,6 +975,9 @@ export default function Home() {
   }
 
   function handleBackToLibrary() {
+    // Starting a battle needs a saved scenario, so closing the editor here
+    // never drops unsaved edits.
+    closeEditor();
     setSetupId(null);
     setSetupDocument(null);
     setSetupProblems([]);
