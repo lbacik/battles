@@ -1381,9 +1381,9 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
           <path d="M3 11q5-3 10 0t10 0" stroke="#d1e1db" fill="none" />
         </pattern>
         <g id="polis-tree">
-          <path d="M10 9v12" stroke="#7a8969" stroke-width="1" />
-          <ellipse cx="10" cy="10" rx="9" ry="8" fill="#7b956e" stroke="#6e8761" stroke-width=".7" />
-          <path d="M5 8q5-6 10-1" stroke="#adba93" fill="none" stroke-width="1" />
+          <path d="M10 9v12" stroke="#7a8969" strokeWidth="1" />
+          <ellipse cx="10" cy="10" rx="9" ry="8" fill="#7b956e" stroke="#6e8761" strokeWidth=".7" />
+          <path d="M5 8q5-6 10-1" stroke="#adba93" fill="none" strokeWidth="1" />
         </g>
       </defs>
       <rect
