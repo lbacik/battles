@@ -465,6 +465,11 @@ export default function BattlefieldMap({
       data-testid="map-viewport"
       className={`map-viewport${tool === 'hand' ? ' tool-hand' : ''}${spaceHeld ? ' space-pan' : ''}${panning ? ' panning' : ''}${draft ? ' drafting' : ''}`}
       onPointerDown={(event) => {
+        // A click suppression belongs to the gesture that set it. When that
+        // gesture's click never arrives (the pointerup re-render can replace
+        // the handle it started on), a stale flag must not swallow the next
+        // gesture's click, so every new press starts unsuppressed.
+        suppressClickRef.current = false;
         // Dragging a vertex moves it; the pointerup commits one undo step,
         // and a refused move highlights the candidate and keeps the old
         // geometry. No vertex drags while drawing: every click adds a vertex.
@@ -1454,7 +1459,14 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
           // constant screen size at any zoom.
           const reach = 20 * entry.mpp;
           const gripR = 7 * entry.mpp;
-          const handle = entry.selected
+          // Only a unit something can rotate gets the grip: in the editor
+          // every selected unit; in battle only the unit whose Move draft the
+          // grip pivots. A dead grip would swallow map clicks (approach legs).
+          const rotatable =
+            entry.selected &&
+            (onRotateUnit !== undefined ||
+              (onBattleRotate !== undefined && entry.id === battleRotateUnitId));
+          const handle = rotatable
             ? `<line x1="0" y1="0" x2="0" y2="${-reach}" stroke="${entry.color}" stroke-width="${1.6 * entry.mpp}" stroke-dasharray="${4 * entry.mpp} ${3 * entry.mpp}" class="rotate-stem" pointer-events="none"/>` +
               `<circle cx="0" cy="${-reach}" r="${12 * entry.mpp}" fill="transparent" class="rotate-hit" data-rotate-handle="${entry.id}" pointer-events="all"><title>Drag to rotate (snaps to ${FACING_SNAP_DEG}°, hold Shift for free rotation)</title></circle>` +
               `<circle cx="0" cy="${-reach}" r="${gripR}" fill="#f8f9f0" stroke="${entry.color}" stroke-width="${2 * entry.mpp}" class="rotate-grip" data-testid="rotate-handle" data-rotate-handle="${entry.id}"><title>Drag to rotate (snaps to ${FACING_SNAP_DEG}°, hold Shift for free rotation)</title></circle>`

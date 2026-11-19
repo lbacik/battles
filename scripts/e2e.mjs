@@ -44,6 +44,19 @@ async function waitForSave(page) {
   await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
 }
 
+// Terrain rows live in the Map editor tab, while the editor reopens on the
+// battle tab. Count them there and return to the battle tab.
+async function terrainRowCounts(page) {
+  await page.getByTestId('mode-map').click();
+  const counts = {
+    ground: await page.getByTestId('terrain-ground-row').count(),
+    hill: await page.getByTestId('terrain-hill-row').count(),
+    linear: await page.getByTestId('terrain-linear-row').count(),
+  };
+  await page.getByTestId('mode-battle').click();
+  return counts;
+}
+
 function serveStatic(dir) {
   const types = {
     '.html': 'text/html; charset=utf-8',
@@ -506,6 +519,14 @@ try {
     'redo restores the edit',
     (await page.getByTestId('inspector-title').inputValue()) === `${title} revised`,
   );
+  // Restore the acceptance title: steps 9-10 and the persistence steps
+  // reopen, duplicate, and export the scenario under its original name.
+  await page.getByTestId('inspector-title').fill(title);
+  await page.locator('.map-caption').click();
+  check(
+    'the title edit can be reverted by hand',
+    (await page.getByTestId('inspector-title').inputValue()) === title,
+  );
 
   // A scenario with warnings still saves.
   await page.getByTestId('save-scenario').click();
@@ -585,9 +606,12 @@ try {
   }
   await page.keyboard.press('Enter');
   check('drawing rough and settlement adds two more rows', (await groundRow.count()) === 3);
+  // Three ground areas are drawn by now (forest, rough, settlement): the map
+  // shows one shape per ground feature.
   check(
     'the forest renders on the map',
-    (await page.getByTestId('terrain-ground').count()) === 1,
+    (await page.getByTestId('terrain-ground').count()) === 3,
+    `ground=${await page.getByTestId('terrain-ground').count()}`,
   );
 
   // An overlapping area is refused: the candidate highlights red, the list
@@ -763,20 +787,26 @@ try {
     ((await linearRow.nth(1).textContent()) ?? '').includes('8 m'),
   );
 
-  // A road vertex can be inserted on an edge and deleted again.
+  // A road vertex can be inserted on an edge and deleted again. React 19
+  // flushes the re-render a frame after the commit, so wait a beat before
+  // reading the handle count.
   const linearVertex = page.getByTestId('terrain-vertex-handle');
   const linearBefore = await linearVertex.count();
   check('the road shows its vertices', linearBefore === 3);
   await page.getByTestId('terrain-edge-handle').first().click();
+  await page.waitForTimeout(500);
   check(
     'inserting a road vertex adds a handle',
     (await linearVertex.count()) === linearBefore + 1,
   );
   await linearVertex.first().click();
   await page.keyboard.press('Delete');
+  await page.waitForTimeout(500);
   check('deleting a road vertex removes its handle', (await linearVertex.count()) === linearBefore);
 
   // Recategorise the forest, insert a vertex on an edge, delete it again.
+  // React 19 flushes the re-render a frame after the commit, so wait a beat
+  // before reading the handle counts.
   await groundRow.first().getByTestId('terrain-select').click();
   await page.getByTestId('terrain-category').selectOption('rough');
   check(
@@ -786,12 +816,14 @@ try {
   const vertexHandle = page.getByTestId('terrain-vertex-handle');
   const verticesBefore = await vertexHandle.count();
   await page.getByTestId('terrain-edge-handle').first().click();
+  await page.waitForTimeout(500);
   check(
     'inserting a vertex on an edge adds a handle',
     (await vertexHandle.count()) === verticesBefore + 1,
   );
   await vertexHandle.first().click();
   await page.keyboard.press('Delete');
+  await page.waitForTimeout(500);
   check(
     'deleting a vertex removes its handle',
     (await vertexHandle.count()) === verticesBefore,
@@ -899,9 +931,21 @@ try {
       ((await selectedOnMap.getAttribute('data-unit-id')) === firstUnitId),
   );
 
-  // Editing soldiers updates the derived ranks and depth.
+  // Centre the new unit before enlarging it: the first free spot sits near
+  // the battlefield edge, where a deeper or more open footprint would fall
+  // outside and be correctly refused. A central unit has room to grow, so
+  // the soldiers and preset edits below commit instead of refusing.
+  await page.getByTestId('unit-position-x').fill('600');
+  await page.locator('.map-caption').click();
+  await page.getByTestId('unit-position-y').fill('400');
+  await page.locator('.map-caption').click();
+  await page.waitForTimeout(500);
+
+  // Editing soldiers updates the derived ranks and depth. React 19 flushes
+  // the re-render a frame after the commit, so wait a beat before reading.
   await page.getByTestId('unit-soldiers').fill('150');
   await page.locator('.map-caption').click();
+  await page.waitForTimeout(500);
   const derived150 = (await page.getByTestId('unit-derived').textContent()) ?? '';
   check(
     'editing soldiers updates ranks and depth',
@@ -912,14 +956,17 @@ try {
   );
 
   // Changing troop type pre-fills that type's normal preset; the preset
-  // select then applies the open spacings in one step.
+  // select then applies the open spacings in one step. React 19 flushes the
+  // re-render a frame after the commit, so wait a beat before reading.
   await page.getByTestId('unit-troop').selectOption('peltast');
+  await page.waitForTimeout(500);
   check(
     'changing troop type pre-fills its normal spacing',
     (await page.getByTestId('unit-spacing-lateral').inputValue()) === '1.5' &&
       (await page.getByTestId('unit-spacing-depth').inputValue()) === '1.5',
   );
   await page.getByTestId('unit-preset').selectOption('open');
+  await page.waitForTimeout(500);
   const lateralOpen = await page.getByTestId('unit-spacing-lateral').inputValue();
   const depthOpen = await page.getByTestId('unit-spacing-depth').inputValue();
   check(
@@ -929,7 +976,8 @@ try {
   );
 
   // Duplicate names the copy uniquely; selecting on the map drives the
-  // inspector back to the first unit.
+  // inspector back to the first unit. React 19 flushes the duplicate
+  // re-render a frame after the commit, so settle before clicking the map.
   await page.getByTestId('unit-duplicate').click();
   check('duplicating adds a second row', (await oobUnit.count()) === 2);
   const oobDupTitles = await oobUnit.allTextContents();
@@ -938,6 +986,8 @@ try {
     oobDupTitles.some((entry) => /copy/.test(entry ?? '')),
     oobDupTitles.join(' | ').slice(0, 120),
   );
+  await page.locator(`[data-testid="map-unit"][data-unit-id="${firstUnitId}"]`).waitFor({ state: 'visible', timeout: 10000 });
+  await page.waitForTimeout(500);
   await page.locator(`[data-testid="map-unit"][data-unit-id="${firstUnitId}"]`).click();
   const selectedUnitTitle = await page.getByTestId('unit-title').textContent();
   check(
@@ -1047,8 +1097,19 @@ try {
   );
 
   // Dropping onto another unit is refused: the unit returns and both units
-  // are highlighted as the conflict.
+  // are highlighted as the conflict. Park the second unit at a known open
+  // spot first: its default placement can sit under the map toolbar, where
+  // a press would hit the toolbar button instead of the footprint.
   await page.locator(`[data-testid="oob-unit"][data-unit-id="${secondUnitId}"]`).click();
+  await page.getByTestId('unit-position-x').fill('400');
+  await page.locator('.map-caption').click();
+  await page.getByTestId('unit-position-y').fill('250');
+  await page.locator('.map-caption').click();
+  check(
+    'the second unit parks at an open spot before the drop',
+    (await page.getByTestId('unit-position-x').inputValue()) === '400' &&
+      (await page.getByTestId('unit-position-y').inputValue()) === '250',
+  );
   const targetBox = await page
     .locator(`[data-testid="map-unit"][data-unit-id="${firstUnitId}"] [data-testid="unit-footprint"]`)
     .boundingBox();
@@ -1121,7 +1182,8 @@ try {
     'files beyond soldiers are refused',
     await page.getByTestId('inspector-unit-files-error').isVisible(),
   );
-  await page.getByTestId('unit-name').fill('New Unit copy');
+  // The second unit (the copy) is selected, so take the first unit's name.
+  await page.getByTestId('unit-name').fill('New Unit');
   await page.locator('.map-caption').click();
   check(
     'a duplicate unit name is refused',
@@ -1171,15 +1233,17 @@ try {
     );
     await page.getByTestId('unit-name').fill(spec.name);
     await page.locator('.map-caption').click();
+    // Place the unit before sizing it: the first free spot can sit near the
+    // battlefield edge, where a larger footprint is correctly refused.
+    await page.getByTestId('unit-position-x').fill(String(spec.x));
+    await page.locator('.map-caption').click();
+    await page.getByTestId('unit-position-y').fill(String(spec.y));
+    await page.locator('.map-caption').click();
     await page.getByTestId('unit-side').selectOption({ label: spec.side });
     await page.getByTestId('unit-troop').selectOption(spec.troopType);
     await page.getByTestId('unit-soldiers').fill(String(spec.soldiers));
     await page.locator('.map-caption').click();
     await page.getByTestId('unit-files').fill(String(spec.files));
-    await page.locator('.map-caption').click();
-    await page.getByTestId('unit-position-x').fill(String(spec.x));
-    await page.locator('.map-caption').click();
-    await page.getByTestId('unit-position-y').fill(String(spec.y));
     await page.locator('.map-caption').click();
     await page.getByTestId('unit-facing').fill(String(spec.facing));
     await page.locator('.map-caption').click();
@@ -1203,15 +1267,19 @@ try {
   );
   await page.locator('[data-testid="oob-unit"]', { hasText: 'I Athenian taxis' }).click();
   const taxisDerived = (await page.getByTestId('unit-derived').textContent()) ?? '';
+  // 256 hoplites in 16 files stand 16 ranks deep; the hoplite normal preset
+  // spaces them 1.8 m apart both ways, so 16 x 1.8 = 28.8 m each way.
   check(
     'the inspector derives ranks, frontage, and depth',
     /16 ranks/.test(taxisDerived) &&
-      /16\.0 m frontage/.test(taxisDerived) &&
-      /16\.0 m depth/.test(taxisDerived),
+      /28\.8 m frontage/.test(taxisDerived) &&
+      /28\.8 m depth/.test(taxisDerived),
     taxisDerived.trim().slice(0, 120),
   );
   await page.locator('[data-testid="oob-unit"]', { hasText: 'Athenian peltasts' }).click();
   await page.getByTestId('unit-preset').selectOption('open');
+  // React 19 flushes the preset re-render a frame after the commit.
+  await page.waitForTimeout(500);
   check(
     'acceptance step 5 applies the open spacing preset',
     (await page.getByTestId('unit-spacing-lateral').inputValue()) === '3' &&
@@ -1254,6 +1322,7 @@ try {
     'acceptance step 9 reloads the finished scenario',
     (await page.getByTestId('header-title').textContent()) === title,
   );
+  const reloadedTerrain = await terrainRowCounts(page);
   check(
     'acceptance step 9 keeps every value identical to 0.1 m',
     ((await page.getByTestId('battlefield-dims').textContent()) ?? '').includes('1400 × 900') &&
@@ -1261,9 +1330,10 @@ try {
       (await page.getByTestId('inspector-height').inputValue()) === '900' &&
       (await page.getByTestId('oob-unit').count()) === 6 &&
       (await page.getByTestId('issue-warning').count()) === 0 &&
-      (await page.getByTestId('terrain-ground-row').count()) === 3 &&
-      (await page.getByTestId('terrain-hill-row').count()) === 2 &&
-      (await page.getByTestId('terrain-linear-row').count()) === 2,
+      reloadedTerrain.ground === 3 &&
+      reloadedTerrain.hill === 2 &&
+      reloadedTerrain.linear === 2,
+    JSON.stringify(reloadedTerrain),
   );
   await page.locator('[data-testid="oob-unit"]', { hasText: 'I Athenian taxis' }).click();
   check(
@@ -1402,13 +1472,15 @@ try {
   check('import assigns a new id', !!importedId && importedId !== exportedId, `${exportedId} → ${importedId}`);
   const importedWidth = await page.getByTestId('inspector-width').inputValue();
   check('import round-trips values identical to 0.1 m', importedWidth === '1400.1', `width=${importedWidth}`);
+  const importedTerrain = await terrainRowCounts(page);
   check(
     'import restores the units and terrain identical to 0.1 m',
     (await page.getByTestId('oob-unit').count()) === unitsBeforeExport &&
-      (await page.getByTestId('terrain-ground-row').count()) === 3 &&
-      (await page.getByTestId('terrain-hill-row').count()) === 2 &&
-      (await page.getByTestId('terrain-linear-row').count()) === 2 &&
+      importedTerrain.ground === 3 &&
+      importedTerrain.hill === 2 &&
+      importedTerrain.linear === 2 &&
       ((await page.getByTestId('oob-side-a').textContent()) ?? '').includes('Athens'),
+    JSON.stringify(importedTerrain),
   );
   await page.getByTestId('back-to-library').click();
   await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
@@ -1944,7 +2016,9 @@ try {
         troopType: 'hoplite',
         soldiers: 100,
         files: 10,
-        lateralInterval: 99,
+        // Inside the 10 m application limit, so the import stores it, but
+        // past the hoplite permitted range (4 m), so Begin refuses it.
+        lateralInterval: 8,
         rankDepth: 1.8,
         position: { x: 1000, y: 600 },
         facing: 180,
@@ -2008,10 +2082,14 @@ try {
     (await battlePage.getByTestId('battle-oob-side-a').isVisible()) &&
       (await battlePage.getByTestId('battle-oob-side-b').isVisible()),
   );
+  // The human side drafts first, so the shared map caption explains drafting
+  // (issue #84); it reads "read-only" only when nobody may draft.
+  const battleCaption = (await battlePage.getByTestId('battle-map-caption').textContent()) ?? '';
   check(
-    'battle screen shows the read-only shared map',
+    'battle screen shows the shared map with its drafting caption',
     (await battlePage.getByTestId('battle-map-caption').isVisible()) &&
-      /read-only/.test((await battlePage.getByTestId('battle-map-caption').textContent()) ?? ''),
+      /click a unit, then draft from the inspector/.test(battleCaption),
+    battleCaption.replace(/\s+/g, ' ').slice(0, 160),
   );
   check(
     'battle screen shows the inspector',
@@ -2359,6 +2437,12 @@ try {
   const combatPage = await combatContext.newPage();
   combatPage.on('console', (message) => log(`combat console: ${message.text()}`));
   combatPage.on('pageerror', (error) => log(`combat pageerror: ${String(error)}`));
+  // Deleting the battle asks for confirmation; an unhandled dialog is
+  // dismissed, which would keep the battle.
+  combatPage.on('dialog', async (dialog) => {
+    log(`combat dialog: ${dialog.type()} ${dialog.message()}`);
+    await dialog.accept();
+  });
   await combatPage.goto(`${base}/`, { waitUntil: 'networkidle' });
   await combatPage.getByTestId('app').waitFor({ timeout: 15000 });
   await combatPage.evaluate(() => {
@@ -2577,8 +2661,11 @@ try {
   });
   await fullPage.goto(`${base}/`, { waitUntil: 'networkidle' });
   await fullPage.getByTestId('app').waitFor({ timeout: 15000 });
+  // The seed fixes every draw of this story. With it the Athenians start and
+  // the seventh draw (the Withdraw good-order chance, 0.5) fails at 0.945, so
+  // the charger is disordered and the next human turn can Rally.
   await fullPage.evaluate(() => {
-    window.__POLIS_TEST_SEED = 99;
+    window.__POLIS_TEST_SEED = 187501;
   });
 
   const fullTitle = `Full Orders Probe ${Date.now()}`;
@@ -2620,13 +2707,29 @@ try {
   await fullPage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
 
   // Reach the human turn: the starting side is seed-drawn, so resolve the
-  // automated side first when it starts.
-  for (let step = 0; step < 4; step += 1) {
-    const controller = (await fullPage.getByTestId('turn-controller').textContent()) ?? '';
-    if (controller.startsWith('human')) break;
-    await fullPage.getByTestId('continue-turn').click();
-    await fullPage.waitForTimeout(800);
+  // automated side first when it starts. Every resolved turn ends behind the
+  // device handoff (issue #86), which must be pressed before the next side
+  // drafts or continues.
+  async function reachFullHumanTurn() {
+    for (let step = 0; step < 6; step += 1) {
+      if ((await fullPage.getByTestId('handoff').count()) > 0) {
+        await fullPage.getByTestId('handoff').click();
+        await fullPage.waitForFunction(
+          () => document.querySelector('[data-testid="handoff"]') === null,
+        );
+      }
+      const controller = (await fullPage.getByTestId('turn-controller').textContent()) ?? '';
+      if (controller.startsWith('human')) return;
+      const turnBefore = await fullPage.getByTestId('round').textContent();
+      await fullPage.getByTestId('continue-turn').click();
+      await fullPage.waitForFunction(
+        (expected) => document.querySelector('[data-testid="round"]')?.textContent !== expected,
+        turnBefore,
+        { timeout: 15000 },
+      );
+    }
   }
+  await reachFullHumanTurn();
   check(
     'full-orders drafting starts on the human turn',
     ((await fullPage.getByTestId('turn-controller').textContent()) ?? '').startsWith('human'),
@@ -2803,8 +2906,7 @@ try {
 
   // The automated side resolves, then the engaged charger withdraws: the
   // ghost shows the step back and the commit advances the turn.
-  await fullPage.getByTestId('continue-turn').click();
-  await fullPage.waitForTimeout(800);
+  await reachFullHumanTurn();
   await fullOwn.nth(2).click();
   check(
     'inspector offers Withdraw to the engaged charger',
@@ -2826,8 +2928,7 @@ try {
 
   // The seed-drawn withdraw disorders the charger, so the next human turn
   // offers Rally and the Rally validates in place.
-  await fullPage.getByTestId('continue-turn').click();
-  await fullPage.waitForTimeout(800);
+  await reachFullHumanTurn();
   await fullOwn.nth(2).click();
   check(
     'inspector offers Rally to the disordered charger',
@@ -3285,7 +3386,7 @@ try {
     await gateFoe.filter({ hasText: 'Gate target' }).getAttribute('data-unit-id');
 
   // Step 4: a Move, a Charge, and a deliberately colliding order. The second
-  // Move ends on the first unit's destination, so the engine rejects it and
+  // Move ends overlapping the first unit's destination, so the engine rejects it and
   // names the conflict.
   await gateOwn.filter({ hasText: 'Gate mover one' }).click();
   await gatePage.getByTestId(`start-draft-${gateMoverOne}`).click();
@@ -3302,9 +3403,12 @@ try {
     'gate: a Charge drafts from its candidate',
     ((await gatePage.getByTestId(`draft-${gateCharger}`).textContent()) ?? '').includes('Charge'),
   );
+  // Mover two ends 10 m east of mover one's destination, so the footprints
+  // overlap. The leg stays inside the 45-degree forward arc (exactly 45 would
+  // bill the doubled sideways rate and overrun the allowance once reordered).
   await gateOwn.filter({ hasText: 'Gate mover two' }).click();
   await gatePage.getByTestId(`start-draft-${gateMoverTwo}`).click();
-  await clickGateMap(400, 560);
+  await clickGateMap(410, 560);
   await gatePage.getByTestId(`draft-rejection-${gateMoverTwo}`).waitFor({ timeout: 10000 });
   const gateCollision = await gatePage.getByTestId(`draft-rejection-${gateMoverTwo}`).textContent();
   check(
@@ -3615,12 +3719,20 @@ try {
   async function advanceEndStep() {
     if ((await endPage.getByTestId('battle-outcome').count()) > 0) return false;
     if ((await endPage.getByTestId('handoff').count()) > 0) {
+      // Pressing the handoff either unlocks the human side (its commit
+      // appears) or resolves the automated side at once behind a fresh
+      // handoff for the other side (its text changes). In between, while the
+      // automated turn resolves, neither is on screen yet.
+      const handoffBefore = await endPage.getByTestId('handoff').textContent();
       await endPage.getByTestId('handoff').click();
       await endPage.waitForFunction(
-        () =>
-          document.querySelector('[data-testid="handoff"]') ||
-          document.querySelector('[data-testid="battle-outcome"]'),
-        null,
+        (previous) => {
+          if (document.querySelector('[data-testid="battle-outcome"]')) return true;
+          if (document.querySelector('[data-testid="commit-empty"]')) return true;
+          const handoff = document.querySelector('[data-testid="handoff"]');
+          return !!handoff && handoff.textContent !== previous;
+        },
+        handoffBefore,
         { timeout: 30000 },
       );
       return true;
@@ -3719,7 +3831,10 @@ try {
   }
   await context.close();
 } catch (error) {
-  check('browser test completes', false, String(error).split('\n')[0]);
+  // Record the first few lines so the report names the failing locator
+  // (the first line alone is only the generic TimeoutError).
+  const detail = String(error).split('\n').slice(0, 5).join('\n').slice(0, 500);
+  check('browser test completes', false, detail);
   try {
     await context.tracing.stop({ path: path.join(reportDir, 'trace.zip') });
   } catch {

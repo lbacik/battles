@@ -116,7 +116,10 @@ function DraftField({
   }, [errorKey]);
 
   function commit(raw: string) {
-    if (raw !== value) {
+    // An unchanged value is skipped, except while a refusal is showing:
+    // re-entering the stored value then resolves it, and the commit handler
+    // clears the error (an unchanged document adds no undo step).
+    if (raw !== value || error) {
       onCommit(raw);
     }
   }
