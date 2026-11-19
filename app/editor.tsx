@@ -2,6 +2,7 @@
 
 import { useEffect, useEffectEvent, useMemo, useState } from 'react';
 import BattlefieldMap from './battlefield-map';
+import { PanelToggle, panelGridColumns } from './collapsible-panel';
 import {
   TROOP_TYPE_CATALOGUE,
   TROOP_TYPE_KEYS,
@@ -263,6 +264,14 @@ export default function Editor({
   onStartBattle,
 }: EditorProps) {
   const [mode, setMode] = useState<'battle' | 'map'>('battle');
+  // Collapsible side panels (issue #111): each panel collapses to a narrow
+  // strip with an expand control. Display-only, never persisted: every visit
+  // starts expanded. Selection and document state live above the panels, so
+  // selecting on the map while a panel is collapsed works and expanding
+  // shows the current selection. The map keeps its camera across resizes, so
+  // the view never jumps away.
+  const [leftCollapsed, setLeftCollapsed] = useState(false);
+  const [rightCollapsed, setRightCollapsed] = useState(false);
   // Rejected form values, keyed by field: the value is never committed to
   // the document, the field reverts, and the cause is shown inline.
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
@@ -1381,11 +1390,26 @@ export default function Editor({
           {saveError}
         </p>
       ) : null}
-      <main className="workspace">
+      <main
+        className="workspace"
+        data-testid="editor-workspace"
+        data-left-collapsed={leftCollapsed ? 'true' : 'false'}
+        data-right-collapsed={rightCollapsed ? 'true' : 'false'}
+        style={{ gridTemplateColumns: panelGridColumns(leftCollapsed, rightCollapsed) }}
+      >
         <aside
-          className="left-panel panel"
+          className={leftCollapsed ? 'left-panel panel collapsed' : 'left-panel panel'}
           aria-label={inTerrainMode ? 'Terrain' : 'Order of battle'}
+          data-testid="editor-left-panel"
+          data-collapsed={leftCollapsed ? 'true' : 'false'}
         >
+          <PanelToggle
+            side="left"
+            collapsed={leftCollapsed}
+            onToggle={() => setLeftCollapsed((value) => !value)}
+            collapseTestId="collapse-left-panel"
+            expandTestId="expand-left-panel"
+          />
           <div className="mode-tabs" role="tablist" aria-label="Editor mode">
             <button
               type="button"
@@ -1923,7 +1947,19 @@ export default function Editor({
               : null}
           </p>
         </section>
-        <aside className="right-panel panel" aria-label="Inspector" data-testid="inspector">
+        <aside
+          className={rightCollapsed ? 'right-panel panel collapsed' : 'right-panel panel'}
+          aria-label="Inspector"
+          data-testid="inspector"
+          data-collapsed={rightCollapsed ? 'true' : 'false'}
+        >
+          <PanelToggle
+            side="right"
+            collapsed={rightCollapsed}
+            onToggle={() => setRightCollapsed((value) => !value)}
+            collapseTestId="collapse-right-panel"
+            expandTestId="expand-right-panel"
+          />
           {selectedUnit ? (
             <>
               <section aria-label="Selected unit" data-testid="unit-inspector">
