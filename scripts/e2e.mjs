@@ -585,9 +585,12 @@ try {
   }
   await page.keyboard.press('Enter');
   check('drawing rough and settlement adds two more rows', (await groundRow.count()) === 3);
+  // Three ground areas are drawn by now (forest, rough, settlement): the map
+  // shows one shape per ground feature.
   check(
     'the forest renders on the map',
-    (await page.getByTestId('terrain-ground').count()) === 1,
+    (await page.getByTestId('terrain-ground').count()) === 3,
+    `ground=${await page.getByTestId('terrain-ground').count()}`,
   );
 
   // An overlapping area is refused: the candidate highlights red, the list
@@ -763,20 +766,26 @@ try {
     ((await linearRow.nth(1).textContent()) ?? '').includes('8 m'),
   );
 
-  // A road vertex can be inserted on an edge and deleted again.
+  // A road vertex can be inserted on an edge and deleted again. React 19
+  // flushes the re-render a frame after the commit, so wait a beat before
+  // reading the handle count.
   const linearVertex = page.getByTestId('terrain-vertex-handle');
   const linearBefore = await linearVertex.count();
   check('the road shows its vertices', linearBefore === 3);
   await page.getByTestId('terrain-edge-handle').first().click();
+  await page.waitForTimeout(500);
   check(
     'inserting a road vertex adds a handle',
     (await linearVertex.count()) === linearBefore + 1,
   );
   await linearVertex.first().click();
   await page.keyboard.press('Delete');
+  await page.waitForTimeout(500);
   check('deleting a road vertex removes its handle', (await linearVertex.count()) === linearBefore);
 
   // Recategorise the forest, insert a vertex on an edge, delete it again.
+  // React 19 flushes the re-render a frame after the commit, so wait a beat
+  // before reading the handle counts.
   await groundRow.first().getByTestId('terrain-select').click();
   await page.getByTestId('terrain-category').selectOption('rough');
   check(
@@ -786,12 +795,14 @@ try {
   const vertexHandle = page.getByTestId('terrain-vertex-handle');
   const verticesBefore = await vertexHandle.count();
   await page.getByTestId('terrain-edge-handle').first().click();
+  await page.waitForTimeout(500);
   check(
     'inserting a vertex on an edge adds a handle',
     (await vertexHandle.count()) === verticesBefore + 1,
   );
   await vertexHandle.first().click();
   await page.keyboard.press('Delete');
+  await page.waitForTimeout(500);
   check(
     'deleting a vertex removes its handle',
     (await vertexHandle.count()) === verticesBefore,
@@ -899,9 +910,21 @@ try {
       ((await selectedOnMap.getAttribute('data-unit-id')) === firstUnitId),
   );
 
-  // Editing soldiers updates the derived ranks and depth.
+  // Centre the new unit before enlarging it: the first free spot sits near
+  // the battlefield edge, where a deeper or more open footprint would fall
+  // outside and be correctly refused. A central unit has room to grow, so
+  // the soldiers and preset edits below commit instead of refusing.
+  await page.getByTestId('unit-position-x').fill('600');
+  await page.locator('.map-caption').click();
+  await page.getByTestId('unit-position-y').fill('400');
+  await page.locator('.map-caption').click();
+  await page.waitForTimeout(500);
+
+  // Editing soldiers updates the derived ranks and depth. React 19 flushes
+  // the re-render a frame after the commit, so wait a beat before reading.
   await page.getByTestId('unit-soldiers').fill('150');
   await page.locator('.map-caption').click();
+  await page.waitForTimeout(500);
   const derived150 = (await page.getByTestId('unit-derived').textContent()) ?? '';
   check(
     'editing soldiers updates ranks and depth',
@@ -912,14 +935,17 @@ try {
   );
 
   // Changing troop type pre-fills that type's normal preset; the preset
-  // select then applies the open spacings in one step.
+  // select then applies the open spacings in one step. React 19 flushes the
+  // re-render a frame after the commit, so wait a beat before reading.
   await page.getByTestId('unit-troop').selectOption('peltast');
+  await page.waitForTimeout(500);
   check(
     'changing troop type pre-fills its normal spacing',
     (await page.getByTestId('unit-spacing-lateral').inputValue()) === '1.5' &&
       (await page.getByTestId('unit-spacing-depth').inputValue()) === '1.5',
   );
   await page.getByTestId('unit-preset').selectOption('open');
+  await page.waitForTimeout(500);
   const lateralOpen = await page.getByTestId('unit-spacing-lateral').inputValue();
   const depthOpen = await page.getByTestId('unit-spacing-depth').inputValue();
   check(
@@ -929,7 +955,8 @@ try {
   );
 
   // Duplicate names the copy uniquely; selecting on the map drives the
-  // inspector back to the first unit.
+  // inspector back to the first unit. React 19 flushes the duplicate
+  // re-render a frame after the commit, so settle before clicking the map.
   await page.getByTestId('unit-duplicate').click();
   check('duplicating adds a second row', (await oobUnit.count()) === 2);
   const oobDupTitles = await oobUnit.allTextContents();
@@ -938,6 +965,8 @@ try {
     oobDupTitles.some((entry) => /copy/.test(entry ?? '')),
     oobDupTitles.join(' | ').slice(0, 120),
   );
+  await page.locator(`[data-testid="map-unit"][data-unit-id="${firstUnitId}"]`).waitFor({ state: 'visible', timeout: 10000 });
+  await page.waitForTimeout(500);
   await page.locator(`[data-testid="map-unit"][data-unit-id="${firstUnitId}"]`).click();
   const selectedUnitTitle = await page.getByTestId('unit-title').textContent();
   check(
@@ -1212,6 +1241,8 @@ try {
   );
   await page.locator('[data-testid="oob-unit"]', { hasText: 'Athenian peltasts' }).click();
   await page.getByTestId('unit-preset').selectOption('open');
+  // React 19 flushes the preset re-render a frame after the commit.
+  await page.waitForTimeout(500);
   check(
     'acceptance step 5 applies the open spacing preset',
     (await page.getByTestId('unit-spacing-lateral').inputValue()) === '3' &&
@@ -3719,7 +3750,10 @@ try {
   }
   await context.close();
 } catch (error) {
-  check('browser test completes', false, String(error).split('\n')[0]);
+  // Record the first few lines so the report names the failing locator
+  // (the first line alone is only the generic TimeoutError).
+  const detail = String(error).split('\n').slice(0, 5).join('\n').slice(0, 500);
+  check('browser test completes', false, detail);
   try {
     await context.tracing.stop({ path: path.join(reportDir, 'trace.zip') });
   } catch {
