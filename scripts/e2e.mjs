@@ -2197,9 +2197,20 @@ try {
   await playableRow.getByTestId('open-scenario').click();
   await battlePage.getByTestId('editor').waitFor({ timeout: 15000 });
   await battlePage.getByTestId('oob-tab-0').click();
+  // New units start near the battlefield corner, under the map tool rail, so
+  // place both probe units in the open field: the collapsed-panel probe below
+  // clicks one on the map, and a covered unit would swallow that click.
+  async function placeBattleProbeUnit(x, y) {
+    await battlePage.getByTestId('unit-position-x').fill(x);
+    await battlePage.locator('.map-caption').click();
+    await battlePage.getByTestId('unit-position-y').fill(y);
+    await battlePage.locator('.map-caption').click();
+  }
   await battlePage.getByTestId('oob-add').click();
+  await placeBattleProbeUnit('500', '400');
   await battlePage.getByTestId('oob-tab-1').click();
   await battlePage.getByTestId('oob-add').click();
+  await placeBattleProbeUnit('700', '400');
   await battlePage.getByTestId('save-scenario').click();
   await waitForSave(battlePage);
   await battlePage.getByTestId('start-battle-editor').click();
@@ -2248,6 +2259,150 @@ try {
     'the starting side is announced',
     /begins — round 1, turn 1/.test(announcement ?? ''),
     announcement ?? 'no announcement',
+  );
+
+  // Issue #112: collapsible side panels on the battle screen — the same
+  // mechanism as the scenario editor. Each panel collapses to a strip with an
+  // expand control, the map takes the freed width without moving its view,
+  // and selecting on the map while collapsed shows on expand.
+  check(
+    'battle panels start expanded on every visit',
+    (await battlePage.getByTestId('collapse-left-panel').count()) === 1 &&
+      (await battlePage.getByTestId('collapse-right-panel').count()) === 1 &&
+      (await battlePage.getByTestId('expand-left-panel').count()) === 0 &&
+      (await battlePage.getByTestId('expand-right-panel').count()) === 0 &&
+      (await battlePage.getByTestId('battle-left-panel').getAttribute('data-collapsed')) === 'false' &&
+      (await battlePage.getByTestId('battle-inspector').getAttribute('data-collapsed')) === 'false',
+  );
+  check(
+    'battle collapse controls expose aria-expanded and accessible labels',
+    (await battlePage.getByTestId('collapse-left-panel').getAttribute('aria-expanded')) === 'true' &&
+      ((await battlePage.getByTestId('collapse-left-panel').getAttribute('aria-label')) ?? '').toLowerCase().includes('collapse') &&
+      (await battlePage.getByTestId('collapse-right-panel').getAttribute('aria-expanded')) === 'true' &&
+      ((await battlePage.getByTestId('collapse-right-panel').getAttribute('aria-label')) ?? '').toLowerCase().includes('collapse'),
+  );
+  const battleExpandedBox = await battlePage.getByTestId('map-viewport').boundingBox();
+  const battleViewBoxBefore = await battlePage.getByTestId('battlefield-map').getAttribute('viewBox');
+  const battleZoomBefore = await battlePage.getByTestId('battlefield-map').getAttribute('data-zoom');
+
+  // Left panel: collapse widens the map without moving the view.
+  await battlePage.getByTestId('collapse-left-panel').click();
+  await battlePage.waitForFunction(
+    () => document.querySelector('[data-testid="battle-left-panel"]')?.getAttribute('data-collapsed') === 'true',
+  );
+  const battleLeftCollapsedBox = await battlePage.getByTestId('map-viewport').boundingBox();
+  check(
+    'collapsing the battle left panel visibly widens the map',
+    (battleExpandedBox?.width ?? 0) > 0 &&
+      (battleLeftCollapsedBox?.width ?? 0) > (battleExpandedBox?.width ?? 0) + 50,
+    `${battleExpandedBox?.width} → ${battleLeftCollapsedBox?.width}`,
+  );
+  check(
+    'collapsing the battle left panel keeps the battlefield view',
+    (await battlePage.getByTestId('battlefield-map').getAttribute('viewBox')) === battleViewBoxBefore &&
+      (await battlePage.getByTestId('battlefield-map').getAttribute('data-zoom')) === battleZoomBefore,
+  );
+  check(
+    'the collapsed battle left panel shows an expand control',
+    (await battlePage.getByTestId('expand-left-panel').count()) === 1 &&
+      (await battlePage.getByTestId('expand-left-panel').getAttribute('aria-expanded')) === 'false' &&
+      ((await battlePage.getByTestId('expand-left-panel').getAttribute('aria-label')) ?? '').toLowerCase().includes('expand'),
+  );
+  // Keyboard: focus the expand control and press Enter to restore.
+  await battlePage.getByTestId('expand-left-panel').focus();
+  await battlePage.keyboard.press('Enter');
+  await battlePage.waitForFunction(
+    () => document.querySelector('[data-testid="battle-left-panel"]')?.getAttribute('data-collapsed') === 'false',
+  );
+  const battleLeftRestoredBox = await battlePage.getByTestId('map-viewport').boundingBox();
+  check(
+    'expanding the battle left panel restores the original layout',
+    Math.abs((battleLeftRestoredBox?.width ?? 0) - (battleExpandedBox?.width ?? 0)) < 5,
+    `${battleLeftCollapsedBox?.width} → ${battleLeftRestoredBox?.width}`,
+  );
+
+  // Right panel: collapse widens the map; selecting on the map while
+  // collapsed shows in the inspector once expanded. Issuing orders stays
+  // available after expanding. The map selects own units while drafting, so
+  // the probe selects the enemy in the order of battle first, then its own
+  // unit on the map while collapsed.
+  const battleActiveSide = ((await battlePage.getByTestId('turn-side').textContent()) ?? '').trim();
+  const battleOwnSideTestId = battleActiveSide.includes('Spartan') ? 'battle-oob-side-b' : 'battle-oob-side-a';
+  const battleFoeSideTestId = battleOwnSideTestId === 'battle-oob-side-a' ? 'battle-oob-side-b' : 'battle-oob-side-a';
+  await battlePage.getByTestId(battleFoeSideTestId).getByTestId('battle-oob-unit').first().click();
+  const battleFirstTitle = await battlePage.getByTestId('battle-unit-title').textContent();
+  await battlePage.getByTestId('collapse-right-panel').click();
+  await battlePage.waitForFunction(
+    () => document.querySelector('[data-testid="battle-inspector"]')?.getAttribute('data-collapsed') === 'true',
+  );
+  const battleRightCollapsedBox = await battlePage.getByTestId('map-viewport').boundingBox();
+  check(
+    'collapsing the battle right panel visibly widens the map',
+    (battleRightCollapsedBox?.width ?? 0) > (battleExpandedBox?.width ?? 0) + 50,
+    `${battleExpandedBox?.width} → ${battleRightCollapsedBox?.width}`,
+  );
+  check(
+    'collapsing the battle right panel keeps the battlefield view',
+    (await battlePage.getByTestId('battlefield-map').getAttribute('viewBox')) === battleViewBoxBefore,
+  );
+  check(
+    'the collapsed battle inspector hides its fields behind the expand control',
+    (await battlePage.getByTestId('expand-right-panel').count()) === 1 &&
+      !(await battlePage.getByTestId('battle-unit-inspector').isVisible()),
+  );
+  const battleOwnUnitId = await battlePage.getByTestId(battleOwnSideTestId).getByTestId('battle-oob-unit').first().getAttribute('data-unit-id');
+  await battlePage.locator(`[data-testid="map-unit"][data-unit-id="${battleOwnUnitId}"]`).click();
+  check(
+    'selecting on the battle map works while the inspector is collapsed',
+    (await battlePage.getByTestId('expand-right-panel').count()) === 1 &&
+      (await battlePage.getByTestId('battle-inspector').getAttribute('data-collapsed')) === 'true',
+  );
+  await battlePage.getByTestId('expand-right-panel').click();
+  await battlePage.waitForFunction(
+    () => document.querySelector('[data-testid="battle-inspector"]')?.getAttribute('data-collapsed') === 'false',
+  );
+  const battleSecondTitle = await battlePage.getByTestId('battle-unit-title').textContent();
+  check(
+    'expanding the battle inspector shows the selection made while collapsed',
+    !!battleSecondTitle && battleSecondTitle !== battleFirstTitle,
+    `${battleFirstTitle} → ${battleSecondTitle}`,
+  );
+  check(
+    'issuing orders stays available after expanding the inspector',
+    await battlePage.getByTestId('commit-empty').isVisible(),
+  );
+
+  // Both panels collapsed: the map takes both widths, then restores.
+  await battlePage.getByTestId('collapse-left-panel').click();
+  await battlePage.getByTestId('collapse-right-panel').click();
+  await battlePage.waitForFunction(
+    () =>
+      document.querySelector('[data-testid="battle-left-panel"]')?.getAttribute('data-collapsed') === 'true' &&
+      document.querySelector('[data-testid="battle-inspector"]')?.getAttribute('data-collapsed') === 'true',
+  );
+  const battleBothCollapsedBox = await battlePage.getByTestId('map-viewport').boundingBox();
+  check(
+    'collapsing both battle panels widens the map further',
+    (battleBothCollapsedBox?.width ?? 0) > (battleRightCollapsedBox?.width ?? 0) + 50 &&
+      (battleBothCollapsedBox?.width ?? 0) > (battleLeftCollapsedBox?.width ?? 0) + 50,
+    `${battleExpandedBox?.width} → ${battleBothCollapsedBox?.width}`,
+  );
+  check(
+    'both battle panels collapsed keep the battlefield view',
+    (await battlePage.getByTestId('battlefield-map').getAttribute('viewBox')) === battleViewBoxBefore,
+  );
+  await battlePage.getByTestId('expand-left-panel').click();
+  await battlePage.getByTestId('expand-right-panel').click();
+  await battlePage.waitForFunction(
+    () =>
+      document.querySelector('[data-testid="battle-left-panel"]')?.getAttribute('data-collapsed') === 'false' &&
+      document.querySelector('[data-testid="battle-inspector"]')?.getAttribute('data-collapsed') === 'false',
+  );
+  const battleBothRestoredBox = await battlePage.getByTestId('map-viewport').boundingBox();
+  check(
+    'expanding both battle panels restores the original layout',
+    Math.abs((battleBothRestoredBox?.width ?? 0) - (battleExpandedBox?.width ?? 0)) < 5,
+    `${battleBothCollapsedBox?.width} → ${battleBothRestoredBox?.width}`,
   );
 
   // One turn each way: the human side commits an empty turn (with
