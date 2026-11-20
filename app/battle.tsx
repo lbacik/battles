@@ -22,6 +22,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import BattlefieldMap from './battlefield-map';
 import type { BattleChargeCandidate } from './battlefield-map';
+import { PanelToggle, panelGridColumns } from './collapsible-panel';
 import { TURN_PHASE_ORDERS } from '../domain/battle.js';
 import {
   SUBMISSION_FORMAT_VERSION,
@@ -119,6 +120,15 @@ export default function BattleScreen({
 }: BattleScreenProps) {
   const [selectedUnitId, setSelectedUnitId] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
+  // Collapsible side panels (issue #112): the same mechanism as the scenario
+  // editor's panels (app/collapsible-panel.tsx) — each panel collapses to a
+  // narrow strip with an expand control. Display-only, never persisted: every
+  // visit starts expanded. Selection and draft state live above the panels, so
+  // selecting on the map while a panel is collapsed works and expanding shows
+  // the current selection. The map keeps its camera across resizes, so the
+  // view never jumps away when a panel collapses or expands.
+  const [leftCollapsed, setLeftCollapsed] = useState(false);
+  const [rightCollapsed, setRightCollapsed] = useState(false);
   // A concede needs its own confirmation step in the turn bar, separate from
   // the empty-commit confirmation: requesting it locks drafting until the
   // player confirms or cancels.
@@ -1263,8 +1273,26 @@ export default function BattleScreen({
 
   return (
     <div data-testid="battle-screen">
-      <main className="workspace battle-workspace">
-        <aside className="left-panel panel" aria-label="Order of battle">
+      <main
+        className="workspace battle-workspace"
+        data-testid="battle-workspace"
+        data-left-collapsed={leftCollapsed ? 'true' : 'false'}
+        data-right-collapsed={rightCollapsed ? 'true' : 'false'}
+        style={{ gridTemplateColumns: panelGridColumns(leftCollapsed, rightCollapsed) }}
+      >
+        <aside
+          className={leftCollapsed ? 'left-panel panel collapsed' : 'left-panel panel'}
+          aria-label="Order of battle"
+          data-testid="battle-left-panel"
+          data-collapsed={leftCollapsed ? 'true' : 'false'}
+        >
+          <PanelToggle
+            side="left"
+            collapsed={leftCollapsed}
+            onToggle={() => setLeftCollapsed((value) => !value)}
+            collapseTestId="collapse-left-panel"
+            expandTestId="expand-left-panel"
+          />
           <span className="eyebrow">FORCES IN THE FIELD</span>
           <h2>
             Order of battle <span data-testid="battle-oob-count">{units.length}</span>
@@ -1375,7 +1403,19 @@ export default function BattleScreen({
               : 'The map is shared with the editor and read-only here: scroll to zoom, drag to pan, 0 fits the battlefield.'}
           </p>
         </section>
-        <aside className="right-panel panel" aria-label="Inspector" data-testid="battle-inspector">
+        <aside
+          className={rightCollapsed ? 'right-panel panel collapsed' : 'right-panel panel'}
+          aria-label="Inspector"
+          data-testid="battle-inspector"
+          data-collapsed={rightCollapsed ? 'true' : 'false'}
+        >
+          <PanelToggle
+            side="right"
+            collapsed={rightCollapsed}
+            onToggle={() => setRightCollapsed((value) => !value)}
+            collapseTestId="collapse-right-panel"
+            expandTestId="expand-right-panel"
+          />
           {announcement ? (
             <div className="announcement" data-testid="starting-announcement">
               {announcement}
