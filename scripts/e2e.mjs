@@ -1424,7 +1424,7 @@ try {
   check(
     'the collapsed inspector hides its fields behind the expand control',
     (await page.getByTestId('expand-right-panel').count()) === 1 &&
-      (await page.getByTestId('unit-position-x').count()) === 0,
+      !(await page.getByTestId('unit-position-x').isVisible()),
   );
   const cavalryUnitId = await page
     .locator('[data-testid="oob-unit"]', { hasText: 'Athenian cavalry' })
