@@ -384,6 +384,56 @@ textarea:focus-visible {
   border-left: 1px solid var(--line);
 }
 
+/* Collapsible side panels (issue #111): shared by the scenario editor and,
+   through app/collapsible-panel.tsx, the battle screen. An expanded panel
+   keeps its content; a collapsed panel shrinks to a narrow strip that holds
+   only the expand control, so it is always obvious how to get it back. The
+   map takes the freed width through the workspace grid. */
+.panel-collapse-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.4px;
+  color: #4c554a;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--paper);
+  padding: 6px 10px;
+  min-height: 32px;
+  margin-bottom: 12px;
+  white-space: nowrap;
+}
+
+.panel-collapse-btn:hover {
+  border-color: var(--green);
+  color: var(--green-deep);
+}
+
+.panel-collapse-chevron {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.left-panel.collapsed,
+.right-panel.collapsed {
+  padding: 12px 8px;
+  overflow: hidden;
+}
+
+.left-panel.collapsed .panel-collapse-btn,
+.right-panel.collapsed .panel-collapse-btn {
+  writing-mode: vertical-rl;
+  margin: 0 auto;
+  padding: 10px 6px;
+}
+
+.left-panel.collapsed > *:not(.panel-collapse-btn),
+.right-panel.collapsed > *:not(.panel-collapse-btn) {
+  display: none;
+}
+
 .eyebrow {
   font-size: 9px;
   letter-spacing: 1.55px;
