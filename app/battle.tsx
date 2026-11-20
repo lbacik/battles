@@ -22,7 +22,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import BattlefieldMap from './battlefield-map';
 import type { BattleChargeCandidate } from './battlefield-map';
-import { PanelToggle, panelGridColumns } from './collapsible-panel';
+import { PanelToggle, panelGridColumns, usePersistentPanel } from './collapsible-panel';
 import { TURN_PHASE_ORDERS } from '../domain/battle.js';
 import {
   SUBMISSION_FORMAT_VERSION,
@@ -120,15 +120,17 @@ export default function BattleScreen({
 }: BattleScreenProps) {
   const [selectedUnitId, setSelectedUnitId] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
-  // Collapsible side panels (issue #112): the same mechanism as the scenario
-  // editor's panels (app/collapsible-panel.tsx) — each panel collapses to a
-  // narrow strip with an expand control. Display-only, never persisted: every
-  // visit starts expanded. Selection and draft state live above the panels, so
-  // selecting on the map while a panel is collapsed works and expanding shows
-  // the current selection. The map keeps its camera across resizes, so the
-  // view never jumps away when a panel collapses or expands.
-  const [leftCollapsed, setLeftCollapsed] = useState(false);
-  const [rightCollapsed, setRightCollapsed] = useState(false);
+  // Collapsible side panels (issues #112, #113): the same mechanism as the
+  // scenario editor's panels (app/collapsible-panel.tsx) — each panel
+  // collapses to a narrow strip with an expand control. The collapsed state
+  // is a browser-only preference per screen and per panel (localStorage), so
+  // a reload restores it; missing or unreadable values start expanded.
+  // Selection and draft state live above the panels, so selecting on the map
+  // while a panel is collapsed works and expanding shows the current
+  // selection. The map keeps its camera across resizes, so the view never
+  // jumps away when a panel collapses or expands.
+  const [leftCollapsed, setLeftCollapsed] = usePersistentPanel('battle', 'left');
+  const [rightCollapsed, setRightCollapsed] = usePersistentPanel('battle', 'right');
   // A concede needs its own confirmation step in the turn bar, separate from
   // the empty-commit confirmation: requesting it locks drafting until the
   // player confirms or cancels.

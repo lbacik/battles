@@ -2,7 +2,7 @@
 
 import { useEffect, useEffectEvent, useMemo, useState } from 'react';
 import BattlefieldMap from './battlefield-map';
-import { PanelToggle, panelGridColumns } from './collapsible-panel';
+import { PanelToggle, panelGridColumns, usePersistentPanel } from './collapsible-panel';
 import {
   TROOP_TYPE_CATALOGUE,
   TROOP_TYPE_KEYS,
@@ -264,14 +264,16 @@ export default function Editor({
   onStartBattle,
 }: EditorProps) {
   const [mode, setMode] = useState<'battle' | 'map'>('battle');
-  // Collapsible side panels (issue #111): each panel collapses to a narrow
-  // strip with an expand control. Display-only, never persisted: every visit
-  // starts expanded. Selection and document state live above the panels, so
-  // selecting on the map while a panel is collapsed works and expanding
-  // shows the current selection. The map keeps its camera across resizes, so
-  // the view never jumps away.
-  const [leftCollapsed, setLeftCollapsed] = useState(false);
-  const [rightCollapsed, setRightCollapsed] = useState(false);
+  // Collapsible side panels (issues #111, #113): each panel collapses to a
+  // narrow strip with an expand control. The collapsed state is a
+  // browser-only preference per screen and per panel (localStorage), so a
+  // reload restores it; missing or unreadable values start expanded.
+  // Selection and document state live above the panels, so selecting on the
+  // map while a panel is collapsed works and expanding shows the current
+  // selection. The map keeps its camera across resizes, so the view never
+  // jumps away.
+  const [leftCollapsed, setLeftCollapsed] = usePersistentPanel('editor', 'left');
+  const [rightCollapsed, setRightCollapsed] = usePersistentPanel('editor', 'right');
   // Rejected form values, keyed by field: the value is never committed to
   // the document, the field reverts, and the cause is shown inline.
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});

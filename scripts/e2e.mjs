@@ -1478,6 +1478,73 @@ try {
     `${bothCollapsedBox?.width} → ${bothRestoredBox?.width}`,
   );
 
+  // Issue #113: the editor remembers collapsed panels across reloads, per
+  // panel and independently of the battle screen. Panel state is a
+  // browser-only preference: it never reaches the scenario document.
+  await page.getByTestId('collapse-left-panel').click();
+  await page.waitForFunction(
+    () => document.querySelector('[data-testid="editor-left-panel"]')?.getAttribute('data-collapsed') === 'true',
+  );
+  check(
+    'editor panel state is stored in the browser only',
+    (await page.evaluate(() => window.localStorage.getItem('polis.panel.editor.left'))) === 'true' &&
+      (await page.evaluate(() => window.localStorage.getItem('polis.panel.battle.left'))) === null,
+  );
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page.waitForFunction(
+    () => document.querySelector('[data-testid="editor-left-panel"]')?.getAttribute('data-collapsed') === 'true',
+    null,
+    { timeout: 10000 },
+  );
+  check(
+    'collapsing the editor left panel survives a reload',
+    (await page.getByTestId('editor-left-panel').getAttribute('data-collapsed')) === 'true' &&
+      (await page.getByTestId('inspector').getAttribute('data-collapsed')) === 'false' &&
+      (await page.getByTestId('expand-left-panel').count()) === 1,
+  );
+  await page.getByTestId('expand-left-panel').click();
+  await page.waitForFunction(
+    () => document.querySelector('[data-testid="editor-left-panel"]')?.getAttribute('data-collapsed') === 'false',
+  );
+  await page.getByTestId('collapse-right-panel').click();
+  await page.waitForFunction(
+    () => document.querySelector('[data-testid="inspector"]')?.getAttribute('data-collapsed') === 'true',
+  );
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page.waitForFunction(
+    () => document.querySelector('[data-testid="inspector"]')?.getAttribute('data-collapsed') === 'true',
+    null,
+    { timeout: 10000 },
+  );
+  check(
+    'collapsing the editor right panel survives a reload independently',
+    (await page.getByTestId('editor-left-panel').getAttribute('data-collapsed')) === 'false' &&
+      (await page.getByTestId('inspector').getAttribute('data-collapsed')) === 'true' &&
+      (await page.getByTestId('expand-right-panel').count()) === 1,
+  );
+  await page.getByTestId('expand-right-panel').click();
+  await page.waitForFunction(
+    () => document.querySelector('[data-testid="inspector"]')?.getAttribute('data-collapsed') === 'false',
+  );
+  // A corrupt stored preference falls back to expanded without errors: the
+  // editor still loads and both panels start expanded.
+  await page.evaluate(() => {
+    window.localStorage.setItem('polis.panel.editor.left', 'garbage!!!');
+    window.localStorage.setItem('polis.panel.editor.right', '{bad json');
+  });
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page.waitForTimeout(500);
+  check(
+    'a corrupt editor preference falls back to expanded without errors',
+    (await page.getByTestId('editor-left-panel').getAttribute('data-collapsed')) === 'false' &&
+      (await page.getByTestId('inspector').getAttribute('data-collapsed')) === 'false' &&
+      (await page.getByTestId('collapse-left-panel').count()) === 1 &&
+      (await page.getByTestId('collapse-right-panel').count()) === 1,
+  );
+
   // Leaving the editor with unsaved changes asks for confirmation.
   await page.getByTestId('inspector-description').fill('Revised description.');
   await page.locator('.map-caption').click();
@@ -1582,6 +1649,12 @@ try {
       firstDoc.sides[0].name === 'Athens' &&
       firstDoc.sides[1].name === 'Sparta',
     `units=${firstDoc.units.length} terrain=${firstDoc.terrainFeatures.length}`,
+  );
+  check(
+    'panel state is not written into exported files',
+    !JSON.stringify(firstDoc).includes('polis.panel') &&
+      !JSON.stringify(firstDoc).includes('collapsed'),
+    Object.keys(firstDoc).join(','),
   );
   const roundTripFile = path.join(reportDir, 'round-trip.json');
   writeFileSync(roundTripFile, firstJson);
@@ -2403,6 +2476,72 @@ try {
     'expanding both battle panels restores the original layout',
     Math.abs((battleBothRestoredBox?.width ?? 0) - (battleExpandedBox?.width ?? 0)) < 5,
     `${battleBothCollapsedBox?.width} → ${battleBothRestoredBox?.width}`,
+  );
+
+  // Issue #113: the battle screen remembers collapsed panels across reloads,
+  // independently of the editor. Panel state is browser-only UI preference.
+  await battlePage.getByTestId('collapse-left-panel').click();
+  await battlePage.waitForFunction(
+    () => document.querySelector('[data-testid="battle-left-panel"]')?.getAttribute('data-collapsed') === 'true',
+  );
+  check(
+    'battle panel state is stored in the browser only',
+    (await battlePage.evaluate(() => window.localStorage.getItem('polis.panel.battle.left'))) === 'true' &&
+      (await battlePage.evaluate(() => window.localStorage.getItem('polis.panel.editor.left'))) === null,
+  );
+  await battlePage.reload({ waitUntil: 'networkidle' });
+  await battlePage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
+  await battlePage.waitForFunction(
+    () => document.querySelector('[data-testid="battle-left-panel"]')?.getAttribute('data-collapsed') === 'true',
+    null,
+    { timeout: 10000 },
+  );
+  check(
+    'collapsing the battle left panel survives a reload',
+    (await battlePage.getByTestId('battle-left-panel').getAttribute('data-collapsed')) === 'true' &&
+      (await battlePage.getByTestId('battle-inspector').getAttribute('data-collapsed')) === 'false' &&
+      (await battlePage.getByTestId('expand-left-panel').count()) === 1,
+  );
+  await battlePage.getByTestId('expand-left-panel').click();
+  await battlePage.waitForFunction(
+    () => document.querySelector('[data-testid="battle-left-panel"]')?.getAttribute('data-collapsed') === 'false',
+  );
+  await battlePage.getByTestId('collapse-right-panel').click();
+  await battlePage.waitForFunction(
+    () => document.querySelector('[data-testid="battle-inspector"]')?.getAttribute('data-collapsed') === 'true',
+  );
+  await battlePage.reload({ waitUntil: 'networkidle' });
+  await battlePage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
+  await battlePage.waitForFunction(
+    () => document.querySelector('[data-testid="battle-inspector"]')?.getAttribute('data-collapsed') === 'true',
+    null,
+    { timeout: 10000 },
+  );
+  check(
+    'collapsing the battle right panel survives a reload independently',
+    (await battlePage.getByTestId('battle-left-panel').getAttribute('data-collapsed')) === 'false' &&
+      (await battlePage.getByTestId('battle-inspector').getAttribute('data-collapsed')) === 'true' &&
+      (await battlePage.getByTestId('expand-right-panel').count()) === 1,
+  );
+  await battlePage.getByTestId('expand-right-panel').click();
+  await battlePage.waitForFunction(
+    () => document.querySelector('[data-testid="battle-inspector"]')?.getAttribute('data-collapsed') === 'false',
+  );
+  // A corrupt stored preference falls back to expanded without errors: the
+  // battle still loads and both panels start expanded.
+  await battlePage.evaluate(() => {
+    window.localStorage.setItem('polis.panel.battle.left', 'garbage!!!');
+    window.localStorage.setItem('polis.panel.battle.right', '{bad json');
+  });
+  await battlePage.reload({ waitUntil: 'networkidle' });
+  await battlePage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
+  await battlePage.waitForTimeout(500);
+  check(
+    'a corrupt battle preference falls back to expanded without errors',
+    (await battlePage.getByTestId('battle-left-panel').getAttribute('data-collapsed')) === 'false' &&
+      (await battlePage.getByTestId('battle-inspector').getAttribute('data-collapsed')) === 'false' &&
+      (await battlePage.getByTestId('collapse-left-panel').count()) === 1 &&
+      (await battlePage.getByTestId('collapse-right-panel').count()) === 1,
   );
 
   // One turn each way: the human side commits an empty turn (with
