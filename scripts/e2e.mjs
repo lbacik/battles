@@ -2197,9 +2197,20 @@ try {
   await playableRow.getByTestId('open-scenario').click();
   await battlePage.getByTestId('editor').waitFor({ timeout: 15000 });
   await battlePage.getByTestId('oob-tab-0').click();
+  // New units start near the battlefield corner, under the map tool rail, so
+  // place both probe units in the open field: the collapsed-panel probe below
+  // clicks one on the map, and a covered unit would swallow that click.
+  async function placeBattleProbeUnit(x, y) {
+    await battlePage.getByTestId('unit-position-x').fill(x);
+    await battlePage.locator('.map-caption').click();
+    await battlePage.getByTestId('unit-position-y').fill(y);
+    await battlePage.locator('.map-caption').click();
+  }
   await battlePage.getByTestId('oob-add').click();
+  await placeBattleProbeUnit('500', '400');
   await battlePage.getByTestId('oob-tab-1').click();
   await battlePage.getByTestId('oob-add').click();
+  await placeBattleProbeUnit('700', '400');
   await battlePage.getByTestId('save-scenario').click();
   await waitForSave(battlePage);
   await battlePage.getByTestId('start-battle-editor').click();
