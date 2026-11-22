@@ -12,7 +12,8 @@
 // document and never marks anything as unsaved or undoable.
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { MouseEvent as ReactMouseEvent, Ref, RefObject } from 'react';
+import type { MouseEvent as ReactMouseEvent, ReactNode, Ref, RefObject } from 'react';
+import type { SelectedUnitScreenBounds } from './prototype-unit-context-menu';
 import {
   FACING_SNAP_DEG,
   clampMapZoom,
@@ -34,6 +35,7 @@ import { round1 } from '../domain/geometry.js';
 const FALLBACK_WIDTH = 1200;
 const FALLBACK_HEIGHT = 800;
 const FALLBACK_VIEWPORT_W = 800;
+const FALLBACK_VIEWPORT_H = 560;
 const GRID_STEP_M = 100;
 const GRID_MAJOR_EVERY_M = 500;
 const AXIS_STEP_M = 200;
@@ -147,6 +149,8 @@ interface BattlefieldMapProps {
   // commits the facing. A refused drop commits nothing (the unit returns).
   onMoveUnit?: (id: string, position: { x: number; y: number }) => void;
   onRotateUnit?: (id: string, facing: number) => void;
+  onUnitContextMenu?: (unitId: string, point: { x: number; y: number }) => void;
+  renderUnitOverlay?: (bounds: SelectedUnitScreenBounds) => ReactNode;
 }
 
 function safeDimension(value: number, fallback: number): number {
@@ -253,6 +257,8 @@ export default function BattlefieldMap({
   battleConflictPoints = [],
   battleRotateUnitId = null,
   onBattleRotate,
+  onUnitContextMenu,
+  renderUnitOverlay,
 }: BattlefieldMapProps) {
   const safeW = safeDimension(width, FALLBACK_WIDTH);
   const safeH = safeDimension(height, FALLBACK_HEIGHT);
@@ -269,6 +275,7 @@ export default function BattlefieldMap({
   const [panning, setPanning] = useState(false);
   const [cursor, setCursor] = useState<{ x: number; y: number; inside: boolean } | null>(null);
   const [viewportW, setViewportW] = useState(FALLBACK_VIEWPORT_W);
+  const [viewportH, setViewportH] = useState(FALLBACK_VIEWPORT_H);
   // Live rotation preview (display-only): the facing under the pointer while a
   // rotation handle is dragged, plus whether snapping is disabled. Cleared on
   // drop, so the cursor readout falls back to coordinates.
@@ -312,6 +319,7 @@ export default function BattlefieldMap({
     const measure = () => {
       const rect = element.getBoundingClientRect();
       if (rect.width > 0) setViewportW(rect.width);
+      if (rect.height > 0) setViewportH(rect.height);
     };
     measure();
     const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null;
@@ -459,12 +467,86 @@ export default function BattlefieldMap({
 
   const handActive = tool === 'hand' || spaceHeld;
 
+  const selectedUnitScreenBounds: SelectedUnitScreenBounds | null = useMemo(() => {
+    if (!selectedUnitId) return null;
+    const entry = placed.find((item) => item.id === String(selectedUnitId));
+    if (!entry) return null;
+    const vw = viewportW > 0 ? viewportW : FALLBACK_VIEWPORT_W;
+    const vh = viewportH > 0 ? viewportH : FALLBACK_VIEWPORT_H;
+    const scaleX = vw / (box.width || 1);
+    const scaleY = vh / (box.height || 1);
+    const scale = Math.min(scaleX, scaleY);
+    const offsetX = (vw - box.width * scale) / 2;
+    const offsetY = (vh - box.height * scale) / 2;
+    const toPx = (svgX: number, svgY: number) => ({
+      x: offsetX + (svgX - box.x) * scale,
+      y: offsetY + (svgY - box.y) * scale,
+    });
+    const rad = (entry.facing * Math.PI) / 180;
+    const localToSvg = (lx: number, ly: number) => ({
+      x: entry.centre.x + lx * Math.cos(rad) - ly * Math.sin(rad),
+      y: entry.centre.y + lx * Math.sin(rad) + ly * Math.cos(rad),
+    });
+    const hw = entry.frontageM / 2;
+    const d = entry.depthM;
+    const cornersPx = [
+      localToSvg(-hw, 0),
+      localToSvg(hw, 0),
+      localToSvg(hw, d),
+      localToSvg(-hw, d),
+    ].map((pt) => toPx(pt.x, pt.y));
+    const xs = cornersPx.map((p) => p.x);
+    const ys = cornersPx.map((p) => p.y);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    const centerSvg = localToSvg(0, d / 2);
+    const centerPx = toPx(centerSvg.x, centerSvg.y);
+    const frontPx = toPx(entry.centre.x, entry.centre.y);
+    const radiusPx = Math.max(20, Math.hypot(maxX - minX, maxY - minY) / 2);
+    return {
+      unitId: entry.id,
+      centerX: centerPx.x,
+      centerY: centerPx.y,
+      frontX: frontPx.x,
+      frontY: frontPx.y,
+      minX,
+      maxX,
+      minY,
+      maxY,
+      radiusPx,
+      viewportW: vw,
+      viewportH: vh,
+    };
+  }, [selectedUnitId, placed, viewportW, viewportH, box]);
+
   return (
     <div
       ref={viewportRef}
       data-testid="map-viewport"
       className={`map-viewport${tool === 'hand' ? ' tool-hand' : ''}${spaceHeld ? ' space-pan' : ''}${panning ? ' panning' : ''}${draft ? ' drafting' : ''}`}
+      onContextMenu={(event) => {
+        if (!onUnitContextMenu) return;
+        const target = event.target instanceof Element ? event.target : null;
+        if (target?.closest('[data-prototype-context-menu]')) return;
+        const holder = target?.closest?.('[data-testid="map-unit"]');
+        const unitId = holder?.getAttribute?.('data-unit-id') ?? null;
+        if (unitId) {
+          event.preventDefault();
+          const rect = viewportRef.current?.getBoundingClientRect();
+          const x = rect ? event.clientX - rect.left : event.clientX;
+          const y = rect ? event.clientY - rect.top : event.clientY;
+          onUnitContextMenu(unitId, { x, y });
+        }
+      }}
       onPointerDown={(event) => {
+        if (
+          event.target instanceof Element &&
+          event.target.closest('[data-prototype-context-menu]')
+        ) {
+          return;
+        }
         // A click suppression belongs to the gesture that set it. When that
         // gesture's click never arrives (the pointerup re-render can replace
         // the handle it started on), a stale flag must not swallow the next
@@ -683,6 +765,9 @@ export default function BattlefieldMap({
         battleCandidateShoots={battleCandidateShoots}
         battleConflictPoints={battleConflictPoints}
       />
+      {selectedUnitScreenBounds && renderUnitOverlay
+        ? renderUnitOverlay(selectedUnitScreenBounds)
+        : null}
       {draft ? (
         <p className="map-terrain-hint" role="status" data-testid="map-terrain-hint">
           Drawing{' '}

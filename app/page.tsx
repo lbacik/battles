@@ -16,6 +16,12 @@ import Library from './library';
 import BattleSetup from './battle-setup';
 import BattleScreen from './battle';
 import BattlesList from './battles-list';
+import {
+  createPrototypeDemoBattle,
+  hasVariantInUrl,
+  readVariantFromUrl,
+  writeVariantToUrl,
+} from './prototype-unit-context-menu';
 import { documentsMatch, getScenarioStore, type LibraryEntry } from '../lib/store';
 import { getBattleStore, type BattleEntry } from '../lib/battles';
 import {
@@ -319,6 +325,24 @@ export default function Home() {
     [refreshBattles],
   );
 
+  const openPrototypeDemoBattle = useCallback(() => {
+    const demo = createPrototypeDemoBattle();
+    setBattle(demo);
+    setDecisions([]);
+    setAnnouncement('Athens begins — round 1, turn 1 (in-memory context-menu prototype).');
+    setResolveError(null);
+    setResolving(false);
+    setAwaitingHandoff(false);
+    setHandoffSide(null);
+    setSetupId(null);
+    setSetupDocument(null);
+    setSetupProblems([]);
+    setOpenId(null);
+    setDocument(null);
+    setSavedDocument(null);
+    writeVariantToUrl(readVariantFromUrl());
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -334,12 +358,16 @@ export default function Home() {
       const id = scenarioIdFromUrl();
       if (id) {
         await openScenario(id);
+        return;
+      }
+      if (hasVariantInUrl()) {
+        openPrototypeDemoBattle();
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [refreshLibrary, refreshBattles, resumeBattle, openScenario]);
+  }, [refreshLibrary, refreshBattles, resumeBattle, openScenario, openPrototypeDemoBattle]);
 
   async function handleCreate(title: string) {
     setCreating(true);
@@ -641,6 +669,9 @@ export default function Home() {
   // Every battle step is stored before the screen shows it, so a reload
   // right after a visible turn, start, or concession always resumes it.
   async function persistBattle(nextBattle: any, nextDecisions: any[]) {
+    if (nextBattle?.id === 'prototype-context-menu-battle') {
+      return;
+    }
     try {
       await getBattleStore().save(nextBattle, nextDecisions);
       await refreshBattles();
@@ -1090,6 +1121,11 @@ export default function Home() {
             onRematch={handleRematch}
             onOpenScenarioInEditor={handleOpenBattleScenarioInEditor}
             onBackToLibrary={handleBackToLibrary}
+            onResetPrototypeDemo={
+              battle?.id === 'prototype-context-menu-battle'
+                ? openPrototypeDemoBattle
+                : undefined
+            }
           />
         ) : setupDocument && setupId ? (
           <BattleSetup
@@ -1162,6 +1198,46 @@ export default function Home() {
           </>
         ) : (
           <>
+            {process.env.NODE_ENV !== 'production' ? (
+              <div className="library" style={{ paddingBottom: 0 }}>
+                <div className="new-scenario" style={{ alignItems: 'center', marginBottom: 0 }}>
+                  <div style={{ flex: 1 }}>
+                    <span className="eyebrow">UI PROTOTYPE · UNIT CONTEXT MENU</span>
+                    <strong>Sterowanie jednostkami przez menu kontekstowe na mapie</strong>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    onClick={() => {
+                      writeVariantToUrl('A');
+                      openPrototypeDemoBattle();
+                    }}
+                  >
+                    Open Variant A (Popover)
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => {
+                      writeVariantToUrl('B');
+                      openPrototypeDemoBattle();
+                    }}
+                  >
+                    Variant B (Radial)
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    onClick={() => {
+                      writeVariantToUrl('C');
+                      openPrototypeDemoBattle();
+                    }}
+                  >
+                    Variant C (Micro-Dock + PPM)
+                  </button>
+                </div>
+              </div>
+            ) : null}
             <Library
               entries={entries}
               loading={loading}

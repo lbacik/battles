@@ -23,6 +23,18 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import BattlefieldMap from './battlefield-map';
 import type { BattleChargeCandidate } from './battlefield-map';
 import { PanelToggle, panelGridColumns, usePersistentPanel } from './collapsible-panel';
+import {
+  EnemyUnitContextCard,
+  PrototypeSwitcher,
+  VariantA,
+  VariantB,
+  VariantC,
+  hasVariantInUrl,
+  readVariantFromUrl,
+  type ContextMenuVariant,
+  type PrototypeOrderCallbacks,
+  type SelectedUnitScreenBounds,
+} from './prototype-unit-context-menu';
 import { TURN_PHASE_ORDERS } from '../domain/battle.js';
 import {
   SUBMISSION_FORMAT_VERSION,
@@ -79,6 +91,7 @@ interface BattleScreenProps {
   onRematch: () => void;
   onOpenScenarioInEditor: () => void;
   onBackToLibrary: () => void;
+  onResetPrototypeDemo?: () => void;
 }
 
 function sideOf(battle: BattleDocument, id: string): any {
@@ -117,9 +130,23 @@ export default function BattleScreen({
   onRematch,
   onOpenScenarioInEditor,
   onBackToLibrary,
+  onResetPrototypeDemo,
 }: BattleScreenProps) {
   const [selectedUnitId, setSelectedUnitId] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
+  const [variant, setVariant] = useState<ContextMenuVariant>('A');
+  const [urlHasVariant, setUrlHasVariant] = useState(false);
+  const [contextAnchor, setContextAnchor] = useState<{
+    unitId: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const prototypeActive = process.env.NODE_ENV !== 'production' || urlHasVariant;
+
+  useEffect(() => {
+    setVariant(readVariantFromUrl());
+    setUrlHasVariant(hasVariantInUrl());
+  }, []);
   // Collapsible side panels (issues #112, #113): the same mechanism as the
   // scenario editor's panels (app/collapsible-panel.tsx) — each panel
   // collapses to a narrow strip with an expand control. The collapsed state
@@ -159,8 +186,17 @@ export default function BattleScreen({
     setConfirming(false);
     setConcedeConfirming(false);
     setDrafts([]);
-    setSelectedUnitId(null);
-  }, [battle?.turnNumber, battle?.id]);
+    setContextAnchor(null);
+    if (
+      battle?.id === 'prototype-context-menu-battle' &&
+      Array.isArray(battle?.units)
+    ) {
+      const firstOwn = battle.units.find((u: any) => u?.side === battle?.activeSide);
+      setSelectedUnitId(firstOwn?.id ?? null);
+    } else {
+      setSelectedUnitId(null);
+    }
+  }, [battle?.turnNumber, battle?.id, battle?.activeSide, battle?.units]);
 
   // Drop a selection the battle no longer holds so the inspector never shows
   // a ghost.
@@ -984,15 +1020,40 @@ export default function BattleScreen({
         return;
       }
     }
+    if (prototypeActive) {
+      setSelectedUnitId(unitId);
+      setContextAnchor(null);
+      return;
+    }
     setSelectedUnitId(null);
   }
 
   // Open-ground clicks draft legs: up to three for the active Move draft,
-  // up to two optional approach legs for the active Charge draft.
+  // up to two optional approach legs for the active Charge draft. In
+  // prototype Variant C (Direct-Action mode), clicking open ground while an
+  // own unit with no draft is selected immediately starts a Move draft with
+  // that point as leg 1.
   function handleBattleMapClick(point: { x: number; y: number }): void {
     if (!canDraft || !selectedUnitId) return;
+    setContextAnchor(null);
     const draft = draftForUnit(selectedUnitId);
-    if (!draft) return;
+    if (!draft) {
+      if (
+        prototypeActive &&
+        variant === 'C' &&
+        ownUnit(selectedUnitId) &&
+        permittedKindsOf(selectedUnitId).includes('Move')
+      ) {
+        const snapped = { x: round1(point.x), y: round1(point.y) };
+        if (Number.isFinite(snapped.x) && Number.isFinite(snapped.y)) {
+          upsertDraft(selectedUnitId, {
+            kind: 'Move',
+            legs: [{ face: null, to: snapped }],
+          });
+        }
+      }
+      return;
+    }
     if (draft.kind === 'Move' && draft.legs.length < MAX_MOVE_LEGS) {
       appendDraftLeg(selectedUnitId, point);
     } else if (draft.kind === 'Charge' && draft.approach.length < MAX_APPROACH_LEGS) {
@@ -1398,6 +1459,129 @@ export default function BattleScreen({
                 : null
             }
             onBattleRotate={handleBattleRotate}
+            onUnitContextMenu={
+              prototypeActive
+                ? (unitId, point) => {
+                    setSelectedUnitId(unitId);
+                    setConfirming(false);
+                    setContextAnchor({ unitId, x: point.x, y: point.y });
+                  }
+                : undefined
+            }
+            renderUnitOverlay={
+              prototypeActive
+                ? (bounds: SelectedUnitScreenBounds) => {
+                    if (!selectedUnit) return null;
+                    if (selectedUnit.side !== activeSide) {
+                      const ownAttackers: {
+                        unitId: string;
+                        unitName: string;
+                        kind: 'Charge' | 'Shoot';
+                        edge?: string;
+                        distanceM: number;
+                      }[] = [];
+                      for (const u of units.filter((item) => item?.side === activeSide)) {
+                        const kinds = permittedKindsOf(u.id);
+                        if (kinds.includes('Charge')) {
+                          const c = chargeCandidatesOf(u.id).find(
+                            (cand: any) => cand.targetId === selectedUnit.id,
+                          );
+                          if (c) {
+                            ownAttackers.push({
+                              unitId: u.id,
+                              unitName: u.name || u.id,
+                              kind: 'Charge',
+                              edge: c.edge,
+                              distanceM: c.distanceM,
+                            });
+                          }
+                        }
+                        if (kinds.includes('Shoot')) {
+                          const s = shootCandidatesOf(u.id).find(
+                            (cand: any) => cand.targetId === selectedUnit.id,
+                          );
+                          if (s) {
+                            ownAttackers.push({
+                              unitId: u.id,
+                              unitName: u.name || u.id,
+                              kind: 'Shoot',
+                              distanceM: s.distanceM,
+                            });
+                          }
+                        }
+                      }
+                      return (
+                        <EnemyUnitContextCard
+                          enemyUnit={selectedUnit}
+                          bounds={bounds}
+                          canDraft={canDraft}
+                          ownAttackers={ownAttackers}
+                          onOrderAttack={(attackerId, kind, targetId, edge) => {
+                            if (kind === 'Charge') {
+                              startChargeDraft(attackerId, targetId, edge ?? null);
+                            } else {
+                              startShootDraft(attackerId, targetId);
+                            }
+                          }}
+                          onClose={() => setSelectedUnitId(null)}
+                        />
+                      );
+                    }
+                    const currentDraft = draftForUnit(selectedUnit.id);
+                    const draftIndex = drafts.findIndex((d) => d.unitId === selectedUnit.id);
+                    const currentVerdict =
+                      draftIndex >= 0 ? verdictForDraftIndex(draftIndex) : null;
+                    const callbacks: PrototypeOrderCallbacks = {
+                      onStartMove: startMoveDraft,
+                      onStartCharge: startChargeDraft,
+                      onStartShoot: startShootDraft,
+                      onStartReform: startReformDraft,
+                      onStartWithdraw: startWithdrawDraft,
+                      onStartRally: startRallyDraft,
+                      onSetChargeTarget: setChargeTarget,
+                      onSetChargeEdge: setChargeEdge,
+                      onSetShootTarget: setShootTarget,
+                      onSetReformField: setReformField,
+                      onApplyReformPreset: applyReformPreset,
+                      onSetDraftFacing: setDraftFacing,
+                      onUndoMoveLeg: removeLastDraftLeg,
+                      onClearMoveLegs: clearDraftLegs,
+                      onUndoApproachLeg: removeLastApproachLeg,
+                      onClearApproachLegs: clearApproachLegs,
+                      onRemoveDraft: removeDraft,
+                      onMoveDraftOrder: moveDraft,
+                      onSelectUnit: (id) => {
+                        setSelectedUnitId(id);
+                        setContextAnchor(null);
+                      },
+                    };
+                    const variantProps = {
+                      battle,
+                      unit: selectedUnit,
+                      bounds,
+                      contextAnchor,
+                      onClearContextAnchor: () => setContextAnchor(null),
+                      canDraft,
+                      activeSide,
+                      actionsEntry: selectedEntry,
+                      draft: currentDraft,
+                      draftIndex,
+                      totalDrafts: drafts.length,
+                      verdict: currentVerdict,
+                      acceptedDetail: draftAcceptedDetail(currentVerdict),
+                      callbacks,
+                      unitDisplayName,
+                    };
+                    return (
+                      <>
+                        {variant === 'A' && <VariantA {...variantProps} />}
+                        {variant === 'B' && <VariantB {...variantProps} />}
+                        {variant === 'C' && <VariantC {...variantProps} />}
+                      </>
+                    );
+                  }
+                : undefined
+            }
           />
           <p className="map-hint">
             {canDraft
@@ -2079,6 +2263,46 @@ export default function BattleScreen({
           Phase: {battle?.phase}
         </span>
         <span className="spacer" />
+        {prototypeActive && rightCollapsed && !finished ? (
+          awaitingHandoff && handoffSide ? (
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={resolving}
+              onClick={onHandoff}
+            >
+              {sideName(battle, handoffSide)} — begin your turn
+            </button>
+          ) : automated ? (
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={resolving}
+              onClick={onContinueAutomated}
+            >
+              {resolving ? 'Resolving…' : 'Continue'}
+            </button>
+          ) : canDraft ? (
+            drafts.length > 0 ? (
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={!validation?.ok}
+                onClick={() => draftSubmission && onCommitDraft(draftSubmission.orders)}
+              >
+                Commit turn ({drafts.length} {drafts.length === 1 ? 'order' : 'orders'})
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={onCommitEmpty}
+              >
+                Commit empty turn (Hold all)
+              </button>
+            )
+          ) : null
+        ) : null}
         {finished ? null : concedeConfirming ? (
           <span className="concede-confirm" data-testid="concede-confirm-box">
             Concede the battle?
@@ -2123,6 +2347,32 @@ export default function BattleScreen({
           Battles
         </button>
       </div>
+      {prototypeActive ? (
+        <PrototypeSwitcher
+          current={variant}
+          onChange={setVariant}
+          rightCollapsed={rightCollapsed}
+          onToggleRightPanel={() => setRightCollapsed((v) => !v)}
+          onResetDemoBattle={onResetPrototypeDemo}
+          stateSnapshot={{
+            variant,
+            round: battle?.round,
+            turnNumber: battle?.turnNumber,
+            activeSide,
+            selectedUnitId,
+            selectedUnitPermitted: selectedEntry?.permitted?.map((p: any) => p.kind) ?? [],
+            selectedUnitUnavailable: selectedEntry?.unavailable ?? [],
+            drafts,
+            validationOk: validation?.ok ?? true,
+            verdicts: (validation?.verdicts || []).map((v: any) => ({
+              orderIndex: v.orderIndex,
+              unitId: v.unitId,
+              accepted: v.accepted,
+              rejection: v.rejection ?? null,
+            })),
+          }}
+        />
+      ) : null}
     </div>
   );
 }
