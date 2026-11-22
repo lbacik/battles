@@ -27,14 +27,26 @@ import {
 export const PANEL_WIDTH_LEFT = 264;
 export const PANEL_WIDTH_RIGHT = 300;
 export const PANEL_WIDTH_COLLAPSED = 48;
+// Minimum usable map width: keeps the map tool rail and display tools usable.
+export const PANEL_MAP_MIN_WIDTH = 360;
 
 // Grid columns for the three-column workspace (left, map, right). The map
-// takes the freed width through `minmax(0, 1fr)`; the collapsed column keeps
-// a narrow strip for the expand control.
+// takes the freed width through `minmax(360px, 1fr)` and never shrinks below
+// the usable minimum; the collapsed column keeps a narrow strip for the
+// expand control.
 export function panelGridColumns(leftCollapsed: boolean, rightCollapsed: boolean): string {
   const left = leftCollapsed ? PANEL_WIDTH_COLLAPSED : PANEL_WIDTH_LEFT;
   const right = rightCollapsed ? PANEL_WIDTH_COLLAPSED : PANEL_WIDTH_RIGHT;
-  return `${left}px minmax(0, 1fr) ${right}px`;
+  return `${left}px minmax(${PANEL_MAP_MIN_WIDTH}px, 1fr) ${right}px`;
+}
+
+// Minimum workspace content width (panels plus the map minimum, plus the 2 px
+// workspace border). The workspace keeps this width even when the viewport is
+// narrower, so the page scrolls horizontally instead of shrinking the map.
+export function panelMinWidth(leftCollapsed: boolean, rightCollapsed: boolean): number {
+  const left = leftCollapsed ? PANEL_WIDTH_COLLAPSED : PANEL_WIDTH_LEFT;
+  const right = rightCollapsed ? PANEL_WIDTH_COLLAPSED : PANEL_WIDTH_RIGHT;
+  return left + PANEL_MAP_MIN_WIDTH + right + 2;
 }
 
 export type PanelScreen = 'editor' | 'battle';
