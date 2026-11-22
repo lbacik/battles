@@ -1,0 +1,27 @@
+name: Auto-merge agent PRs
+
+# Turns on GitHub auto-merge for pull requests opened by the coding agent
+# (head branches named `agent/...`). The PR then merges itself once the
+# CI `checks` job, required by main's branch protection, passes.
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  enable-auto-merge:
+    # Only same-repository agent branches; never forks or drafts.
+    if: >-
+      startsWith(github.head_ref, 'agent/') &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      !github.event.pull_request.draft
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enable auto-merge
+        run: gh pr merge --auto --merge "$PR_URL"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
