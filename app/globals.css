@@ -28,6 +28,7 @@
 body {
   margin: 0;
   color: var(--ink);
+  background: var(--bg);
 }
 
 button,
@@ -67,6 +68,7 @@ textarea:focus-visible {
   display: flex;
   flex-direction: column;
   overflow-x: visible;
+  background: var(--bg);
 }
 
 .app-header {
@@ -78,6 +80,7 @@ textarea:focus-visible {
   padding: 14px 28px;
   background: var(--panel);
   border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
 }
 
 .brand {
@@ -296,6 +299,7 @@ textarea:focus-visible {
   padding: 16px 28px;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
+  flex-shrink: 0;
 }
 
 .doc-title {
@@ -331,6 +335,21 @@ textarea:focus-visible {
   background: #c99a1f;
 }
 
+/* Full-height app shell (issue #120): the scenario editor fills the window.
+   The app is a column at least as tall as the viewport; the editor root takes
+   the remaining space below the header as a flex child, and the workspace
+   takes whatever is left after the editor toolbar and any save error. The
+   fixed viewport-minus-220 px height is gone: height comes from the layout.
+   Flex children holding the workspace shrink (min-height 0) so the side
+   panels scroll internally instead of growing the page. The workspace keeps
+   its 560 px floor; below it the page scrolls. */
+[data-testid='editor'] {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .workspace {
   flex: 1;
   display: grid;
@@ -340,7 +359,6 @@ textarea:focus-visible {
   border-radius: 6px;
   overflow: hidden;
   min-height: 560px;
-  height: calc(100dvh - 220px);
   box-sizing: border-box;
 }
 
@@ -349,6 +367,8 @@ textarea:focus-visible {
   background: var(--panel);
   overflow-y: auto;
   padding: 20px 18px;
+  min-height: 0;
+  min-width: 0;
 }
 
 .left-panel {
@@ -623,6 +643,7 @@ textarea:focus-visible {
   background: #e8e5d5;
   /* Minimum usable map width: keeps the tool rail and display tools usable. */
   min-width: 360px;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
@@ -955,6 +976,10 @@ textarea:focus-visible {
   font-size: 12px;
   line-height: 1.7;
   margin: 0 0 12px;
+}
+
+[data-testid='save-error'] {
+  flex-shrink: 0;
 }
 
 .field-error {
