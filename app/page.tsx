@@ -1048,14 +1048,6 @@ export default function Home() {
 
   return (
     <>
-      <div id="narrow-notice" role="alert">
-        <h1>PÓLIS scenario editor</h1>
-        <p>
-          The scenario editor needs a viewport at least <strong>1280&nbsp;px</strong> wide: order
-          of battle, map, and inspector sit side by side by design. Please widen the window or use
-          a larger display.
-        </p>
-      </div>
       <div className="app" data-testid="app">
         <header className="app-header">
           <div className="brand">

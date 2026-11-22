@@ -22,7 +22,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import BattlefieldMap from './battlefield-map';
 import type { BattleChargeCandidate } from './battlefield-map';
-import { PanelToggle, panelGridColumns, usePersistentPanel } from './collapsible-panel';
+import { PanelToggle, panelGridColumns, panelMinWidth, usePersistentPanel } from './collapsible-panel';
 import { TURN_PHASE_ORDERS } from '../domain/battle.js';
 import {
   SUBMISSION_FORMAT_VERSION,
@@ -1280,7 +1280,7 @@ export default function BattleScreen({
         data-testid="battle-workspace"
         data-left-collapsed={leftCollapsed ? 'true' : 'false'}
         data-right-collapsed={rightCollapsed ? 'true' : 'false'}
-        style={{ gridTemplateColumns: panelGridColumns(leftCollapsed, rightCollapsed) }}
+        style={{ gridTemplateColumns: panelGridColumns(leftCollapsed, rightCollapsed), minWidth: panelMinWidth(leftCollapsed, rightCollapsed) }}
       >
         <aside
           className={leftCollapsed ? 'left-panel panel collapsed' : 'left-panel panel'}

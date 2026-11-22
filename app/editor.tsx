@@ -2,7 +2,7 @@
 
 import { useEffect, useEffectEvent, useMemo, useState } from 'react';
 import BattlefieldMap from './battlefield-map';
-import { PanelToggle, panelGridColumns, usePersistentPanel } from './collapsible-panel';
+import { PanelToggle, panelGridColumns, panelMinWidth, usePersistentPanel } from './collapsible-panel';
 import {
   TROOP_TYPE_CATALOGUE,
   TROOP_TYPE_KEYS,
@@ -1397,7 +1397,7 @@ export default function Editor({
         data-testid="editor-workspace"
         data-left-collapsed={leftCollapsed ? 'true' : 'false'}
         data-right-collapsed={rightCollapsed ? 'true' : 'false'}
-        style={{ gridTemplateColumns: panelGridColumns(leftCollapsed, rightCollapsed) }}
+        style={{ gridTemplateColumns: panelGridColumns(leftCollapsed, rightCollapsed), minWidth: panelMinWidth(leftCollapsed, rightCollapsed) }}
       >
         <aside
           className={leftCollapsed ? 'left-panel panel collapsed' : 'left-panel panel'}
