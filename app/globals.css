@@ -78,7 +78,8 @@ textarea:focus-visible {
    cannot bring the gap back. Every flex child that holds the workspace is
    allowed to shrink (min-height 0); the workspace itself keeps the 560 px
    floor, below which the page scrolls vertically. */
-[data-testid='editor'] {
+[data-testid='editor'],
+[data-testid='battle-screen'] {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
@@ -1409,10 +1410,16 @@ textarea:focus-visible {
 }
 
 .battle-workspace {
-  height: calc(100dvh - 280px);
+  /* Full-height battle shell (issue #121): the workspace takes everything
+     left above the turn bar, so the fixed viewport-minus-280 px height is
+     gone. The outer margin stays above and to the sides (no bottom margin:
+     the turn bar is the last row, flush against the window bottom). The
+     560 px floor from .workspace still applies; below it the page scrolls. */
+  margin: 20px 24px 0;
 }
 
 .turnbar {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
