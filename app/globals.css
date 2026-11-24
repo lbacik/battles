@@ -1979,6 +1979,13 @@ textarea:focus-visible {
   border-bottom: 1px solid var(--line);
   background: #f4f3e8;
   flex-shrink: 0;
+  cursor: move;
+  touch-action: none;
+  user-select: none;
+}
+
+.unit-card-head:active {
+  cursor: grabbing;
 }
 
 .unit-card-titles {

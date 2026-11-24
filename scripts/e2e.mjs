@@ -2554,6 +2554,90 @@ try {
       `card=${JSON.stringify(cardBox)} viewport=${JSON.stringify(viewportBox)}`,
     );
   }
+  // Issue #130: dragging the card header moves it without panning the map;
+  // the snap-back control restores the automatic tethered position.
+  check(
+    'the snap-back control is hidden at the automatic position',
+    (await battlePage.getByTestId('unit-card-snap-back').count()) === 0,
+  );
+  {
+    const viewBoxBefore = await battlePage.getByTestId('battlefield-map').getAttribute('viewBox');
+    const autoBox = await battlePage.getByTestId('unit-context-card').boundingBox();
+    const headerBox = await battlePage.getByTestId('unit-card-header').boundingBox();
+    const startX = (headerBox?.x ?? 0) + (headerBox?.width ?? 0) / 2;
+    const startY = (headerBox?.y ?? 0) + (headerBox?.height ?? 0) / 2;
+    await battlePage.mouse.move(startX, startY);
+    await battlePage.mouse.down();
+    await battlePage.mouse.move(startX - 140, startY + 90, { steps: 12 });
+    await battlePage.mouse.up();
+    await battlePage.waitForFunction(
+      () => !!document.querySelector('[data-testid="unit-card-snap-back"]'),
+      null,
+      { timeout: 10000 },
+    );
+    const movedBox = await battlePage.getByTestId('unit-context-card').boundingBox();
+    const moved =
+      !!autoBox && !!movedBox &&
+      Math.hypot(movedBox.x - autoBox.x, movedBox.y - autoBox.y) > 20;
+    check(
+      'dragging the header moves the card',
+      moved,
+      `auto=${JSON.stringify(autoBox)} moved=${JSON.stringify(movedBox)}`,
+    );
+    const viewportBox = await battlePage.getByTestId('map-viewport').boundingBox();
+    const inside =
+      !!viewportBox && !!movedBox &&
+      movedBox.x >= viewportBox.x - 1 &&
+      movedBox.y >= viewportBox.y - 1 &&
+      movedBox.x + movedBox.width <= viewportBox.x + viewportBox.width + 1 &&
+      movedBox.y + movedBox.height <= viewportBox.y + viewportBox.height + 1;
+    check(
+      'the dragged card stays fully inside the map viewport',
+      inside,
+      `card=${JSON.stringify(movedBox)} viewport=${JSON.stringify(viewportBox)}`,
+    );
+    check(
+      'the tether follows the dragged card',
+      await battlePage.getByTestId('unit-card-tether').isVisible(),
+    );
+    check(
+      'dragging the card never pans the map',
+      (await battlePage.getByTestId('battlefield-map').getAttribute('viewBox')) === viewBoxBefore,
+      `${viewBoxBefore}`,
+    );
+    check(
+      'dragging the card keeps the same unit selected',
+      ((await battlePage.getByTestId('unit-card-name').textContent()) ?? '').trim() === cardTitle,
+    );
+    await battlePage.getByTestId('unit-card-snap-back').click();
+    await battlePage.waitForFunction(
+      () => !document.querySelector('[data-testid="unit-card-snap-back"]'),
+      null,
+      { timeout: 10000 },
+    );
+    const snappedBox = await battlePage.getByTestId('unit-context-card').boundingBox();
+    const snappedBack =
+      !!autoBox && !!snappedBox &&
+      Math.hypot(snappedBox.x - autoBox.x, snappedBox.y - autoBox.y) < 3;
+    check(
+      'snap-back returns the card to its automatic position',
+      snappedBack,
+      `auto=${JSON.stringify(autoBox)} snapped=${JSON.stringify(snappedBox)}`,
+    );
+    // Leave the card moved: reselecting the unit below must reset it.
+    const movedAgainBox = await battlePage.getByTestId('unit-card-header').boundingBox();
+    const movedAgainX = (movedAgainBox?.x ?? 0) + (movedAgainBox?.width ?? 0) / 2;
+    const movedAgainY = (movedAgainBox?.y ?? 0) + (movedAgainBox?.height ?? 0) / 2;
+    await battlePage.mouse.move(movedAgainX, movedAgainY);
+    await battlePage.mouse.down();
+    await battlePage.mouse.move(movedAgainX - 100, movedAgainY + 60, { steps: 8 });
+    await battlePage.mouse.up();
+    await battlePage.waitForFunction(
+      () => !!document.querySelector('[data-testid="unit-card-snap-back"]'),
+      null,
+      { timeout: 10000 },
+    );
+  }
   await battlePage.getByTestId('unit-card-minimize').click();
   check(
     'minimizing the unit card collapses it to its header strip',
@@ -2577,6 +2661,10 @@ try {
   );
   await battlePage.locator(`[data-testid="map-unit"][data-unit-id="${battleOwnUnitId}"]`).click();
   await battlePage.getByTestId('unit-context-card').waitFor({ state: 'visible', timeout: 10000 });
+  check(
+    'reselecting the unit resets the moved card',
+    (await battlePage.getByTestId('unit-card-snap-back').count()) === 0,
+  );
 
   // Both panels collapsed: the map takes both widths, then restores.
   await battlePage.getByTestId('collapse-left-panel').click();
