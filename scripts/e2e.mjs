@@ -2612,14 +2612,21 @@ try {
   // waits for Continue. Every resolution ends behind the device handoff, so
   // each step below first presses "<Side> — begin your turn" when it is
   // showing. The starting side is seed-drawn, so either order.
-  async function settleAfterHandoff() {
+  // Pressing through the handoff either unlocks the human side (its commit
+  // appears) or resolves the automated side at once behind a fresh handoff
+  // for the next side (its text changes). In between, while the automated
+  // turn resolves, the short-lived Continue is on screen: it is never a
+  // settled state, so a real state change is awaited instead of matching
+  // whatever happens to be mounted first (issue #138).
+  async function settleAfterHandoff(handoffBefore) {
     await battlePage.waitForFunction(
-      () =>
-        document.querySelector('[data-testid="commit-empty"]') ||
-        document.querySelector('[data-testid="continue-turn"]') ||
-        document.querySelector('[data-testid="handoff"]') ||
-        document.querySelector('[data-testid="battle-outcome"]'),
-      null,
+      (previous) => {
+        if (document.querySelector('[data-testid="battle-outcome"]')) return true;
+        if (document.querySelector('[data-testid="commit-empty"]')) return true;
+        const handoff = document.querySelector('[data-testid="handoff"]');
+        return !!handoff && handoff.textContent !== previous;
+      },
+      handoffBefore,
       { timeout: 15000 },
     );
   }
@@ -2633,7 +2640,7 @@ try {
       );
       await battlePage.getByTestId('handoff').click();
       // A human side unlocks drafting; an automated side resolves at once.
-      await settleAfterHandoff();
+      await settleAfterHandoff(label);
       return;
     }
     const controller = (await battlePage.getByTestId('turn-controller').textContent()) ?? '';
@@ -2647,7 +2654,20 @@ try {
         /test player/.test(controller),
         controller,
       );
-      await battlePage.getByTestId('continue-turn').click();
+      // Continue is only pressed from a settled automated turn (the battle's
+      // first turn, before any handoff): nothing else resolves it, so it
+      // cannot vanish underneath the click. An already-resolved turn lands
+      // behind the next handoff (or the outcome) instead.
+      if ((await battlePage.getByTestId('continue-turn').count()) > 0) {
+        await battlePage.getByTestId('continue-turn').click();
+      }
+      await battlePage.waitForFunction(
+        () =>
+          document.querySelector('[data-testid="handoff"]') ||
+          document.querySelector('[data-testid="battle-outcome"]'),
+        null,
+        { timeout: 15000 },
+      );
     }
   }
   await advanceOneStep();
@@ -2768,11 +2788,28 @@ try {
     const controller = (await movePage.getByTestId('turn-controller').textContent()) ?? '';
     if (controller.startsWith('human')) break;
     if ((await movePage.getByTestId('handoff').count()) > 0) {
+      // An automated side pressed through the handoff resolves at once
+      // behind a fresh handoff: wait for its text to change so the stale
+      // button is never mistaken for the next state (issue #138).
+      const handoffBefore = (await movePage.getByTestId('handoff').textContent()) ?? '';
       await movePage.getByTestId('handoff').click();
-    } else {
+      await movePage.waitForFunction(
+        (previous) => {
+          if (document.querySelector('[data-testid="battle-outcome"]')) return true;
+          const handoff = document.querySelector('[data-testid="handoff"]');
+          return !!handoff && handoff.textContent !== previous;
+        },
+        handoffBefore,
+        { timeout: 15000 },
+      );
+    } else if ((await movePage.getByTestId('continue-turn').count()) > 0) {
       await movePage.getByTestId('continue-turn').click();
+      await movePage.getByTestId('handoff').waitFor({ timeout: 15000 });
+    } else {
+      // Neither handoff nor Continue is mounted yet: the automated turn is
+      // still resolving, so wait for the handoff it ends behind.
+      await movePage.getByTestId('handoff').waitFor({ timeout: 15000 });
     }
-    await movePage.getByTestId('handoff').waitFor({ timeout: 15000 });
   }
   if ((await movePage.getByTestId('handoff').count()) > 0) {
     await movePage.getByTestId('handoff').click();
@@ -3002,7 +3039,10 @@ try {
       await combatPage.getByTestId('handoff').click();
     }
     if (!controller.startsWith('human')) {
-      if (!handoffBefore) {
+      // Continue is only pressed when no handoff is showing, i.e. from the
+      // settled automated turn: an already-resolved turn lands behind the
+      // next handoff (or the outcome) instead (issue #138).
+      if (!handoffBefore && (await combatPage.getByTestId('continue-turn').count()) > 0) {
         await combatPage.getByTestId('continue-turn').click();
       }
       await outcomeWait();
@@ -3202,17 +3242,37 @@ try {
   async function reachFullHumanTurn() {
     for (let step = 0; step < 6; step += 1) {
       if ((await fullPage.getByTestId('handoff').count()) > 0) {
+        // Pressing through the handoff either unlocks the human side or
+        // resolves the automated side at once behind a fresh handoff: wait
+        // for that new state, never the short-lived Continue in between,
+        // which may already be gone (or disabled) when read (issue #138).
+        // A fresh handoff for the human side still locks drafting, so loop
+        // back and press through it as well.
+        const handoffBefore = (await fullPage.getByTestId('handoff').textContent()) ?? '';
         await fullPage.getByTestId('handoff').click();
         await fullPage.waitForFunction(
-          () => document.querySelector('[data-testid="handoff"]') === null,
+          (previous) => {
+            if (document.querySelector('[data-testid="battle-outcome"]')) return true;
+            if (document.querySelector('[data-testid="commit-empty"]')) return true;
+            const handoff = document.querySelector('[data-testid="handoff"]');
+            return !!handoff && handoff.textContent !== previous;
+          },
+          handoffBefore,
+          { timeout: 15000 },
         );
+        continue;
       }
       const controller = (await fullPage.getByTestId('turn-controller').textContent()) ?? '';
       if (controller.startsWith('human')) return;
+      if ((await fullPage.getByTestId('battle-outcome').count()) > 0) return;
       const turnBefore = await fullPage.getByTestId('round').textContent();
-      await fullPage.getByTestId('continue-turn').click();
+      if ((await fullPage.getByTestId('continue-turn').count()) > 0) {
+        await fullPage.getByTestId('continue-turn').click();
+      }
       await fullPage.waitForFunction(
-        (expected) => document.querySelector('[data-testid="round"]')?.textContent !== expected,
+        (expected) =>
+          document.querySelector('[data-testid="round"]')?.textContent !== expected ||
+          document.querySelector('[data-testid="battle-outcome"]'),
         turnBefore,
         { timeout: 15000 },
       );
@@ -3828,11 +3888,28 @@ try {
     const controller = (await gatePage.getByTestId('turn-controller').textContent()) ?? '';
     if (controller.startsWith('human')) break;
     if ((await gatePage.getByTestId('handoff').count()) > 0) {
+      // An automated side pressed through the handoff resolves at once
+      // behind a fresh handoff: wait for its text to change so the stale
+      // button is never mistaken for the next state (issue #138).
+      const handoffBefore = (await gatePage.getByTestId('handoff').textContent()) ?? '';
       await gatePage.getByTestId('handoff').click();
-    } else {
+      await gatePage.waitForFunction(
+        (previous) => {
+          if (document.querySelector('[data-testid="battle-outcome"]')) return true;
+          const handoff = document.querySelector('[data-testid="handoff"]');
+          return !!handoff && handoff.textContent !== previous;
+        },
+        handoffBefore,
+        { timeout: 15000 },
+      );
+    } else if ((await gatePage.getByTestId('continue-turn').count()) > 0) {
       await gatePage.getByTestId('continue-turn').click();
+      await gatePage.getByTestId('handoff').waitFor({ timeout: 15000 });
+    } else {
+      // Neither handoff nor Continue is mounted yet: the automated turn is
+      // still resolving, so wait for the handoff it ends behind.
+      await gatePage.getByTestId('handoff').waitFor({ timeout: 15000 });
     }
-    await gatePage.getByTestId('handoff').waitFor({ timeout: 15000 });
   }
   if ((await gatePage.getByTestId('handoff').count()) > 0) {
     await gatePage.getByTestId('handoff').click();
@@ -4019,28 +4096,35 @@ try {
   for (let step = 0; step < 8; step += 1) {
     if ((await gatePage.getByTestId('battle-outcome').count()) > 0) break;
     if ((await gatePage.getByTestId('handoff').count()) > 0) {
+      // Pressing through the handoff either unlocks the human side (its
+      // commit appears) or resolves the automated side at once behind a
+      // fresh handoff (its text changes). The short-lived Continue while the
+      // automated turn resolves is never a settled state, so it is not
+      // matched here (issue #138). A fresh handoff for the human side still
+      // locks the concede button, so loop back and press through it as well.
+      const handoffBefore = (await gatePage.getByTestId('handoff').textContent()) ?? '';
       await gatePage.getByTestId('handoff').click();
       await gatePage.waitForFunction(
-        () =>
-          document.querySelector('[data-testid="handoff"]') === null ||
-          document.querySelector('[data-testid="battle-outcome"]'),
-        null,
+        (previous) => {
+          if (document.querySelector('[data-testid="battle-outcome"]')) return true;
+          if (document.querySelector('[data-testid="commit-empty"]')) return true;
+          const handoff = document.querySelector('[data-testid="handoff"]');
+          return !!handoff && handoff.textContent !== previous;
+        },
+        handoffBefore,
         { timeout: 15000 },
       );
-      await gatePage.waitForFunction(
-        () =>
-          document.querySelector('[data-testid="commit-empty"]') ||
-          document.querySelector('[data-testid="continue-turn"]') ||
-          document.querySelector('[data-testid="handoff"]') ||
-          document.querySelector('[data-testid="battle-outcome"]'),
-        null,
-        { timeout: 15000 },
-      );
+      continue;
     }
     if ((await gatePage.getByTestId('battle-outcome').count()) > 0) break;
     const controller = (await gatePage.getByTestId('turn-controller').textContent()) ?? '';
     if (controller.startsWith('human')) break;
-    await gatePage.getByTestId('continue-turn').click();
+    // Continue is only pressed when no handoff is showing, i.e. from the
+    // settled automated turn: an already-resolved turn lands behind the next
+    // handoff instead.
+    if ((await gatePage.getByTestId('continue-turn').count()) > 0) {
+      await gatePage.getByTestId('continue-turn').click();
+    }
     await gatePage.getByTestId('handoff').waitFor({ timeout: 15000 });
   }
   check(
@@ -4228,7 +4312,12 @@ try {
     }
     const endController = (await endPage.getByTestId('turn-controller').textContent()) ?? '';
     if (!endController.startsWith('human')) {
-      await endPage.getByTestId('continue-turn').click();
+      // Continue is only pressed from the settled automated turn: an
+      // already-resolved turn lands behind the next handoff (or the outcome)
+      // instead (issue #138).
+      if ((await endPage.getByTestId('continue-turn').count()) > 0) {
+        await endPage.getByTestId('continue-turn').click();
+      }
       await endPage.waitForFunction(
         () =>
           document.querySelector('[data-testid="handoff"]') ||
