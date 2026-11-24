@@ -30,10 +30,17 @@ import {
   zoomViewAroundCursor,
 } from '../domain/scenario.js';
 import { round1 } from '../domain/geometry.js';
+import {
+  UNIT_CARD_ESTIMATED_H,
+  layoutUnitContextCard,
+  projectUnitBounds,
+} from '../domain/unit-card-geometry.js';
 
 const FALLBACK_WIDTH = 1200;
 const FALLBACK_HEIGHT = 800;
 const FALLBACK_VIEWPORT_W = 800;
+const FALLBACK_VIEWPORT_H = 600;
+const UNIT_CARD_W = 300;
 const GRID_STEP_M = 100;
 const GRID_MAJOR_EVERY_M = 500;
 const AXIS_STEP_M = 200;
@@ -134,6 +141,12 @@ interface BattlefieldMapProps {
   // instead of the scenario geometry (the battle never moves units).
   battleRotateUnitId?: string | null;
   onBattleRotate?: (facing: number) => void;
+  // Tethered unit context card (battle screen, issue #123): the read-only
+  // status card for the selected active-side unit during a human Orders
+  // phase. The battle screen owns visibility; the map projects the unit and
+  // places the card beside it inside the viewport.
+  unitCard?: { unit: any; movementAllowanceM?: number | null } | null;
+  onCloseUnitCard?: () => void;
   // Placement refusals to highlight: every id the refused drop would conflict
   // with (the dragged unit plus every overlap partner). Display-only, like the
   // selection: the document keeps the last valid values.
@@ -253,6 +266,8 @@ export default function BattlefieldMap({
   battleConflictPoints = [],
   battleRotateUnitId = null,
   onBattleRotate,
+  unitCard = null,
+  onCloseUnitCard,
 }: BattlefieldMapProps) {
   const safeW = safeDimension(width, FALLBACK_WIDTH);
   const safeH = safeDimension(height, FALLBACK_HEIGHT);
@@ -269,6 +284,13 @@ export default function BattlefieldMap({
   const [panning, setPanning] = useState(false);
   const [cursor, setCursor] = useState<{ x: number; y: number; inside: boolean } | null>(null);
   const [viewportW, setViewportW] = useState(FALLBACK_VIEWPORT_W);
+  const [viewportH, setViewportH] = useState(FALLBACK_VIEWPORT_H);
+  // Tethered unit card state (battle screen, issue #123): minimized
+  // collapses the card to its header strip; the measured rendered height
+  // (ResizeObserver) keeps the card inside the viewport as it pans/zooms.
+  const [cardMinimized, setCardMinimized] = useState(false);
+  const [cardMeasuredH, setCardMeasuredH] = useState(0);
+  const cardRef = useRef<HTMLElement | null>(null);
   // Live rotation preview (display-only): the facing under the pointer while a
   // rotation handle is dragged, plus whether snapping is disabled. Cleared on
   // drop, so the cursor readout falls back to coordinates.
@@ -312,6 +334,7 @@ export default function BattlefieldMap({
     const measure = () => {
       const rect = element.getBoundingClientRect();
       if (rect.width > 0) setViewportW(rect.width);
+      if (rect.height > 0) setViewportH(rect.height);
     };
     measure();
     const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null;
@@ -410,6 +433,53 @@ export default function BattlefieldMap({
   const mpp = metresPerPixel(view, battlefield, viewportW > 0 ? viewportW : FALLBACK_VIEWPORT_W);
   const scaleLengthM = niceScaleBarMetres(mpp, 120);
   const scaleWidthPx = Math.max(8, scaleLengthM / mpp);
+
+  // Tethered unit context card (battle screen, issue #123): project the
+  // card's unit to viewport pixels under xMidYMid meet, then place the card
+  // beside it. Recomputed from the live camera, so the card follows pans
+  // and zooms.
+  const cardUnitId = (unitCard?.unit as any)?.id != null ? String((unitCard?.unit as any).id) : '';
+  const cardBounds = useMemo(
+    () =>
+      unitCard?.unit
+        ? projectUnitBounds(unitCard.unit, view, battlefield, viewportW, viewportH)
+        : null,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [unitCard?.unit, view, battlefield, viewportW, viewportH],
+  );
+  useEffect(() => {
+    setCardMinimized(false);
+    setCardMeasuredH(0);
+  }, [cardUnitId]);
+  useEffect(() => {
+    const element = cardRef.current;
+    if (!element || !cardBounds) return;
+    const update = () => {
+      const height = element.offsetHeight;
+      if (height > 0) setCardMeasuredH(height);
+    };
+    update();
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(update) : null;
+    if (observer && element) observer.observe(element);
+    return () => observer?.disconnect();
+  });
+  const cardLayout = useMemo(
+    () =>
+      cardBounds
+        ? layoutUnitContextCard(cardBounds, {
+            cardW: UNIT_CARD_W,
+            measuredH: cardMeasuredH,
+            estimatedH: cardMinimized ? 72 : UNIT_CARD_ESTIMATED_H,
+          })
+        : null,
+    [cardBounds, cardMeasuredH, cardMinimized],
+  );
+  const cardUnit = (unitCard?.unit as any) || null;
+  const cardRanks =
+    cardUnit && Number.isFinite(Number(cardUnit.soldiers)) && Number.isFinite(Number(cardUnit.files)) && Number(cardUnit.files) > 0
+      ? Math.ceil(Number(cardUnit.soldiers) / Number(cardUnit.files))
+      : null;
+  const cardMovementM = Number(unitCard?.movementAllowanceM);
 
   const placed: PlacedUnit[] = useMemo(() => {
     const list = Array.isArray(units) ? units : [];
@@ -683,6 +753,102 @@ export default function BattlefieldMap({
         battleCandidateShoots={battleCandidateShoots}
         battleConflictPoints={battleConflictPoints}
       />
+      {cardUnit && cardBounds && cardLayout ? (
+        <div className="unit-card-overlay" data-testid="unit-card-overlay">
+          <svg
+            className="unit-card-tether-svg"
+            aria-hidden="true"
+            data-testid="unit-card-tether"
+          >
+            <line
+              x1={cardBounds.centerX}
+              y1={cardBounds.centerY}
+              x2={cardLayout.anchorX}
+              y2={cardLayout.anchorY}
+              stroke="#4e6047"
+              strokeWidth="1.75"
+              strokeDasharray="4 3"
+            />
+            <circle cx={cardBounds.centerX} cy={cardBounds.centerY} r="4" fill="#4e6047" />
+          </svg>
+          <aside
+            ref={cardRef as RefObject<HTMLElement>}
+            className="unit-card"
+            data-testid="unit-context-card"
+            style={{
+              left: `${cardLayout.left}px`,
+              top: `${cardLayout.top}px`,
+              width: `${UNIT_CARD_W}px`,
+              maxHeight: `${cardLayout.maxCardH}px`,
+            }}
+            aria-label={`Unit card for ${String(cardUnit.name || 'Unit')}`}
+            onPointerDown={(event) => event.stopPropagation()}
+            onClick={(event) => event.stopPropagation()}
+            onWheel={(event) => event.stopPropagation()}
+            onContextMenu={(event) => event.stopPropagation()}
+          >
+            <header className="unit-card-head">
+              <div className="unit-card-titles">
+                <span className="eyebrow" data-testid="unit-card-troop">
+                  {String(cardUnit.troopType || 'Unit')}
+                </span>
+                <h4 data-testid="unit-card-name">{String(cardUnit.name || 'Unit')}</h4>
+              </div>
+              <div className="unit-card-head-right">
+                <span
+                  className={`unit-card-cohesion state-${String(cardUnit.cohesion || 'Steady').toLowerCase()}`}
+                  data-testid="unit-card-cohesion"
+                >
+                  {String(cardUnit.cohesion || 'Steady')}
+                </span>
+                <button
+                  type="button"
+                  className="unit-card-icon-btn"
+                  data-testid="unit-card-minimize"
+                  title={cardMinimized ? 'Expand card' : 'Minimize card'}
+                  aria-label={cardMinimized ? 'Expand card' : 'Minimize card'}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setCardMinimized((value) => !value);
+                  }}
+                >
+                  {cardMinimized ? '▢' : '—'}
+                </button>
+                <button
+                  type="button"
+                  className="unit-card-icon-btn"
+                  data-testid="unit-card-close"
+                  title="Deselect unit (Esc)"
+                  aria-label="Deselect unit"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onCloseUnitCard?.();
+                  }}
+                >
+                  ✕
+                </button>
+              </div>
+            </header>
+            {!cardMinimized ? (
+              <div className="unit-card-body">
+                <div className="unit-card-meta">
+                  <span data-testid="unit-card-soldiers">{`${Number(cardUnit.soldiers) || 0} soldiers`}</span>
+                  <span>·</span>
+                  <span data-testid="unit-card-formation">
+                    {cardRanks != null
+                      ? `${Number(cardUnit.files)}×${cardRanks} (${Number(cardUnit.lateralInterval)}×${Number(cardUnit.rankDepth)} m)`
+                      : '—'}
+                  </span>
+                  <span>·</span>
+                  <strong data-testid="unit-card-allowance">
+                    {Number.isFinite(cardMovementM) ? `Reach ${cardMovementM} m` : 'Reach —'}
+                  </strong>
+                </div>
+              </div>
+            ) : null}
+          </aside>
+        </div>
+      ) : null}
       {draft ? (
         <p className="map-terrain-hint" role="status" data-testid="map-terrain-hint">
           Drawing{' '}

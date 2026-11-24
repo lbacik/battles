@@ -2445,6 +2445,69 @@ try {
     await battlePage.getByTestId('commit-empty').isVisible(),
   );
 
+  // Issue #123: selecting an active-side unit on the map opens the tethered
+  // context card beside it, fully inside the map viewport.
+  await battlePage.getByTestId('unit-context-card').waitFor({ state: 'visible', timeout: 10000 });
+  check(
+    'selecting a unit on the map opens the unit context card',
+    await battlePage.getByTestId('unit-context-card').isVisible(),
+  );
+  check(
+    'the unit card shows the tether inside the map viewport',
+    await battlePage.getByTestId('unit-card-tether').isVisible(),
+  );
+  const cardTitle = ((await battlePage.getByTestId('unit-card-name').textContent()) ?? '').trim();
+  check(
+    'the unit card shows the selected unit',
+    cardTitle !== '' && cardTitle === ((await battlePage.getByTestId('battle-unit-title').textContent()) ?? '').trim(),
+    `${cardTitle}`,
+  );
+  check(
+    'the unit card shows read-only status',
+    (await battlePage.getByTestId('unit-card-soldiers').isVisible()) &&
+      (await battlePage.getByTestId('unit-card-formation').isVisible()) &&
+      (await battlePage.getByTestId('unit-card-allowance').isVisible()) &&
+      (await battlePage.getByTestId('unit-card-cohesion').isVisible()),
+  );
+  {
+    const viewportBox = await battlePage.getByTestId('map-viewport').boundingBox();
+    const cardBox = await battlePage.getByTestId('unit-context-card').boundingBox();
+    const inside =
+      !!viewportBox && !!cardBox &&
+      cardBox.x >= viewportBox.x - 1 &&
+      cardBox.y >= viewportBox.y - 1 &&
+      cardBox.x + cardBox.width <= viewportBox.x + viewportBox.width + 1 &&
+      cardBox.y + cardBox.height <= viewportBox.y + viewportBox.height + 1;
+    check(
+      'the unit card sits fully inside the map viewport',
+      inside,
+      `card=${JSON.stringify(cardBox)} viewport=${JSON.stringify(viewportBox)}`,
+    );
+  }
+  await battlePage.getByTestId('unit-card-minimize').click();
+  check(
+    'minimizing the unit card collapses it to its header strip',
+    !(await battlePage.getByTestId('unit-card-soldiers').isVisible()) &&
+      (await battlePage.getByTestId('unit-context-card').isVisible()),
+  );
+  await battlePage.getByTestId('unit-card-minimize').click();
+  check(
+    'expanding the unit card restores its status',
+    await battlePage.getByTestId('unit-card-soldiers').isVisible(),
+  );
+  await battlePage.getByTestId('unit-card-close').click();
+  await battlePage.waitForFunction(
+    () => !document.querySelector('[data-testid="unit-context-card"]'),
+    null,
+    { timeout: 10000 },
+  );
+  check(
+    'closing the unit card deselects the unit',
+    (await battlePage.getByTestId('unit-context-card').count()) === 0,
+  );
+  await battlePage.locator(`[data-testid="map-unit"][data-unit-id="${battleOwnUnitId}"]`).click();
+  await battlePage.getByTestId('unit-context-card').waitFor({ state: 'visible', timeout: 10000 });
+
   // Both panels collapsed: the map takes both widths, then restores.
   await battlePage.getByTestId('collapse-left-panel').click();
   await battlePage.getByTestId('collapse-right-panel').click();
