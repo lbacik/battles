@@ -354,7 +354,11 @@ textarea:focus-visible {
 }
 
 .workspace {
-  flex: 1 1 auto;
+  /* A zero flex basis: the workspace height comes from the space left in the
+     shell, never from its content. With an auto basis a long side panel (the
+     terrain list in the Map editor) would grow the workspace past the window
+     instead of scrolling inside the panel. */
+  flex: 1 1 0px;
   display: grid;
   grid-template-columns: 264px minmax(360px, 1fr) 300px;
   margin: 20px 24px;
