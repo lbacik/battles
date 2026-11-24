@@ -32,6 +32,8 @@ import {
 import { round1 } from '../domain/geometry.js';
 import {
   UNIT_CARD_ESTIMATED_H,
+  UNIT_CARD_MARGIN,
+  clamp,
   layoutUnitContextCard,
   projectUnitBounds,
 } from '../domain/unit-card-geometry.js';
@@ -288,9 +290,16 @@ export default function BattlefieldMap({
   // Tethered unit card state (battle screen, issue #123): minimized
   // collapses the card to its header strip; the measured rendered height
   // (ResizeObserver) keeps the card inside the viewport as it pans/zooms.
+  // The player can also drag the card by its header (issue #130): the manual
+  // viewport-pixel position overrides the automatic tethered placement until
+  // the snap-back button restores it or another unit is selected.
   const [cardMinimized, setCardMinimized] = useState(false);
   const [cardMeasuredH, setCardMeasuredH] = useState(0);
+  const [cardManualPos, setCardManualPos] = useState<{ x: number; y: number } | null>(null);
   const cardRef = useRef<HTMLElement | null>(null);
+  // In-progress card drag: the dragging pointer id plus the grab offset
+  // between the pointer and the card's top-left corner in viewport pixels.
+  const cardDragRef = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null);
   // Live rotation preview (display-only): the facing under the pointer while a
   // rotation handle is dragged, plus whether snapping is disabled. Cleared on
   // drop, so the cursor readout falls back to coordinates.
@@ -450,6 +459,8 @@ export default function BattlefieldMap({
   useEffect(() => {
     setCardMinimized(false);
     setCardMeasuredH(0);
+    setCardManualPos(null);
+    cardDragRef.current = null;
   }, [cardUnitId]);
   useEffect(() => {
     const element = cardRef.current;
@@ -470,9 +481,10 @@ export default function BattlefieldMap({
             cardW: UNIT_CARD_W,
             measuredH: cardMeasuredH,
             estimatedH: cardMinimized ? 72 : UNIT_CARD_ESTIMATED_H,
+            manualPos: cardManualPos ?? undefined,
           })
         : null,
-    [cardBounds, cardMeasuredH, cardMinimized],
+    [cardBounds, cardMeasuredH, cardMinimized, cardManualPos],
   );
   const cardUnit = (unitCard?.unit as any) || null;
   const cardRanks =
@@ -787,7 +799,75 @@ export default function BattlefieldMap({
             onWheel={(event) => event.stopPropagation()}
             onContextMenu={(event) => event.stopPropagation()}
           >
-            <header className="unit-card-head">
+            <header
+              className="unit-card-head"
+              data-testid="unit-card-header"
+              title="Drag to move"
+              onPointerDown={(event) => {
+                // Window controls keep their own behaviour: dragging starts
+                // from the header surface, never from a button.
+                if (event.target instanceof Element && event.target.closest('button')) return;
+                if (!event.isPrimary || event.button !== 0) return;
+                if (!cardLayout) return;
+                event.stopPropagation();
+                event.preventDefault();
+                const viewport = viewportRef.current?.getBoundingClientRect();
+                const pointerX = viewport ? event.clientX - viewport.left : event.clientX;
+                const pointerY = viewport ? event.clientY - viewport.top : event.clientY;
+                cardDragRef.current = {
+                  pointerId: event.pointerId,
+                  offsetX: pointerX - cardLayout.left,
+                  offsetY: pointerY - cardLayout.top,
+                };
+                try {
+                  event.currentTarget.setPointerCapture?.(event.pointerId);
+                } catch {
+                  // Pointer capture is best-effort; dragging still works without it.
+                }
+              }}
+              onPointerMove={(event) => {
+                const drag = cardDragRef.current;
+                if (!drag || event.pointerId !== drag.pointerId) return;
+                event.stopPropagation();
+                event.preventDefault();
+                const rect = viewportRef.current?.getBoundingClientRect();
+                const pointerX = rect ? event.clientX - rect.left : event.clientX;
+                const pointerY = rect ? event.clientY - rect.top : event.clientY;
+                // The effective height is independent of the manual position,
+                // so the live layout's value clamps the drag like the domain.
+                const effectiveH = cardLayout?.effectiveH ?? UNIT_CARD_ESTIMATED_H;
+                setCardManualPos({
+                  x: clamp(
+                    pointerX - drag.offsetX,
+                    UNIT_CARD_MARGIN,
+                    Math.max(UNIT_CARD_MARGIN, viewportW - UNIT_CARD_W - UNIT_CARD_MARGIN),
+                  ),
+                  y: clamp(
+                    pointerY - drag.offsetY,
+                    UNIT_CARD_MARGIN,
+                    Math.max(UNIT_CARD_MARGIN, viewportH - effectiveH - UNIT_CARD_MARGIN),
+                  ),
+                });
+              }}
+              onPointerUp={(event) => {
+                const drag = cardDragRef.current;
+                if (!drag || event.pointerId !== drag.pointerId) return;
+                event.stopPropagation();
+                cardDragRef.current = null;
+                try {
+                  if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+                    event.currentTarget.releasePointerCapture?.(event.pointerId);
+                  }
+                } catch {
+                  // Releasing capture is best-effort.
+                }
+              }}
+              onPointerCancel={(event) => {
+                const drag = cardDragRef.current;
+                if (!drag || event.pointerId !== drag.pointerId) return;
+                cardDragRef.current = null;
+              }}
+            >
               <div className="unit-card-titles">
                 <span className="eyebrow" data-testid="unit-card-troop">
                   {String(cardUnit.troopType || 'Unit')}
@@ -801,6 +881,22 @@ export default function BattlefieldMap({
                 >
                   {String(cardUnit.cohesion || 'Steady')}
                 </span>
+                {cardManualPos ? (
+                  <button
+                    type="button"
+                    className="unit-card-icon-btn"
+                    data-testid="unit-card-snap-back"
+                    title="Snap back to unit"
+                    aria-label="Snap back to unit"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      cardDragRef.current = null;
+                      setCardManualPos(null);
+                    }}
+                  >
+                    ⌖
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   className="unit-card-icon-btn"
