@@ -22,6 +22,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import BattlefieldMap from './battlefield-map';
 import { PanelToggle, panelGridColumns, panelMinWidth, usePersistentPanel } from './collapsible-panel';
+import { TurnProgressionControls } from './turn-progression';
 import { TURN_PHASE_ORDERS } from '../domain/battle.js';
 import { CHARGE_EDGES, MAX_APPROACH_LEGS } from '../domain/charge.js';
 import { MAX_MOVE_LEGS } from '../domain/movement.js';
@@ -214,6 +215,60 @@ export default function BattleScreen({
     handleBattleMapClick,
     handleBattleRotate,
   } = turnDraft;
+
+  // Shared turn-progression state (issue #124): the inspector's Turn section
+  // and the turn bar's collapsed-panel control render the same
+  // TurnProgressionControls with the same state, so enabling, blocking and
+  // confirmation match on both surfaces.
+  const activeSideName = sideName(battle, activeSide);
+  const handoffSideName = handoffSide ? sideName(battle, handoffSide) : '';
+  const progressionVerdicts: any[] = Array.isArray(validation?.verdicts)
+    ? validation.verdicts
+    : [];
+  const progressionRejected = progressionVerdicts.filter(
+    (verdict: any) => verdict?.accepted === false,
+  ).length;
+  const progressionOk = validation?.ok === true;
+  function progressionCommitDraft(): void {
+    if (draftSubmission) onCommitDraft(draftSubmission.orders);
+  }
+  function progressionConfirmingChange(next: boolean): void {
+    setConfirming(next);
+  }
+
+  // One shared turn-progression control for both surfaces (issue #124): the
+  // inspector renders it full-size, while the turn bar renders it compact
+  // when the right panel is collapsed. Same state and callbacks on both, so
+  // enabling, blocking and confirmation always match.
+  function turnProgression(testIdPrefix?: string, compact?: boolean) {
+    return (
+      <TurnProgressionControls
+                  awaitingHandoff={awaitingHandoff}
+                  handoffSide={handoffSide}
+                  handoffSideName={handoffSideName}
+                  automated={automated}
+                  automatedController={String(controller ?? '')}
+                  automatedSideName={activeSideName}
+                  turnNumber={battle?.turnNumber}
+                  resolving={resolving}
+                  resolveError={resolveError}
+                  confirming={confirming}
+                  concedeConfirming={concedeConfirming}
+                  draftsCount={drafts.length}
+                  validationOk={progressionOk}
+                  rejectedCount={progressionRejected}
+                  verdictCount={progressionVerdicts.length}
+                  activeSideName={activeSideName}
+                  onHandoff={onHandoff}
+                  onCommitEmpty={onCommitEmpty}
+                  onCommitDraft={progressionCommitDraft}
+                  onContinueAutomated={onContinueAutomated}
+                  onConfirmingChange={progressionConfirmingChange}
+        testIdPrefix={testIdPrefix}
+        compact={compact}
+      />
+    );
+  }
 
   // A committed turn moves play on: the confirmations belong to the turn that
   // was committed, never to the next one. The draft and selection reset live
@@ -1118,207 +1173,104 @@ export default function BattleScreen({
                   <dt>Phase</dt>
                   <dd data-testid="phase">{battle?.phase}</dd>
                 </div>
-                {awaitingHandoff && handoffSide ? (
-                  <div className="handoff" data-testid="handoff-panel">
-                    <p>
-                      Turn {battle?.turnNumber} resolved. Pass the device, then begin the next turn.
+                {!(awaitingHandoff && handoffSide) &&
+                !automated &&
+                !confirming &&
+                drafts.length > 0 ? (
+                  <section aria-label="Turn draft" data-testid="draft-list">
+                    <span className="eyebrow">TURN DRAFT</span>
+                    <h3>Draft ({drafts.length})</h3>
+                    <ol className="draft-rows">
+                      {drafts.map((draft, index) => {
+                        const verdict = verdictForDraftIndex(index);
+                        const accepted = verdict?.accepted === true;
+                        const rejection =
+                          verdict && verdict.accepted === false ? verdict.rejection : null;
+                        const rowClass = ['draft-row'];
+                        if (draft.unitId === selectedUnitId) rowClass.push('selected');
+                        if (rejection) rowClass.push('rejected');
+                        else if (accepted) rowClass.push('accepted');
+                        return (
+                          <li
+                            key={draft.key}
+                            className={rowClass.join(' ')}
+                            data-testid={`draft-${draft.unitId}`}
+                          >
+                            <div className="draft-head">
+                              <button
+                                type="button"
+                                className="draft-select"
+                                data-testid={`select-draft-${draft.unitId}`}
+                                title="Edit this order"
+                                onClick={() => setSelectedUnitId(draft.unitId)}
+                              >
+                                {unitDisplayName(draft.unitId)}
+                              </button>
+                              <span className="draft-kind">{draftKindOf(draft)}</span>
+                              <span className="draft-meta">
+                                {draftSummary(draft)} · order {index + 1}
+                              </span>
+                            </div>
+                            {rejection ? (
+                              <p
+                                className="field-error"
+                                role="alert"
+                                data-testid={`draft-rejection-${draft.unitId}`}
+                              >
+                                {rejection.message}
+                              </p>
+                            ) : accepted ? (
+                              <p
+                                className="draft-ok"
+                                data-testid={`draft-accepted-${draft.unitId}`}
+                              >
+                                {draftAcceptedDetail(verdict)}
+                              </p>
+                            ) : (
+                              <p className="draft-pending">Validating…</p>
+                            )}
+                            <div className="draft-actions">
+                              <button
+                                type="button"
+                                className="btn-quiet"
+                                data-testid={`move-draft-up-${draft.unitId}`}
+                                disabled={index === 0}
+                                title="Move earlier (re-validates)"
+                                onClick={() => moveDraft(draft.unitId, -1)}
+                              >
+                                ↑
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-quiet"
+                                data-testid={`move-draft-down-${draft.unitId}`}
+                                disabled={index === drafts.length - 1}
+                                title="Move later (re-validates)"
+                                onClick={() => moveDraft(draft.unitId, 1)}
+                              >
+                                ↓
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-quiet btn-danger"
+                                data-testid={`remove-draft-${draft.unitId}`}
+                                title="Remove this order (re-validates)"
+                                onClick={() => removeDraft(draft.unitId)}
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ol>
+                    <p className="readonly-note">
+                      Order matters: each order validates against the state left by the orders
+                      before it. Reordering re-validates.
                     </p>
-                    <div className="handoff-actions">
-                      <button
-                        type="button"
-                        className="btn-primary"
-                        data-testid="handoff"
-                        data-handoff-side={handoffSide ?? ''}
-                        disabled={resolving}
-                        onClick={onHandoff}
-                      >
-                        {sideName(battle, handoffSide)} — begin your turn
-                      </button>
-                    </div>
-                  </div>
-                ) : automated ? (
-                  <div className="handoff" data-testid="automated-turn">
-                    <p>
-                      {sideName(battle, activeSide)} is automated ({controller} test player). Its
-                      turn resolves at once through the runner.
-                    </p>
-                    <div className="handoff-actions">
-                      <button
-                        type="button"
-                        className="btn-primary"
-                        data-testid="continue-turn"
-                        disabled={resolving}
-                        onClick={onContinueAutomated}
-                      >
-                        {resolving ? 'Resolving…' : 'Continue'}
-                      </button>
-                    </div>
-                    {resolveError ? (
-                      <p className="field-error" role="alert" data-testid="resolve-error">
-                        {resolveError}
-                      </p>
-                    ) : null}
-                  </div>
-                ) : confirming ? (
-                  <div className="confirm-box" data-testid="commit-confirm">
-                    <p>Commit an empty turn for {sideName(battle, activeSide)}? All units hold.</p>
-                    <div className="confirm-actions">
-                      <button
-                        type="button"
-                        className="btn-primary"
-                        data-testid="confirm-commit"
-                        onClick={onCommitEmpty}
-                      >
-                        Confirm commit
-                      </button>
-                      <button
-                        type="button"
-                        className="btn-secondary"
-                        data-testid="cancel-commit"
-                        onClick={() => setConfirming(false)}
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                ) : drafts.length === 0 ? (
-                  <>
-                    <div className="handoff-actions">
-                      <button
-                        type="button"
-                        className="btn-primary"
-                        data-testid="commit-empty"
-                        onClick={() => setConfirming(true)}
-                      >
-                        Commit empty turn
-                      </button>
-                    </div>
-                    <p className="commit-hint">
-                      No orders drafted: committing an empty turn holds every unit and needs
-                      confirmation, and a committed turn cannot be taken back.
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <section aria-label="Turn draft" data-testid="draft-list">
-                      <span className="eyebrow">TURN DRAFT</span>
-                      <h3>Draft ({drafts.length})</h3>
-                      <ol className="draft-rows">
-                        {drafts.map((draft, index) => {
-                          const verdict = verdictForDraftIndex(index);
-                          const accepted = verdict?.accepted === true;
-                          const rejection =
-                            verdict && verdict.accepted === false ? verdict.rejection : null;
-                          const rowClass = ['draft-row'];
-                          if (draft.unitId === selectedUnitId) rowClass.push('selected');
-                          if (rejection) rowClass.push('rejected');
-                          else if (accepted) rowClass.push('accepted');
-                          return (
-                            <li
-                              key={draft.key}
-                              className={rowClass.join(' ')}
-                              data-testid={`draft-${draft.unitId}`}
-                            >
-                              <div className="draft-head">
-                                <button
-                                  type="button"
-                                  className="draft-select"
-                                  data-testid={`select-draft-${draft.unitId}`}
-                                  title="Edit this order"
-                                  onClick={() => setSelectedUnitId(draft.unitId)}
-                                >
-                                  {unitDisplayName(draft.unitId)}
-                                </button>
-                                <span className="draft-kind">{draftKindOf(draft)}</span>
-                                <span className="draft-meta">
-                                  {draftSummary(draft)} · order {index + 1}
-                                </span>
-                              </div>
-                              {rejection ? (
-                                <p
-                                  className="field-error"
-                                  role="alert"
-                                  data-testid={`draft-rejection-${draft.unitId}`}
-                                >
-                                  {rejection.message}
-                                </p>
-                              ) : accepted ? (
-                                <p
-                                  className="draft-ok"
-                                  data-testid={`draft-accepted-${draft.unitId}`}
-                                >
-                                  {draftAcceptedDetail(verdict)}
-                                </p>
-                              ) : (
-                                <p className="draft-pending">Validating…</p>
-                              )}
-                              <div className="draft-actions">
-                                <button
-                                  type="button"
-                                  className="btn-quiet"
-                                  data-testid={`move-draft-up-${draft.unitId}`}
-                                  disabled={index === 0}
-                                  title="Move earlier (re-validates)"
-                                  onClick={() => moveDraft(draft.unitId, -1)}
-                                >
-                                  ↑
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn-quiet"
-                                  data-testid={`move-draft-down-${draft.unitId}`}
-                                  disabled={index === drafts.length - 1}
-                                  title="Move later (re-validates)"
-                                  onClick={() => moveDraft(draft.unitId, 1)}
-                                >
-                                  ↓
-                                </button>
-                                <button
-                                  type="button"
-                                  className="btn-quiet btn-danger"
-                                  data-testid={`remove-draft-${draft.unitId}`}
-                                  title="Remove this order (re-validates)"
-                                  onClick={() => removeDraft(draft.unitId)}
-                                >
-                                  Remove
-                                </button>
-                              </div>
-                            </li>
-                          );
-                        })}
-                      </ol>
-                      <p className="readonly-note">
-                        Order matters: each order validates against the state left by the orders
-                        before it. Reordering re-validates.
-                      </p>
-                    </section>
-                    <div className="handoff-actions">
-                      <button
-                        type="button"
-                        className="btn-primary"
-                        data-testid="commit-draft"
-                        disabled={!validation?.ok}
-                        onClick={() => draftSubmission && onCommitDraft(draftSubmission.orders)}
-                      >
-                        Commit turn ({drafts.length} {drafts.length === 1 ? 'order' : 'orders'})
-                      </button>
-                    </div>
-                    {(validation?.verdicts || []).filter((verdict: any) => verdict?.accepted === false)
-                      .length > 0 ? (
-                      <p className="field-error" role="alert" data-testid="commit-blocked">
-                        {(validation?.verdicts || []).filter(
-                          (verdict: any) => verdict?.accepted === false,
-                        ).length}{' '}
-                        of {(validation?.verdicts || []).length} orders rejected — fix or remove
-                        them to commit.
-                      </p>
-                    ) : (
-                      <p className="commit-hint">
-                        Every order is accepted. A committed turn cannot be taken back.
-                      </p>
-                    )}
-                  </>
-                )}
+                  </section>
+                ) : null}
+                {turnProgression()}
               </>
             )}
             {summary ? (
@@ -1506,6 +1458,11 @@ export default function BattleScreen({
           Phase: {battle?.phase}
         </span>
         <span className="spacer" />
+        {!finished && rightCollapsed ? (
+          <span className="turnbar-turn" data-testid="turnbar-turn-controls">
+            {turnProgression('turnbar-', true)}
+          </span>
+        ) : null}
         {finished ? null : concedeConfirming ? (
           <span className="concede-confirm" data-testid="concede-confirm-box">
             Concede the battle?

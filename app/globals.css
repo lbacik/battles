@@ -1453,6 +1453,25 @@ textarea:focus-visible {
   flex: 1;
 }
 
+/* Turn-progression control in the turn bar (issue #124): shown only while the
+   right inspector panel is collapsed. Compact: buttons plus blocking and
+   error messages, without the inspector's descriptive hints. */
+.turnbar-turn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.turnbar-turn .handoff,
+.turnbar-turn .confirm-box {
+  margin: 0;
+  padding: 8px 12px;
+}
+
+.turnbar-turn .field-error {
+  margin: 0;
+}
+
 /* Concede sits in the turn bar and is available only on one's own turn:
    otherwise it renders disabled, and conceding needs confirmation in the
    turn bar itself. */

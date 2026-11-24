@@ -3533,6 +3533,361 @@ try {
 
   await fullContext.close();
 
+  // Issue #124: turn-bar commit controls while the right panel is collapsed.
+  // Fresh storage, a fixed setup seed, Human vs Passive: when the inspector
+  // is collapsed the bottom turn bar surfaces the current turn-progression
+  // control (commit, handoff, Continue) through the same shared control as
+  // the inspector, and it shows nothing once the battle is finished.
+  const turnbarContext = await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+  });
+  await turnbarContext.setDefaultTimeout(T_BATTLE);
+  const turnbarPage = await turnbarContext.newPage();
+  turnbarPage.on('console', (message) => log(`turnbar console: ${message.text()}`));
+  turnbarPage.on('pageerror', (error) => log(`turnbar pageerror: ${String(error)}`));
+  turnbarPage.on('dialog', async (dialog) => {
+    log(`turnbar dialog: ${dialog.type()} ${dialog.message()}`);
+    await dialog.accept();
+  });
+  await turnbarPage.goto(`${base}/`, { waitUntil: 'networkidle' });
+  await turnbarPage.getByTestId('app').waitFor({ timeout: T_LOAD });
+  await turnbarPage.evaluate(() => {
+    window.__POLIS_TEST_SEED = 7;
+  });
+
+  const turnbarTitle = `Turnbar Probe ${Date.now()}`;
+  await turnbarPage.getByTestId('new-scenario-title').fill(turnbarTitle);
+  await turnbarPage.getByTestId('new-scenario-submit').click();
+  await turnbarPage.getByTestId('editor').waitFor({ timeout: T_LOAD });
+
+  // Two movers and a charger facing the Spartan line across open ground.
+  async function addTurnbarUnit(name, sideLabel, x, y, facing) {
+    await turnbarPage.getByTestId('oob-add').click();
+    await turnbarPage.getByTestId('unit-name').fill(name);
+    await turnbarPage.locator('.map-caption').click();
+    await turnbarPage.getByTestId('unit-side').selectOption({ label: sideLabel });
+    await turnbarPage.getByTestId('unit-position-x').fill(String(x));
+    await turnbarPage.locator('.map-caption').click();
+    await turnbarPage.getByTestId('unit-position-y').fill(String(y));
+    await turnbarPage.locator('.map-caption').click();
+    await turnbarPage.getByTestId('unit-facing').fill(String(facing));
+    await turnbarPage.locator('.map-caption').click();
+  }
+  await addTurnbarUnit('Turnbar mover one', 'Spartans', 400, 600, 180);
+  await addTurnbarUnit('Turnbar mover two', 'Spartans', 440, 600, 180);
+  await addTurnbarUnit('Turnbar charger', 'Spartans', 600, 600, 0);
+  await addTurnbarUnit('Turnbar target', 'Athenians', 600, 680, 180);
+  check(
+    'turnbar probe fields three side-b units and one side-a unit',
+    (await turnbarPage.getByTestId('oob-unit').count()) === 4,
+  );
+  await turnbarPage.getByTestId('save-scenario').click();
+  await waitForSave(turnbarPage);
+  await turnbarPage.getByTestId('start-battle-editor').click();
+  await turnbarPage.getByTestId('battle-setup').waitFor({ timeout: T_SAVE });
+  await turnbarPage.getByTestId('controller-side-a').selectOption('passive');
+  check(
+    'turnbar setup fields Passive vs Human',
+    (await turnbarPage.getByTestId('controller-side-a').inputValue()) === 'passive' &&
+      (await turnbarPage.getByTestId('controller-side-b').inputValue()) === 'human',
+  );
+  await turnbarPage.getByTestId('begin-battle').click();
+  await turnbarPage.getByTestId('battle-screen').waitFor({ timeout: T_LOAD });
+
+  // With the inspector expanded the turn bar carries no commit control.
+  check(
+    'expanded inspector shows no turn-bar commit control',
+    (await turnbarPage.getByTestId('turnbar-turn-controls').count()) === 0 &&
+      (await turnbarPage.getByTestId('turnbar-commit-empty').count()) === 0 &&
+      (await turnbarPage.getByTestId('turnbar-commit-draft').count()) === 0 &&
+      (await turnbarPage.getByTestId('turnbar-handoff').count()) === 0 &&
+      (await turnbarPage.getByTestId('turnbar-continue-turn').count()) === 0,
+  );
+
+  // The fixed seed starts the passive side, so Continue and the first handoff
+  // both surface in the turn bar once the inspector is collapsed.
+  await turnbarPage.getByTestId('collapse-right-panel').click();
+  await turnbarPage.waitForFunction(
+    () => document.querySelector('[data-testid="battle-inspector"]')?.getAttribute('data-collapsed') === 'true',
+  );
+  await turnbarPage.getByTestId('turnbar-continue-turn').waitFor({ timeout: T_BATTLE });
+  check(
+    'Continue surfaces in the turn bar for the automated side',
+    await turnbarPage.getByTestId('turnbar-continue-turn').isVisible(),
+  );
+  await turnbarPage.getByTestId('turnbar-continue-turn').click();
+  await turnbarPage.getByTestId('turnbar-handoff').waitFor({ timeout: T_BATTLE });
+  {
+    const turnbarFirstHandoff = await turnbarPage.getByTestId('turnbar-handoff').textContent();
+    check(
+      'the device handoff surfaces in the turn bar while collapsed',
+      /begin your turn/.test(turnbarFirstHandoff ?? '') &&
+        /Spartans/.test(turnbarFirstHandoff ?? ''),
+      (turnbarFirstHandoff ?? '').replace(/\s+/g, ' ').slice(0, 80),
+    );
+  }
+  await turnbarPage.getByTestId('turnbar-handoff').click();
+  await turnbarPage.getByTestId('turnbar-commit-empty').waitFor({ timeout: T_BATTLE });
+  check(
+    'turnbar drafting starts on the human turn',
+    ((await turnbarPage.getByTestId('turn-controller').textContent()) ?? '').startsWith('human'),
+  );
+
+  // Map metres (y up from the south-west corner) to client pixels through the
+  // live SVG viewBox, so draft legs land on exact points.
+  async function clickTurnbarMap(atX, atY) {
+    const svg = turnbarPage.getByTestId('battlefield-map');
+    const box = await svg.boundingBox();
+    const viewBox = ((await svg.getAttribute('viewBox')) ?? '0 0 1200 800')
+      .split(/\s+/)
+      .map(Number);
+    const fieldH = Number(await svg.getAttribute('data-height'));
+    const clientX = box.x + ((atX - viewBox[0]) / viewBox[2]) * box.width;
+    const clientY = box.y + ((fieldH - atY - viewBox[1]) / viewBox[3]) * box.height;
+    await turnbarPage.mouse.click(clientX, clientY);
+  }
+
+  // Presses the turn-bar handoff and waits for the settled state behind it,
+  // never for the transient gap in between: a changed handoff, human drafting
+  // controls, or the battle outcome (issue #137). A handoff for an automated
+  // side resolves at once through the runner behind a fresh handoff.
+  async function clickTurnbarHandoffAndSettle() {
+    const turnbarHandoffBefore =
+      (await turnbarPage.getByTestId('turnbar-handoff').textContent()) ?? '';
+    await turnbarPage.getByTestId('turnbar-handoff').click();
+    await turnbarPage.waitForFunction(
+      (previous) => {
+        if (document.querySelector('[data-testid="battle-outcome"]')) return true;
+        if (document.querySelector('[data-testid="turnbar-commit-empty"]')) return true;
+        if (document.querySelector('[data-testid="turnbar-commit-draft"]')) return true;
+        if (document.querySelector('[data-testid="turnbar-continue-turn"]')) return true;
+        const handoff = document.querySelector('[data-testid="turnbar-handoff"]');
+        return !!handoff && handoff.textContent !== previous;
+      },
+      turnbarHandoffBefore,
+      { timeout: T_BATTLE },
+    );
+  }
+  await turnbarPage.getByTestId('fit-view').click();
+  await turnbarPage.waitForTimeout(SETTLE_MS);
+
+  const turnbarOwn = turnbarPage.getByTestId('battle-oob-side-b').getByTestId('battle-oob-unit');
+  const turnbarFoe = turnbarPage.getByTestId('battle-oob-side-a').getByTestId('battle-oob-unit');
+  const turnbarMoverOne = await turnbarOwn
+    .filter({ hasText: 'Turnbar mover one' })
+    .getAttribute('data-unit-id');
+  const turnbarMoverTwo = await turnbarOwn
+    .filter({ hasText: 'Turnbar mover two' })
+    .getAttribute('data-unit-id');
+  const turnbarCharger = await turnbarOwn
+    .filter({ hasText: 'Turnbar charger' })
+    .getAttribute('data-unit-id');
+  const turnbarTarget = await turnbarFoe
+    .filter({ hasText: 'Turnbar target' })
+    .getAttribute('data-unit-id');
+
+  // Back expanded for inspector drafting; the turn-bar control hides again.
+  await turnbarPage.getByTestId('expand-right-panel').click();
+  await turnbarPage.waitForFunction(
+    () =>
+      document.querySelector('[data-testid="battle-inspector"]')?.getAttribute('data-collapsed') ===
+      'false',
+  );
+  check(
+    'expanding the inspector hides the turn-bar control while drafting',
+    (await turnbarPage.getByTestId('turnbar-turn-controls').count()) === 0,
+  );
+
+  // A Move drafts accepted while expanded; a second Move to the same
+  // destination is rejected by the engine and blocks the commit.
+  await turnbarOwn.filter({ hasText: 'Turnbar mover one' }).click();
+  await turnbarPage.getByTestId(`start-draft-${turnbarMoverOne}`).click();
+  await clickTurnbarMap(400, 560);
+  await turnbarPage.getByTestId(`draft-accepted-${turnbarMoverOne}`).waitFor({ timeout: T_SAVE });
+  await turnbarOwn.filter({ hasText: 'Turnbar mover two' }).click();
+  await turnbarPage.getByTestId(`start-draft-${turnbarMoverTwo}`).click();
+  await clickTurnbarMap(410, 560);
+  await turnbarPage.getByTestId(`draft-rejection-${turnbarMoverTwo}`).waitFor({ timeout: T_SAVE });
+  check(
+    'a colliding Move is rejected while the inspector is expanded',
+    /collid/i.test(
+      (await turnbarPage.getByTestId(`draft-rejection-${turnbarMoverTwo}`).textContent()) ?? '',
+    ),
+  );
+  check(
+    'the rejected Move blocks the inspector commit',
+    await turnbarPage.getByTestId('commit-draft').isDisabled(),
+  );
+
+  // Collapsing the inspector surfaces the same blocked commit in the turn bar.
+  await turnbarPage.getByTestId('collapse-right-panel').click();
+  await turnbarPage.waitForFunction(
+    () => document.querySelector('[data-testid="battle-inspector"]')?.getAttribute('data-collapsed') === 'true',
+  );
+  check(
+    'collapsing the inspector surfaces the blocked commit in the turn bar',
+    (await turnbarPage.getByTestId('turnbar-commit-draft').isVisible()) &&
+      (await turnbarPage.getByTestId('turnbar-commit-draft').isDisabled()) &&
+      (await turnbarPage.getByTestId('turnbar-handoff').count()) === 0 &&
+      (await turnbarPage.getByTestId('turnbar-continue-turn').count()) === 0 &&
+      (await turnbarPage.getByTestId('turnbar-commit-empty').count()) === 0,
+  );
+  {
+    const turnbarBlocked = await turnbarPage.getByTestId('turnbar-commit-blocked').textContent();
+    const inspectorBlocked = await turnbarPage.getByTestId('commit-blocked').textContent();
+    check(
+      'the turn bar reports the rejection with the inspector message',
+      (turnbarBlocked ?? '') !== '' && (turnbarBlocked ?? '') === (inspectorBlocked ?? ''),
+      (turnbarBlocked ?? '').replace(/\s+/g, ' ').slice(0, 120),
+    );
+  }
+
+  // Expanding hides the turn-bar control again; removing the rejected draft
+  // re-enables the commit on both surfaces.
+  await turnbarPage.getByTestId('expand-right-panel').click();
+  await turnbarPage.waitForFunction(
+    () =>
+      document.querySelector('[data-testid="battle-inspector"]')?.getAttribute('data-collapsed') ===
+      'false',
+  );
+  check(
+    'expanding the inspector hides the turn-bar control again',
+    (await turnbarPage.getByTestId('turnbar-turn-controls').count()) === 0,
+  );
+  await turnbarPage.getByTestId(`remove-draft-${turnbarMoverTwo}`).click();
+  await turnbarPage.waitForFunction(
+    () => document.querySelector('[data-testid="commit-draft"]')?.disabled === false,
+    null,
+    { timeout: T_SAVE },
+  );
+  check('removing the rejected draft re-enables the inspector commit', true);
+
+  // Collapsed again, the Charge target highlights on the map behind the
+  // collapsed panel; clicking it drafts the Charge without the inspector.
+  await turnbarPage.getByTestId('collapse-right-panel').click();
+  await turnbarPage.waitForFunction(
+    () => document.querySelector('[data-testid="battle-inspector"]')?.getAttribute('data-collapsed') === 'true',
+  );
+  await turnbarOwn.filter({ hasText: 'Turnbar charger' }).click();
+  check(
+    'the charge candidate highlights on the map while collapsed',
+    (await turnbarPage
+      .locator(`[data-testid="map-unit"][data-unit-id="${turnbarTarget}"]`)
+      .getAttribute('data-candidate-charge')) === 'true',
+  );
+  await turnbarPage.locator(`[data-testid="map-unit"][data-unit-id="${turnbarTarget}"]`).click();
+  await turnbarPage.waitForFunction(
+    () => {
+      const button = document.querySelector('[data-testid="turnbar-commit-draft"]');
+      return !!button && !button.disabled && /2 orders/.test(button.textContent ?? '');
+    },
+    null,
+    { timeout: T_SAVE },
+  );
+  check('clicking the highlighted target drafts the Charge behind the collapsed panel', true);
+  check(
+    'the turn bar offers the two-order commit while collapsed',
+    /Commit turn \(2 orders\)/.test(
+      (await turnbarPage.getByTestId('turnbar-commit-draft').textContent()) ?? '',
+    ) && !(await turnbarPage.getByTestId('turnbar-commit-draft').isDisabled()),
+  );
+
+  // Committing the turn from the turn bar advances play.
+  {
+    const turnbarRoundBefore = await turnbarPage.getByTestId('round').textContent();
+    await turnbarPage.getByTestId('turnbar-commit-draft').click();
+    await turnbarPage.waitForFunction(
+      (expected) =>
+        document.querySelector('[data-testid="round"]')?.textContent !== expected ||
+        document.querySelector('[data-testid="turnbar-handoff"]') ||
+        document.querySelector('[data-testid="handoff"]') ||
+        document.querySelector('[data-testid="battle-outcome"]'),
+      turnbarRoundBefore,
+      { timeout: T_BATTLE },
+    );
+    check('committing the turn from the turn bar advances the turn', true);
+  }
+
+  // The passive side hands off and resolves from the turn bar; the next human
+  // turn commits an empty turn with its confirmation step.
+  await turnbarPage.getByTestId('turnbar-handoff').waitFor({ timeout: T_BATTLE });
+  {
+    const turnbarSecondHandoff = await turnbarPage.getByTestId('turnbar-handoff').textContent();
+    check(
+      'the next handoff names the passive side in the turn bar',
+      /begin your turn/.test(turnbarSecondHandoff ?? '') &&
+        /Athenians/.test(turnbarSecondHandoff ?? ''),
+      (turnbarSecondHandoff ?? '').replace(/\s+/g, ' ').slice(0, 80),
+    );
+  }
+  await clickTurnbarHandoffAndSettle();
+  await turnbarPage.getByTestId('turnbar-handoff').waitFor({ timeout: T_BATTLE });
+  {
+    const turnbarThirdHandoff = await turnbarPage.getByTestId('turnbar-handoff').textContent();
+    check(
+      'the resolved passive side hands back to the human side in the turn bar',
+      /begin your turn/.test(turnbarThirdHandoff ?? '') &&
+        /Spartans/.test(turnbarThirdHandoff ?? ''),
+      (turnbarThirdHandoff ?? '').replace(/\s+/g, ' ').slice(0, 80),
+    );
+  }
+  await turnbarPage.getByTestId('turnbar-handoff').click();
+  await turnbarPage.getByTestId('turnbar-commit-empty').waitFor({ timeout: T_BATTLE });
+  check(
+    'the next human turn surfaces the empty-turn commit in the turn bar',
+    await turnbarPage.getByTestId('turnbar-commit-empty').isVisible(),
+  );
+  await turnbarPage.getByTestId('turnbar-commit-empty').click();
+  await turnbarPage.getByTestId('turnbar-commit-confirm').waitFor({ timeout: T_SAVE });
+  check(
+    'the empty turn needs confirmation in the turn bar',
+    (await turnbarPage.getByTestId('turnbar-confirm-commit').isVisible()) &&
+      (await turnbarPage.getByTestId('turnbar-cancel-commit').isVisible()),
+  );
+  {
+    const turnbarEmptyBefore = await turnbarPage.getByTestId('round').textContent();
+    await turnbarPage.getByTestId('turnbar-confirm-commit').click();
+    await turnbarPage.waitForFunction(
+      (expected) =>
+        document.querySelector('[data-testid="round"]')?.textContent !== expected ||
+        document.querySelector('[data-testid="turnbar-handoff"]') ||
+        document.querySelector('[data-testid="handoff"]') ||
+        document.querySelector('[data-testid="battle-outcome"]'),
+      turnbarEmptyBefore,
+      { timeout: T_BATTLE },
+    );
+    check('confirming the empty turn in the turn bar advances the turn', true);
+  }
+
+  // The concession locks the turn-bar commit, then ends the battle: a finished
+  // battle shows no commit control in the turn bar.
+  await turnbarPage.getByTestId('turnbar-handoff').waitFor({ timeout: T_BATTLE });
+  await clickTurnbarHandoffAndSettle();
+  await turnbarPage.getByTestId('turnbar-handoff').waitFor({ timeout: T_BATTLE });
+  await turnbarPage.getByTestId('turnbar-handoff').click();
+  await turnbarPage.getByTestId('turnbar-commit-empty').waitFor({ timeout: T_BATTLE });
+  await turnbarPage.getByTestId('concede').click();
+  check(
+    'the concede confirmation locks the turn-bar commit',
+    await turnbarPage.getByTestId('turnbar-commit-empty').isDisabled(),
+  );
+  await turnbarPage.getByTestId('concede-confirm').click();
+  await turnbarPage.waitForFunction(
+    () => !!document.querySelector('[data-testid="battle-outcome"]'),
+    null,
+    { timeout: T_BATTLE },
+  );
+  check(
+    'a finished battle shows no commit control in the turn bar',
+    (await turnbarPage.getByTestId('turnbar-turn-controls').count()) === 0 &&
+      (await turnbarPage.getByTestId('turnbar-commit-empty').count()) === 0 &&
+      (await turnbarPage.getByTestId('turnbar-commit-draft').count()) === 0 &&
+      (await turnbarPage.getByTestId('turnbar-handoff').count()) === 0 &&
+      (await turnbarPage.getByTestId('turnbar-continue-turn').count()) === 0,
+  );
+
+  await turnbarContext.close();
+
   // Issue #87: concede, the outcome screen, and rematch. Fresh storage, a
   // fixed setup seed, Human vs Human: the starting side is seed-drawn, so the
   // probe reads the active side instead of assuming it.
