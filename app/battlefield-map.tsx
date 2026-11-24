@@ -35,6 +35,12 @@ import {
   layoutUnitContextCard,
   projectUnitBounds,
 } from '../domain/unit-card-geometry.js';
+import {
+  OrderReasonList,
+  UnitCardOrderState,
+  UnitDraftVerdict,
+  UnitOrderButtons,
+} from './unit-order-actions';
 
 const FALLBACK_WIDTH = 1200;
 const FALLBACK_HEIGHT = 800;
@@ -141,12 +147,20 @@ interface BattlefieldMapProps {
   // instead of the scenario geometry (the battle never moves units).
   battleRotateUnitId?: string | null;
   onBattleRotate?: (facing: number) => void;
-  // Tethered unit context card (battle screen, issue #123): the read-only
+  // Tethered unit context card (battle screen, issues #123 and #125): the
   // status card for the selected active-side unit during a human Orders
   // phase. The battle screen owns visibility; the map projects the unit and
-  // places the card beside it inside the viewport.
-  unitCard?: { unit: any; movementAllowanceM?: number | null } | null;
+  // places the card beside it inside the viewport. Issue #125 makes the card
+  // a second order surface over the same turn draft as the inspector: the
+  // six order-kind buttons (enabled only from the engine's `availableActions`
+  // with its unavailability reasons), the live engine verdict for the unit's
+  // draft, and Hold (Clear). The screen passes precomputed order data and
+  // callbacks; the map holds no ruleset logic (ADR 0005).
+  unitCard?: ({ unit: any; movementAllowanceM?: number | null } & UnitCardOrderState) | null;
   onCloseUnitCard?: () => void;
+  onCardOrderKind?: (kind: string) => void;
+  onCardClearDraft?: () => void;
+  cardUnitDisplayName?: (unitId: string) => string;
   // Placement refusals to highlight: every id the refused drop would conflict
   // with (the dragged unit plus every overlap partner). Display-only, like the
   // selection: the document keeps the last valid values.
@@ -268,6 +282,9 @@ export default function BattlefieldMap({
   onBattleRotate,
   unitCard = null,
   onCloseUnitCard,
+  onCardOrderKind,
+  onCardClearDraft,
+  cardUnitDisplayName,
 }: BattlefieldMapProps) {
   const safeW = safeDimension(width, FALLBACK_WIDTH);
   const safeH = safeDimension(height, FALLBACK_HEIGHT);
@@ -295,6 +312,24 @@ export default function BattlefieldMap({
   // rotation handle is dragged, plus whether snapping is disabled. Cleared on
   // drop, so the cursor readout falls back to coordinates.
   const [liveRotate, setLiveRotate] = useState<{ facing: number; free: boolean } | null>(null);
+
+  // Unit card click-through (battle screen, issue #125): the card floats
+  // over the map beside the selected unit, so its dead space (header,
+  // status, reasons, verdict text) must never swallow a draft-leg click.
+  // Clicks on controls keep their own behaviour; anywhere else converts the
+  // client point to map metres and drafts exactly as an open-ground map
+  // click. Without an active Move (or Charge approach) draft the controller
+  // ignores the point, so selection and read-only flows never change.
+  function onCardClick(event: ReactMouseEvent<HTMLElement>): void {
+    event.stopPropagation();
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest('button, input, select, textarea, a, [role="button"]')) return;
+    if (!battleClickable || !onBattleMapClick) return;
+    const svg = svgHolderRef.current;
+    if (!svg) return;
+    const point = clientToMap(svg, event.clientX, event.clientY, safeH);
+    if (point) onBattleMapClick(point);
+  }
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const svgHolderRef = useRef<SVGSVGElement | null>(null);
@@ -475,6 +510,22 @@ export default function BattlefieldMap({
     [cardBounds, cardMeasuredH, cardMinimized],
   );
   const cardUnit = (unitCard?.unit as any) || null;
+  const cardPermitted = Array.isArray((unitCard as any)?.permitted)
+    ? ((unitCard as any).permitted as string[])
+    : null;
+  const cardUnavailable = Array.isArray((unitCard as any)?.unavailable)
+    ? ((unitCard as any).unavailable as { kind: string; reason?: string | null; code?: string | null }[])
+    : [];
+  const cardChargeCount = Number.isFinite(Number((unitCard as any)?.chargeCandidateCount))
+    ? Number((unitCard as any).chargeCandidateCount)
+    : 0;
+  const cardShootCount = Number.isFinite(Number((unitCard as any)?.shootCandidateCount))
+    ? Number((unitCard as any).shootCandidateCount)
+    : 0;
+  const cardDraftKind =
+    typeof (unitCard as any)?.draftKind === 'string' ? (unitCard as any).draftKind : null;
+  const cardHasDraft = (unitCard as any)?.hasDraft === true || cardDraftKind != null;
+  const cardVerdict = (unitCard as any)?.verdict ?? null;
   const cardRanks =
     cardUnit && Number.isFinite(Number(cardUnit.soldiers)) && Number.isFinite(Number(cardUnit.files)) && Number(cardUnit.files) > 0
       ? Math.ceil(Number(cardUnit.soldiers) / Number(cardUnit.files))
@@ -783,7 +834,7 @@ export default function BattlefieldMap({
             }}
             aria-label={`Unit card for ${String(cardUnit.name || 'Unit')}`}
             onPointerDown={(event) => event.stopPropagation()}
-            onClick={(event) => event.stopPropagation()}
+            onClick={onCardClick}
             onWheel={(event) => event.stopPropagation()}
             onContextMenu={(event) => event.stopPropagation()}
           >
@@ -844,6 +895,51 @@ export default function BattlefieldMap({
                     {Number.isFinite(cardMovementM) ? `Reach ${cardMovementM} m` : 'Reach —'}
                   </strong>
                 </div>
+                {Array.isArray(cardPermitted) ? (
+                  <div className="unit-card-orders" data-testid={`card-orders-${cardUnitId}`}>
+                    <span className="field-label">
+                      Order
+                      {cardDraftKind ? ` (now: ${cardDraftKind})` : ''}
+                    </span>
+                    <div className="unit-card-order-buttons">
+                      <UnitOrderButtons
+                        permitted={cardPermitted}
+                        unavailable={cardUnavailable}
+                        chargeCandidateCount={cardChargeCount}
+                        shootCandidateCount={cardShootCount}
+                        activeKind={cardDraftKind}
+                        testIdFor={(kind) => `card-order-${cardUnitId}-${kind}`}
+                        onOrder={(kind) => onCardOrderKind?.(kind)}
+                      />
+                      {cardHasDraft ? (
+                        <button
+                          type="button"
+                          className="btn-quiet"
+                          data-testid={`card-clear-${cardUnitId}`}
+                          title="Clear this unit's draft (implicit Hold)"
+                          onClick={() => onCardClearDraft?.()}
+                        >
+                          Hold (Clear)
+                        </button>
+                      ) : null}
+                    </div>
+                    <OrderReasonList
+                      permitted={cardPermitted}
+                      unavailable={cardUnavailable}
+                      chargeCandidateCount={cardChargeCount}
+                      shootCandidateCount={cardShootCount}
+                      listTestId={`card-order-reasons-${cardUnitId}`}
+                      itemTestId={(kind) => `card-order-reason-${cardUnitId}-${kind}`}
+                    />
+                    {cardHasDraft ? (
+                      <UnitDraftVerdict
+                        verdictTestId={`card-verdict-${cardUnitId}`}
+                        verdict={cardVerdict}
+                        unitDisplayName={cardUnitDisplayName}
+                      />
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
             ) : null}
           </aside>

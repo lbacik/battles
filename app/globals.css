@@ -2050,3 +2050,47 @@ textarea:focus-visible {
   color: #5c665a;
   margin: 6px 0 2px;
 }
+
+/* Unit order actions (issue #125): the six order-kind buttons shared by the
+   inspector and the unit context card. Enabled only from the engine's
+   availableActions; disabled kinds name the engine's reason. */
+.order-reasons {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--muted);
+}
+
+.order-reasons strong {
+  color: var(--ink);
+}
+
+.order-kind-btn.active {
+  outline: 2px solid #4e6047;
+  outline-offset: 1px;
+}
+
+.unit-card-orders {
+  margin-top: 10px;
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.unit-card-order-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.unit-card-order-buttons .btn-secondary {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.unit-card .draft-ok,
+.unit-card .field-error,
+.unit-card .draft-pending {
+  margin-top: 8px;
+}

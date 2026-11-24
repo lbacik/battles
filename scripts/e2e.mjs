@@ -101,6 +101,18 @@ async function clickHandoffAndSettle(battlePage) {
   );
 }
 
+// The unit context card floats beside the selected unit (issues #123 and
+// #125): map-leg clicks that land on its controls would hit the card instead
+// of the map, so leg-placement flows minimize the card first, exactly as a
+// player would. Minimizing only collapses the card to its header strip; the
+// inspector stays fully usable and the selection never changes.
+async function ensureCardMinimized(battlePage) {
+  await battlePage.getByTestId('unit-context-card').waitFor({ timeout: T_SAVE });
+  if (await battlePage.getByTestId('unit-card-soldiers').isVisible()) {
+    await battlePage.getByTestId('unit-card-minimize').click();
+  }
+}
+
 // Terrain rows live in the Map editor tab, while the editor reopens on the
 // battle tab. Count them there and return to the battle tab.
 async function terrainRowCounts(page) {
@@ -2902,6 +2914,7 @@ try {
   );
 
   // An accepted Move: 60 m south, inside the 90 m allowance, shows its ghost.
+  await ensureCardMinimized(movePage);
   await movePage.getByTestId(`start-draft-${id1}`).click();
   await movePage.getByTestId(`draft-editor-${id1}`).waitFor({ timeout: T_SAVE });
   await clickBattleMap(500, 540);
@@ -2915,6 +2928,7 @@ try {
   // A colliding Move: the second unit ends on the first unit's destination,
   // so the engine rejects it and names the conflict.
   await ownUnits.nth(1).click();
+  await ensureCardMinimized(movePage);
   await movePage.getByTestId(`start-draft-${id2}`).click();
   await clickBattleMap(500, 540);
   await movePage.getByTestId(`draft-rejection-${id2}`).waitFor({ timeout: T_SAVE });
@@ -3386,6 +3400,7 @@ try {
     ((await fullPage.getByTestId(`draft-${chargerId}`).textContent()) ?? '').includes('Charge') &&
       (await fullPage.getByTestId('draft-ghost').count()) >= 1,
   );
+  await ensureCardMinimized(fullPage);
   await clickFullMap(600, 620);
   await fullPage.waitForTimeout(SETTLE_MS);
   check(
@@ -3427,6 +3442,43 @@ try {
     await fullPage.getByTestId(`draft-accepted-${reformerId}`).isVisible(),
   );
 
+  // Issue #125: the unit context card is a second order surface over the
+  // same draft. The steady reformer sees all six order kinds; the gated
+  // kinds are disabled with the engine's reasons (Shoot without missiles,
+  // Rally while steady) and Charge, permitted but with no candidate in the
+  // forward arc, names the no-target hint. The card verdict matches the
+  // inspector's verdict for the same draft.
+  await fullPage.getByTestId(`card-orders-${reformerId}`).waitFor({ timeout: T_SAVE });
+  check(
+    'the unit card offers all six order kinds',
+    (await fullPage.getByTestId(`card-order-${reformerId}-Move`).count()) === 1 &&
+      (await fullPage.getByTestId(`card-order-${reformerId}-Charge`).count()) === 1 &&
+      (await fullPage.getByTestId(`card-order-${reformerId}-Shoot`).count()) === 1 &&
+      (await fullPage.getByTestId(`card-order-${reformerId}-Reform`).count()) === 1 &&
+      (await fullPage.getByTestId(`card-order-${reformerId}-Withdraw`).count()) === 1 &&
+      (await fullPage.getByTestId(`card-order-${reformerId}-Rally`).count()) === 1,
+  );
+  check(
+    'a gated Shoot on the card is disabled with the engine missile reason',
+    (await fullPage.getByTestId(`card-order-${reformerId}-Shoot`).isDisabled()) &&
+      ((await fullPage.getByTestId(`card-order-reason-${reformerId}-Shoot`).textContent()) ?? '').includes('missile'),
+  );
+  check(
+    'a gated Rally on the card is disabled with the engine steady reason',
+    (await fullPage.getByTestId(`card-order-${reformerId}-Rally`).isDisabled()) &&
+      ((await fullPage.getByTestId(`card-order-reason-${reformerId}-Rally`).textContent()) ?? '').includes('no need to rally'),
+  );
+  check(
+    'a permitted Charge with no candidate is disabled with the no-target hint',
+    (await fullPage.getByTestId(`card-order-${reformerId}-Charge`).isDisabled()) &&
+      ((await fullPage.getByTestId(`card-order-reason-${reformerId}-Charge`).textContent()) ?? '').includes('No target reachable'),
+  );
+  check(
+    'the card verdict matches the inspector verdict for the same Reform draft',
+    ((await fullPage.getByTestId(`card-verdict-${reformerId}`).textContent()) ?? '').includes('8 files') &&
+      ((await fullPage.getByTestId(`unit-verdict-${reformerId}`).textContent()) ?? '').includes('8 files'),
+  );
+
   // A Reform with no files is rejected inline and blocks the commit; removing
   // it enables the commit again.
   await fullPage.getByTestId(`reform-files-${reformerId}`).fill('0');
@@ -3450,10 +3502,12 @@ try {
   // A Move and a deliberately colliding Move: the second Move ends on the
   // first unit's destination, so the engine rejects it and names the conflict.
   await fullOwn.nth(0).click();
+  await ensureCardMinimized(fullPage);
   await fullPage.getByTestId(`start-draft-${mover1Id}`).click();
   await clickFullMap(400, 560);
   await fullPage.getByTestId(`draft-accepted-${mover1Id}`).waitFor({ timeout: T_SAVE });
   await fullOwn.nth(1).click();
+  await ensureCardMinimized(fullPage);
   await fullPage.getByTestId(`start-draft-${mover2Id}`).click();
   await clickFullMap(400, 560);
   await fullPage.getByTestId(`draft-rejection-${mover2Id}`).waitFor({ timeout: T_SAVE });
@@ -3498,6 +3552,50 @@ try {
     'a Withdraw drafts in place with its step-back ghost',
     (await fullPage.getByTestId('draft-ghost').count()) >= 1,
   );
+
+  // Issue #125: the engaged charger's card drafts Withdraw in one click and
+  // shows the acceptance verdict; the gated Charge names the engine's
+  // engaged reason; Hold (Clear) on the card removes the draft and the
+  // inspector follows, then the card re-drafts it.
+  await fullPage.getByTestId(`card-verdict-${chargerId}`).waitFor({ timeout: T_SAVE });
+  {
+    const cardVerdictText = (await fullPage.getByTestId(`card-verdict-${chargerId}`).textContent()) ?? '';
+    const unitVerdictText = (await fullPage.getByTestId(`unit-verdict-${chargerId}`).textContent()) ?? '';
+    const draftAcceptedText = (await fullPage.getByTestId(`draft-accepted-${chargerId}`).textContent()) ?? '';
+    check(
+      'the card shows the Withdraw acceptance verdict like the inspector',
+      cardVerdictText.includes('steps back') && unitVerdictText.includes('steps back'),
+      `card=${cardVerdictText.replace(/\s+/g, ' ').slice(0, 160)} | unit=${unitVerdictText.replace(/\s+/g, ' ').slice(0, 160)} | draft=${draftAcceptedText.replace(/\s+/g, ' ').slice(0, 160)}`,
+    );
+  }
+  check(
+    'a gated Charge on the engaged card names the engine reason',
+    (await fullPage.getByTestId(`card-order-${chargerId}-Charge`).isDisabled()) &&
+      ((await fullPage.getByTestId(`card-order-reason-${chargerId}-Charge`).textContent()) ?? '').includes('Engaged'),
+  );
+  await fullPage.getByTestId(`card-clear-${chargerId}`).click();
+  await fullPage.waitForFunction(
+    (id) => !document.querySelector(`[data-testid="draft-${id}"]`),
+    chargerId,
+  );
+  check(
+    'Hold (Clear) on the card removes the draft everywhere',
+    (await fullPage.getByTestId(`draft-${chargerId}`).count()) === 0 &&
+      (await fullPage.getByTestId(`card-clear-${chargerId}`).count()) === 0 &&
+      (await fullPage.getByTestId(`card-verdict-${chargerId}`).count()) === 0,
+  );
+  await fullPage.getByTestId(`card-order-${chargerId}-Withdraw`).click();
+  await fullPage.getByTestId(`card-verdict-${chargerId}`).waitFor({ timeout: T_SAVE });
+  {
+    const cardVerdictText = (await fullPage.getByTestId(`card-verdict-${chargerId}`).textContent()) ?? '';
+    const unitOrdersText = (await fullPage.getByTestId('unit-orders-' + chargerId).textContent()) ?? '';
+    const ghostCount = await fullPage.getByTestId('draft-ghost').count();
+    check(
+      'a Withdraw drafted from the card validates with its step-back ghost',
+      cardVerdictText.includes('steps back') && unitOrdersText.includes('now: Withdraw') && ghostCount >= 1,
+      `card=${cardVerdictText.replace(/\s+/g, ' ').slice(0, 160)} | orders=${unitOrdersText.replace(/\s+/g, ' ').slice(0, 160)} | ghosts=${ghostCount}`,
+    );
+  }
   const withdrawRoundBefore = await fullPage.getByTestId('round').textContent();
   await fullPage.getByTestId('commit-draft').click();
   await fullPage.waitForFunction(
@@ -3522,6 +3620,12 @@ try {
     'a Rally drafts in place for the disordered charger',
     /rallies from Disordered/i.test(rallyDetail ?? ''),
     (rallyDetail ?? '').replace(/\s+/g, ' ').slice(0, 160),
+  );
+  check(
+    'the card shows the Rally verdict for the inspector draft',
+    /rallies from Disordered/i.test(
+      (await fullPage.getByTestId(`card-verdict-${chargerId}`).textContent()) ?? '',
+    ),
   );
   const rallyRoundBefore = await fullPage.getByTestId('round').textContent();
   await fullPage.getByTestId('commit-draft').click();
@@ -3975,6 +4079,7 @@ try {
   // Move ends overlapping the first unit's destination, so the engine rejects it and
   // names the conflict.
   await gateOwn.filter({ hasText: 'Gate mover one' }).click();
+  await ensureCardMinimized(gatePage);
   await gatePage.getByTestId(`start-draft-${gateMoverOne}`).click();
   await clickGateMap(400, 560);
   await gatePage.getByTestId(`draft-accepted-${gateMoverOne}`).waitFor({ timeout: T_SAVE });
@@ -3993,6 +4098,7 @@ try {
   // overlap. The leg stays inside the 45-degree forward arc (exactly 45 would
   // bill the doubled sideways rate and overrun the allowance once reordered).
   await gateOwn.filter({ hasText: 'Gate mover two' }).click();
+  await ensureCardMinimized(gatePage);
   await gatePage.getByTestId(`start-draft-${gateMoverTwo}`).click();
   await clickGateMap(410, 560);
   await gatePage.getByTestId(`draft-rejection-${gateMoverTwo}`).waitFor({ timeout: T_SAVE });

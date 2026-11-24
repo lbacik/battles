@@ -86,6 +86,7 @@ export interface TurnDraftController {
   shootCandidatesOf: (unitId: string) => any[];
   spacingPresetsOf: (unit: any) => Record<string, any> | null;
   verdictForDraftIndex: (index: number) => any;
+  verdictForUnit: (unitId: string) => any;
   conflictUnitIds: () => Set<string>;
   conflictPoints: () => { x: number; y: number }[];
   unitDisplayName: (unitId: string) => string;
@@ -281,6 +282,14 @@ export function useTurnDraftController({
     const verdicts = validation?.verdicts;
     if (!Array.isArray(verdicts)) return null;
     return verdicts.find((verdict: any) => verdict?.orderIndex === index) || null;
+  }
+
+  // Live engine verdict for one unit's draft (the card and the inspector
+  // share it): the verdict whose order index holds that unit's draft.
+  function verdictForUnit(unitId: string): any {
+    const index = drafts.findIndex((draft) => draft.unitId === unitId);
+    if (index < 0) return null;
+    return verdictForDraftIndex(index);
   }
 
   // Units named as the conflict by a rejection, drawn as map highlights: the
@@ -785,6 +794,7 @@ export function useTurnDraftController({
     shootCandidatesOf,
     spacingPresetsOf,
     verdictForDraftIndex,
+    verdictForUnit,
     conflictUnitIds,
     conflictPoints,
     unitDisplayName,

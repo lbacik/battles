@@ -9,7 +9,8 @@
 // Move on the map (up to three leg points with a rotation handle), Charge at
 // a highlighted candidate (with optional approach legs), Shoot at a
 // highlighted candidate, Reform through its form with spacing presets, and
-// Withdraw and Rally in place from the inspector. Every draft change calls the
+// Withdraw and Rally in place from the inspector or, in one click, from the
+// unit context card. Every draft change calls the
 // engine's `validateTurn`: an accepted order shows a ghost footprint of its
 // preview (where it moves), a rejected one shows its message inline and
 // highlights the conflict. Drafts can be removed and reordered (reordering
@@ -27,6 +28,12 @@ import { CHARGE_EDGES, MAX_APPROACH_LEGS } from '../domain/charge.js';
 import { MAX_MOVE_LEGS } from '../domain/movement.js';
 import { isBattleFinished } from '../domain/battles.js';
 import { useTurnDraftController } from './turn-draft-controller';
+import {
+  OrderReasonList,
+  UnitDraftVerdict,
+  UnitOrderButtons,
+  draftAcceptedDetail,
+} from './unit-order-actions';
 import type { DraftLeg, OrderDraft } from './turn-draft-controller';
 import {
   changedUnitsForTurn,
@@ -189,6 +196,7 @@ export default function BattleScreen({
     shootCandidatesOf,
     spacingPresetsOf,
     verdictForDraftIndex,
+    verdictForUnit,
     conflictUnitIds,
     conflictPoints,
     unitDisplayName,
@@ -222,6 +230,26 @@ export default function BattleScreen({
     setConfirming(false);
     setConcedeConfirming(false);
   }, [battle?.turnNumber, battle?.id]);
+
+  // One dispatcher for the six order-kind buttons (inspector and unit card
+  // share it): starts or switches to that kind's draft through the shared
+  // turn-draft controller. Withdraw and Rally complete in one click; Move,
+  // Charge, Shoot and Reform drafts stay editable in the inspector.
+  function startOrderKind(unitId: string, kind: string): void {
+    if (kind === 'Move') startMoveDraft(unitId);
+    else if (kind === 'Charge') startChargeDraft(unitId);
+    else if (kind === 'Shoot') startShootDraft(unitId);
+    else if (kind === 'Reform') startReformDraft(unitId);
+    else if (kind === 'Withdraw') startWithdrawDraft(unitId);
+    else if (kind === 'Rally') startRallyDraft(unitId);
+  }
+
+  // Test id for each order-kind button in the inspector. The Move id predates
+  // the six-button card (`start-draft-`); the rest name their kind.
+  function inspectorOrderTestId(unitId: string, kind: string): string {
+    if (kind === 'Move') return `start-draft-${unitId}`;
+    return `start-${kind.toLowerCase()}-${unitId}`;
+  }
 
   // Per-kind draft editor for the selected unit: Move legs on the map with a
   // facing field, Charge target/edge selects with optional approach legs,
@@ -502,28 +530,6 @@ export default function BattleScreen({
   }
 
 
-  // One-line accepted detail for a draft from its verdict preview, per kind.
-  function draftAcceptedDetail(verdict: any): string {
-    if (verdict?.movement && Number.isFinite(verdict.movement.requiredM)) {
-      return `Accepted · needs ${verdict.movement.requiredM} m of ${verdict.movement.availableM} m.`;
-    }
-    if (verdict?.charge) {
-      return `Accepted · ${verdict.charge.aspect} contact, ${verdict.charge.frontageM} m, ${verdict.charge.fightingFiles} files.`;
-    }
-    if (verdict?.shoot) {
-      return `Accepted · ${verdict.shoot.distanceM} m to ${unitDisplayName(verdict.shoot.targetId)}.`;
-    }
-    if (verdict?.reform) {
-      return `Accepted · ${verdict.reform.files} files · ${verdict.reform.lateralInterval}×${verdict.reform.rankDepth} m.`;
-    }
-    if (verdict?.withdraw) {
-      return `Accepted · steps back ${verdict.withdraw.distanceM} m.`;
-    }
-    if (verdict?.rally) {
-      return `Accepted · rallies from ${verdict.rally.state}.`;
-    }
-    return 'Accepted.';
-  }
 
   function draftLegSummary(draft: { legs: DraftLeg[] }): string {
     const stops = draft.legs.filter((leg) => leg.to);
@@ -820,10 +826,28 @@ export default function BattleScreen({
                 ? {
                     unit: selectedUnit,
                     movementAllowanceM: selectedEntry?.movementAllowanceM,
+                    permitted: permittedKindsOf(selectedUnit.id),
+                    unavailable: selectedEntry?.unavailable || [],
+                    chargeCandidateCount: chargeCandidatesOf(selectedUnit.id).length,
+                    shootCandidateCount: shootCandidatesOf(selectedUnit.id).length,
+                    draftKind: draftForUnit(selectedUnit.id)?.kind || null,
+                    hasDraft: !!draftForUnit(selectedUnit.id),
+                    verdict: verdictForUnit(selectedUnit.id),
                   }
                 : null
             }
             onCloseUnitCard={() => setSelectedUnitId(null)}
+            onCardOrderKind={
+              canDraft && selectedUnit && selectedUnit.side === activeSide
+                ? (kind: string) => startOrderKind(selectedUnit.id, kind)
+                : undefined
+            }
+            onCardClearDraft={
+              canDraft && selectedUnit && selectedUnit.side === activeSide
+                ? () => removeDraft(selectedUnit.id)
+                : undefined
+            }
+            cardUnitDisplayName={unitDisplayName}
           />
           <p className="map-hint">
             {canDraft
@@ -901,7 +925,7 @@ export default function BattleScreen({
               </dl>
               {canDraft && selectedUnit.side === activeSide ? (
                 <>
-                  <div className="inspector-drafts">
+                  <div className="inspector-drafts" data-testid={`unit-orders-${selectedUnit.id}`}>
                     <span className="field-label">
                       Draft an order
                       {draftForUnit(selectedUnit.id)
@@ -909,67 +933,42 @@ export default function BattleScreen({
                         : ''}
                     </span>
                     <div className="handoff-actions">
-                      {permittedKindsOf(selectedUnit.id).includes('Move') ? (
+                      <UnitOrderButtons
+                        permitted={permittedKindsOf(selectedUnit.id)}
+                        unavailable={selectedEntry?.unavailable || []}
+                        chargeCandidateCount={chargeCandidatesOf(selectedUnit.id).length}
+                        shootCandidateCount={shootCandidatesOf(selectedUnit.id).length}
+                        activeKind={draftForUnit(selectedUnit.id)?.kind || null}
+                        testIdFor={(kind) => inspectorOrderTestId(selectedUnit.id, kind)}
+                        onOrder={(kind) => startOrderKind(selectedUnit.id, kind)}
+                      />
+                      {draftForUnit(selectedUnit.id) ? (
                         <button
                           type="button"
-                          className="btn-secondary"
-                          data-testid={`start-draft-${selectedUnit.id}`}
-                          onClick={() => startMoveDraft(selectedUnit.id)}
+                          className="btn-quiet"
+                          data-testid={`hold-clear-${selectedUnit.id}`}
+                          title="Clear this unit's draft (implicit Hold)"
+                          onClick={() => removeDraft(selectedUnit.id)}
                         >
-                          Draft Move
-                        </button>
-                      ) : null}
-                      {permittedKindsOf(selectedUnit.id).includes('Charge') ? (
-                        <button
-                          type="button"
-                          className="btn-secondary"
-                          data-testid={`start-charge-${selectedUnit.id}`}
-                          onClick={() => startChargeDraft(selectedUnit.id)}
-                        >
-                          Draft Charge
-                        </button>
-                      ) : null}
-                      {permittedKindsOf(selectedUnit.id).includes('Shoot') ? (
-                        <button
-                          type="button"
-                          className="btn-secondary"
-                          data-testid={`start-shoot-${selectedUnit.id}`}
-                          onClick={() => startShootDraft(selectedUnit.id)}
-                        >
-                          Draft Shoot
-                        </button>
-                      ) : null}
-                      {permittedKindsOf(selectedUnit.id).includes('Reform') ? (
-                        <button
-                          type="button"
-                          className="btn-secondary"
-                          data-testid={`start-reform-${selectedUnit.id}`}
-                          onClick={() => startReformDraft(selectedUnit.id)}
-                        >
-                          Draft Reform
-                        </button>
-                      ) : null}
-                      {permittedKindsOf(selectedUnit.id).includes('Withdraw') ? (
-                        <button
-                          type="button"
-                          className="btn-secondary"
-                          data-testid={`start-withdraw-${selectedUnit.id}`}
-                          onClick={() => startWithdrawDraft(selectedUnit.id)}
-                        >
-                          Draft Withdraw
-                        </button>
-                      ) : null}
-                      {permittedKindsOf(selectedUnit.id).includes('Rally') ? (
-                        <button
-                          type="button"
-                          className="btn-secondary"
-                          data-testid={`start-rally-${selectedUnit.id}`}
-                          onClick={() => startRallyDraft(selectedUnit.id)}
-                        >
-                          Draft Rally
+                          Hold (Clear)
                         </button>
                       ) : null}
                     </div>
+                    <OrderReasonList
+                      permitted={permittedKindsOf(selectedUnit.id)}
+                      unavailable={selectedEntry?.unavailable || []}
+                      chargeCandidateCount={chargeCandidatesOf(selectedUnit.id).length}
+                      shootCandidateCount={shootCandidatesOf(selectedUnit.id).length}
+                      listTestId={`unit-order-reasons-${selectedUnit.id}`}
+                      itemTestId={(kind) => `unit-order-reason-${selectedUnit.id}-${kind}`}
+                    />
+                    {draftForUnit(selectedUnit.id) ? (
+                      <UnitDraftVerdict
+                        verdictTestId={`unit-verdict-${selectedUnit.id}`}
+                        verdict={verdictForUnit(selectedUnit.id)}
+                        unitDisplayName={unitDisplayName}
+                      />
+                    ) : null}
                   </div>
                   {permittedKindsOf(selectedUnit.id).includes('Charge') &&
                   chargeCandidatesOf(selectedUnit.id).length > 0 ? (
@@ -1247,7 +1246,7 @@ export default function BattleScreen({
                                   className="draft-ok"
                                   data-testid={`draft-accepted-${draft.unitId}`}
                                 >
-                                  {draftAcceptedDetail(verdict)}
+                                  {draftAcceptedDetail(verdict, unitDisplayName)}
                                 </p>
                               ) : (
                                 <p className="draft-pending">Validating…</p>
