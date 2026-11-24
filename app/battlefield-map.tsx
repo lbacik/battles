@@ -145,8 +145,24 @@ interface BattlefieldMapProps {
   // status card for the selected active-side unit during a human Orders
   // phase. The battle screen owns visibility; the map projects the unit and
   // places the card beside it inside the viewport.
-  unitCard?: { unit: any; movementAllowanceM?: number | null } | null;
+  // Opposing-unit card (issue #131): when the selected unit belongs to the
+  // other side, the same tethered card shows its read-only status plus one
+  // `Charge with` / `Shoot with` button per active-side attacker the engine
+  // lists with this enemy as a candidate. The battle screen owns the lists
+  // and the draft callbacks; the map only renders them.
+  unitCard?: {
+    unit: any;
+    movementAllowanceM?: number | null;
+    variant?: 'own' | 'enemy';
+    chargeAttackers?: { attackerId: string; attackerName: string; edge: string; aspect?: string; distanceM: number }[];
+    shootAttackers?: { attackerId: string; attackerName: string; distanceM: number }[];
+    onChargeWith?: (attackerId: string) => void;
+    onShootWith?: (attackerId: string) => void;
+  } | null;
   onCloseUnitCard?: () => void;
+  // Right-click selection (issue #131): any unit becomes selected and its
+  // card opens, without the browser context menu (suppressed in the view).
+  onRightClickUnit?: (id: string) => void;
   // Placement refusals to highlight: every id the refused drop would conflict
   // with (the dragged unit plus every overlap partner). Display-only, like the
   // selection: the document keeps the last valid values.
@@ -268,6 +284,7 @@ export default function BattlefieldMap({
   onBattleRotate,
   unitCard = null,
   onCloseUnitCard,
+  onRightClickUnit,
 }: BattlefieldMapProps) {
   const safeW = safeDimension(width, FALLBACK_WIDTH);
   const safeH = safeDimension(height, FALLBACK_HEIGHT);
@@ -475,6 +492,14 @@ export default function BattlefieldMap({
     [cardBounds, cardMeasuredH, cardMinimized],
   );
   const cardUnit = (unitCard?.unit as any) || null;
+  const cardVariant = (unitCard as any)?.variant === 'enemy' ? 'enemy' : 'own';
+  const cardChargeAttackers = Array.isArray((unitCard as any)?.chargeAttackers)
+    ? (unitCard as any).chargeAttackers
+    : [];
+  const cardShootAttackers = Array.isArray((unitCard as any)?.shootAttackers)
+    ? (unitCard as any).shootAttackers
+    : [];
+  const cardTargetId = cardUnit?.id != null ? String(cardUnit.id) : '';
   const cardRanks =
     cardUnit && Number.isFinite(Number(cardUnit.soldiers)) && Number.isFinite(Number(cardUnit.files)) && Number(cardUnit.files) > 0
       ? Math.ceil(Number(cardUnit.soldiers) / Number(cardUnit.files))
@@ -683,6 +708,7 @@ export default function BattlefieldMap({
         svgRef={svgHolderRef}
         selectionEnabled={!handActive && !panning}
         onSelectUnit={onSelectUnit}
+        onRightClickUnit={onRightClickUnit}
         terrainFeatures={terrainFeatures}
         selectedTerrainId={selectedTerrainId}
         selectedVertexIndex={selectedVertexIndex}
@@ -839,11 +865,63 @@ export default function BattlefieldMap({
                       ? `${Number(cardUnit.files)}×${cardRanks} (${Number(cardUnit.lateralInterval)}×${Number(cardUnit.rankDepth)} m)`
                       : '—'}
                   </span>
-                  <span>·</span>
-                  <strong data-testid="unit-card-allowance">
-                    {Number.isFinite(cardMovementM) ? `Reach ${cardMovementM} m` : 'Reach —'}
-                  </strong>
+                  {cardVariant === 'own' ? (
+                    <>
+                      <span>·</span>
+                      <strong data-testid="unit-card-allowance">
+                        {Number.isFinite(cardMovementM) ? `Reach ${cardMovementM} m` : 'Reach —'}
+                      </strong>
+                    </>
+                  ) : null}
                 </div>
+                {cardVariant === 'enemy' ? (
+                  <>
+                    {cardChargeAttackers.length > 0 ? (
+                      <div className="unit-card-attacks">
+                        <span className="field-label">Charge with</span>
+                        <ul className="candidate-list">
+                          {cardChargeAttackers.map((attacker: any) => (
+                            <li key={String(attacker.attackerId)}>
+                              <button
+                                type="button"
+                                className="btn-quiet candidate-pick"
+                                data-testid={`charge-with-${String(attacker.attackerId)}-${cardTargetId}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  (unitCard as any)?.onChargeWith?.(String(attacker.attackerId));
+                                }}
+                              >
+                                Charge with {String(attacker.attackerName || attacker.attackerId)}
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                    {cardShootAttackers.length > 0 ? (
+                      <div className="unit-card-attacks">
+                        <span className="field-label">Shoot with</span>
+                        <ul className="candidate-list">
+                          {cardShootAttackers.map((attacker: any) => (
+                            <li key={String(attacker.attackerId)}>
+                              <button
+                                type="button"
+                                className="btn-quiet candidate-pick"
+                                data-testid={`shoot-with-${String(attacker.attackerId)}-${cardTargetId}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  (unitCard as any)?.onShootWith?.(String(attacker.attackerId));
+                                }}
+                              >
+                                Shoot with {String(attacker.attackerName || attacker.attackerId)}
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                  </>
+                ) : null}
               </div>
             ) : null}
           </aside>
@@ -1009,6 +1087,7 @@ interface BattlefieldSvgProps {
   svgRef: RefObject<SVGSVGElement | null>;
   selectionEnabled: boolean;
   onSelectUnit?: (id: string | null) => void;
+  onRightClickUnit?: (id: string) => void;
   terrainFeatures: any[];
   selectedTerrainId: string | null;
   selectedVertexIndex: number | null;
@@ -1081,6 +1160,7 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
   placed,
   selectionEnabled,
   onSelectUnit,
+  onRightClickUnit,
   terrainFeatures,
   selectedTerrainId,
   selectedVertexIndex,
@@ -1537,6 +1617,16 @@ const BattlefieldSvg = memo(function BattlefieldSvg({
       onPointerMove={updateUnitGesture}
       onPointerUp={() => finishUnitGesture(true)}
       onPointerCancel={() => finishUnitGesture(false)}
+      onContextMenu={(event) => {
+        const target = event.target instanceof Element ? event.target : null;
+        const holder = target?.closest?.('[data-testid="map-unit"]');
+        const unitId = holder?.getAttribute?.('data-unit-id');
+        // Right-click selects the unit and opens its card without the
+        // browser context menu (issue #131). Empty-ground right-clicks only
+        // suppress the menu so panning stays undisturbed.
+        event.preventDefault();
+        if (unitId) onRightClickUnit?.(unitId);
+      }}
     >
       <defs>
         <pattern id="polis-rough" width="22" height="18" patternUnits="userSpaceOnUse">

@@ -3533,6 +3533,158 @@ try {
 
   await fullContext.close();
 
+  // Issue #131: opposing-unit card with target-first Charge/Shoot. Fresh
+  // storage, fixed seed: two close hoplites face each other across 80 m of
+  // open ground (a Charge candidate either way), plus one far enemy behind
+  // each close unit (outside its front arc, so never a candidate). Clicking
+  // the close enemy with nothing selected opens its read-only card; its
+  // `Charge with` button drafts through the shared controller with a contact
+  // ghost and verdict; clicking a non-candidate enemy with a friendly
+  // selected selects it instead of drafting; right-clicking selects without
+  // the browser menu; and clicking a candidate with a friendly selected
+  // still drafts as before.
+  const foeContext = await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+  });
+  await foeContext.setDefaultTimeout(T_BATTLE);
+  const foePage = await foeContext.newPage();
+  foePage.on('console', (message) => log(`foe console: ${message.text()}`));
+  foePage.on('pageerror', (error) => log(`foe pageerror: ${String(error)}`));
+  foePage.on('dialog', async (dialog) => {
+    log(`foe dialog: ${dialog.type()} ${dialog.message()}`);
+    await dialog.accept();
+  });
+  await foePage.goto(`${base}/`, { waitUntil: 'networkidle' });
+  await foePage.getByTestId('app').waitFor({ timeout: T_LOAD });
+  await foePage.evaluate(() => {
+    window.__POLIS_TEST_SEED = 7;
+  });
+  const foeTitle = `Foe Card Probe ${Date.now()}`;
+  await foePage.getByTestId('new-scenario-title').fill(foeTitle);
+  await foePage.getByTestId('new-scenario-submit').click();
+  await foePage.getByTestId('editor').waitFor({ timeout: T_LOAD });
+  async function addFoeUnit(sideLabel, troop, x, y, facing) {
+    await foePage.getByTestId('oob-add').click();
+    await foePage.getByTestId('unit-side').selectOption({ label: sideLabel });
+    await foePage.getByTestId('unit-troop').selectOption(troop);
+    await foePage.getByTestId('unit-position-x').fill(String(x));
+    await foePage.locator('.map-caption').click();
+    await foePage.getByTestId('unit-position-y').fill(String(y));
+    await foePage.locator('.map-caption').click();
+    await foePage.getByTestId('unit-facing').fill(String(facing));
+    await foePage.locator('.map-caption').click();
+  }
+  await addFoeUnit('Athenians', 'hoplite', 600, 600, 0);
+  await addFoeUnit('Spartans', 'hoplite', 600, 680, 180);
+  await addFoeUnit('Spartans', 'hoplite', 600, 400, 180);
+  await addFoeUnit('Athenians', 'hoplite', 600, 780, 0);
+  check(
+    'foe card probe fields two units per side',
+    (await foePage.getByTestId('oob-unit').count()) === 4,
+  );
+  await foePage.getByTestId('save-scenario').click();
+  await waitForSave(foePage);
+  await foePage.getByTestId('start-battle-editor').click();
+  await foePage.getByTestId('battle-setup').waitFor({ timeout: T_SAVE });
+  await foePage.getByTestId('controller-side-b').selectOption('passive');
+  await foePage.getByTestId('begin-battle').click();
+  await foePage.getByTestId('battle-screen').waitFor({ timeout: T_LOAD });
+  for (let step = 0; step < 4; step += 1) {
+    if ((await foePage.getByTestId('battle-outcome').count()) > 0) break;
+    const controller = (await foePage.getByTestId('turn-controller').textContent()) ?? '';
+    if (controller.startsWith('human')) break;
+    if ((await foePage.getByTestId('handoff').count()) > 0) {
+      await clickHandoffAndSettle(foePage);
+    } else {
+      const turnBefore = await foePage.getByTestId('round').textContent();
+      await foePage.getByTestId('continue-turn').click();
+      await foePage.waitForFunction(
+        (expected) =>
+          document.querySelector('[data-testid="round"]')?.textContent !== expected ||
+          document.querySelector('[data-testid="handoff"]') ||
+          document.querySelector('[data-testid="battle-outcome"]'),
+        turnBefore,
+        { timeout: T_BATTLE },
+      );
+    }
+  }
+  if ((await foePage.getByTestId('handoff').count()) > 0) {
+    await clickHandoffAndSettle(foePage);
+  }
+  check(
+    'foe card drafting starts on the human turn',
+    ((await foePage.getByTestId('turn-controller').textContent()) ?? '').startsWith('human'),
+  );
+  await foePage.getByTestId('fit-view').click();
+  await foePage.waitForTimeout(SETTLE_MS);
+  const foeActiveSide = ((await foePage.getByTestId('turn-side').textContent()) ?? '').trim();
+  const foeOwnSideTestId = foeActiveSide.includes('Spartan') ? 'battle-oob-side-b' : 'battle-oob-side-a';
+  const foeFoeSideTestId = foeOwnSideTestId === 'battle-oob-side-a' ? 'battle-oob-side-b' : 'battle-oob-side-a';
+  const foeOwn = foePage.getByTestId(foeOwnSideTestId).getByTestId('battle-oob-unit');
+  const foeFoe = foePage.getByTestId(foeFoeSideTestId).getByTestId('battle-oob-unit');
+  const foeOwnCloseId = await foeOwn.nth(0).getAttribute('data-unit-id');
+  const foeFoeCloseId = await foeFoe.nth(0).getAttribute('data-unit-id');
+  const foeFoeFarId = await foeFoe.nth(1).getAttribute('data-unit-id');
+  // Clicking the close enemy with nothing selected opens its opposing card.
+  await foePage.locator(`[data-testid="map-unit"][data-unit-id="${foeFoeCloseId}"]`).click();
+  await foePage.getByTestId('unit-context-card').waitFor({ state: 'visible', timeout: T_SAVE });
+  check(
+    'clicking an enemy with nothing selected opens the opposing-unit card',
+    await foePage.getByTestId('unit-context-card').isVisible(),
+  );
+  check(
+    'the opposing card shows read-only status',
+    (await foePage.getByTestId('unit-card-soldiers').isVisible()) &&
+      (await foePage.getByTestId('unit-card-formation').isVisible()) &&
+      (await foePage.getByTestId('unit-card-cohesion').isVisible()),
+  );
+  check(
+    'the opposing card lists Charge with for the engine candidate',
+    await foePage.getByTestId(`charge-with-${foeOwnCloseId}-${foeFoeCloseId}`).isVisible(),
+  );
+  // Issuing Charge with from the card drafts through the shared controller.
+  await foePage.getByTestId(`charge-with-${foeOwnCloseId}-${foeFoeCloseId}`).click();
+  await foePage.getByTestId(`draft-accepted-${foeOwnCloseId}`).waitFor({ timeout: T_SAVE });
+  check(
+    'Charge with from the enemy card drafts with a verdict',
+    ((await foePage.getByTestId(`draft-${foeOwnCloseId}`).textContent()) ?? '').includes('Charge') &&
+      (await foePage.getByTestId('draft-ghost').count()) >= 1,
+  );
+  // Clicking a non-candidate enemy with a friendly selected selects it
+  // instead of drafting: remove the draft, reselect the friendly, then click
+  // the far enemy behind it.
+  await foePage.getByTestId(`remove-draft-${foeOwnCloseId}`).click();
+  await foePage.waitForTimeout(SETTLE_MS);
+  await foeOwn.nth(0).click();
+  await foePage.locator(`[data-testid="map-unit"][data-unit-id="${foeFoeFarId}"]`).click();
+  await foePage.getByTestId('unit-context-card').waitFor({ state: 'visible', timeout: T_SAVE });
+  check(
+    'clicking a non-candidate enemy selects it and keeps its card open',
+    await foePage.getByTestId('unit-context-card').isVisible(),
+  );
+  check(
+    'a non-candidate click drafts nothing',
+    (await foePage.getByTestId(`draft-${foeOwnCloseId}`).count()) === 0,
+  );
+  // Right-clicking the friendly unit selects it and opens its card without
+  // the browser context menu.
+  await foePage.locator(`[data-testid="map-unit"][data-unit-id="${foeOwnCloseId}"]`).click({ button: 'right' });
+  await foePage.getByTestId('unit-context-card').waitFor({ state: 'visible', timeout: T_SAVE });
+  check(
+    'right-clicking a unit opens its card',
+    await foePage.getByTestId('unit-context-card').isVisible(),
+  );
+  // Clicking a candidate enemy with the friendly selected still drafts.
+  await foeOwn.nth(0).click();
+  await foePage.locator(`[data-testid="map-unit"][data-unit-id="${foeFoeCloseId}"]`).click();
+  await foePage.getByTestId(`draft-accepted-${foeOwnCloseId}`).waitFor({ timeout: T_SAVE });
+  check(
+    'clicking a candidate enemy still drafts the Charge',
+    ((await foePage.getByTestId(`draft-${foeOwnCloseId}`).textContent()) ?? '').includes('Charge'),
+  );
+
+  await foeContext.close();
+
   // Issue #87: concede, the outcome screen, and rematch. Fresh storage, a
   // fixed setup seed, Human vs Human: the starting side is seed-drawn, so the
   // probe reads the active side instead of assuming it.

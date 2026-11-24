@@ -187,6 +187,8 @@ export default function BattleScreen({
     permittedKindsOf,
     chargeCandidatesOf,
     shootCandidatesOf,
+    chargeAttackersOf,
+    shootAttackersOf,
     spacingPresetsOf,
     verdictForDraftIndex,
     conflictUnitIds,
@@ -211,6 +213,7 @@ export default function BattleScreen({
     clearDraftLegs,
     setDraftFacing,
     handleBattleUnitSelect,
+    handleBattleUnitRightClick,
     handleBattleMapClick,
     handleBattleRotate,
   } = turnDraft;
@@ -816,14 +819,47 @@ export default function BattleScreen({
             }
             onBattleRotate={handleBattleRotate}
             unitCard={
-              canDraft && selectedUnit && selectedUnit.side === activeSide
-                ? {
-                    unit: selectedUnit,
-                    movementAllowanceM: selectedEntry?.movementAllowanceM,
-                  }
+              canDraft && selectedUnit
+                ? selectedUnit.side === activeSide
+                  ? {
+                      unit: selectedUnit,
+                      variant: 'own' as const,
+                      movementAllowanceM: selectedEntry?.movementAllowanceM,
+                    }
+                  : (() => {
+                      const targetId = String(selectedUnit.id);
+                      const chargeAttackers = chargeAttackersOf(targetId).map((entry: any) => ({
+                        attackerId: String(entry.attackerId),
+                        attackerName: unitDisplayName(entry.attackerId),
+                        edge: entry.edge,
+                        aspect: entry.aspect,
+                        distanceM: entry.distanceM,
+                      }));
+                      const shootAttackers = shootAttackersOf(targetId).map((entry: any) => ({
+                        attackerId: String(entry.attackerId),
+                        attackerName: unitDisplayName(entry.attackerId),
+                        distanceM: entry.distanceM,
+                      }));
+                      return {
+                        unit: selectedUnit,
+                        variant: 'enemy' as const,
+                        chargeAttackers,
+                        shootAttackers,
+                        onChargeWith: (attackerId: string) => {
+                          const attacker = chargeAttackers.find(
+                            (item: any) => item.attackerId === attackerId,
+                          );
+                          startChargeDraft(attackerId, targetId, attacker?.edge ?? null);
+                        },
+                        onShootWith: (attackerId: string) => {
+                          startShootDraft(attackerId, targetId);
+                        },
+                      };
+                    })()
                 : null
             }
             onCloseUnitCard={() => setSelectedUnitId(null)}
+            onRightClickUnit={handleBattleUnitRightClick}
           />
           <p className="map-hint">
             {canDraft

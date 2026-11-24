@@ -84,6 +84,8 @@ export interface TurnDraftController {
   permittedKindsOf: (unitId: string) => string[];
   chargeCandidatesOf: (unitId: string) => any[];
   shootCandidatesOf: (unitId: string) => any[];
+  chargeAttackersOf: (targetId: string) => any[];
+  shootAttackersOf: (targetId: string) => any[];
   spacingPresetsOf: (unit: any) => Record<string, any> | null;
   verdictForDraftIndex: (index: number) => any;
   conflictUnitIds: () => Set<string>;
@@ -111,6 +113,7 @@ export interface TurnDraftController {
   clearDraftLegs: (unitId: string) => void;
   setDraftFacing: (unitId: string, raw: string) => void;
   handleBattleUnitSelect: (unitId: string | null) => void;
+  handleBattleUnitRightClick: (unitId: string | null) => void;
   handleBattleMapClick: (point: { x: number; y: number }) => void;
   handleBattleRotate: (facing: number) => void;
 }
@@ -205,6 +208,58 @@ export function useTurnDraftController({
 
   function shootCandidatesOf(unitId: string): any[] {
     return actionsEntryFor(unitId)?.shootCandidates || [];
+  }
+
+  // Reverse lookup for the opposing-unit card (issue #131): every active-side
+  // unit whose engine candidates name this enemy as a target. Pure reads of
+  // `availableActions`, like the forward lookups above; the engine alone
+  // decides candidacy.
+  function chargeAttackersOf(targetId: string): any[] {
+    if (!battle || finished) return [];
+    try {
+      const actions = availableActions(battle, activeSide);
+      const attackers: any[] = [];
+      for (const entry of actions.units || []) {
+        const candidate = (entry?.chargeCandidates || []).find(
+          (item: any) => item?.targetId === targetId,
+        );
+        if (candidate) {
+          attackers.push({
+            attackerId: entry.unitId,
+            targetId,
+            edge: candidate.edge,
+            aspect: candidate.aspect,
+            distanceM: candidate.distanceM,
+          });
+        }
+      }
+      return attackers;
+    } catch {
+      return [];
+    }
+  }
+
+  function shootAttackersOf(targetId: string): any[] {
+    if (!battle || finished) return [];
+    try {
+      const actions = availableActions(battle, activeSide);
+      const attackers: any[] = [];
+      for (const entry of actions.units || []) {
+        const candidate = (entry?.shootCandidates || []).find(
+          (item: any) => item?.targetId === targetId,
+        );
+        if (candidate) {
+          attackers.push({
+            attackerId: entry.unitId,
+            targetId,
+            distanceM: candidate.distanceM,
+          });
+        }
+      }
+      return attackers;
+    } catch {
+      return [];
+    }
   }
 
   function spacingPresetsOf(unit: any): Record<string, any> | null {
@@ -605,8 +660,9 @@ export function useTurnDraftController({
   }
 
   // Unit clicks on the map: an own unit selects it; an enemy candidate drafts
-  // (or retargets) a Charge or Shoot for the selected unit, Charge first; any
-  // other click clears the selection.
+  // (or retargets) a Charge or Shoot for the selected friendly unit, Charge
+  // first; any other enemy click selects that enemy and opens its
+  // opposing-unit card (issue #131), including when nothing is selected.
   function handleBattleUnitSelect(unitId: string | null): void {
     if (!canDraft || !unitId) {
       setSelectedUnitId(unitId);
@@ -622,36 +678,49 @@ export function useTurnDraftController({
       notifyMutated();
       return;
     }
-    if (selectedUnitId) {
-      const kinds = permittedKindsOf(selectedUnitId);
+    const selected = units.find((entry: any) => entry?.id === selectedUnitId) || null;
+    if (selected && selected.side === activeSide) {
+      const kinds = permittedKindsOf(selectedUnitId as string);
       const charge = kinds.includes('Charge')
-        ? chargeCandidatesOf(selectedUnitId).find(
+        ? chargeCandidatesOf(selectedUnitId as string).find(
           (candidate: any) => candidate.targetId === unitId,
         )
         : null;
       if (charge) {
-        if (draftForUnit(selectedUnitId)?.kind === 'Charge') {
-          setChargeTarget(selectedUnitId, charge.targetId, charge.edge);
+        if (draftForUnit(selectedUnitId as string)?.kind === 'Charge') {
+          setChargeTarget(selectedUnitId as string, charge.targetId, charge.edge);
         } else {
-          startChargeDraft(selectedUnitId, charge.targetId, charge.edge);
+          startChargeDraft(selectedUnitId as string, charge.targetId, charge.edge);
         }
         return;
       }
       const shoot = kinds.includes('Shoot')
-        ? shootCandidatesOf(selectedUnitId).find(
+        ? shootCandidatesOf(selectedUnitId as string).find(
           (candidate: any) => candidate.targetId === unitId,
         )
         : null;
       if (shoot) {
-        if (draftForUnit(selectedUnitId)?.kind === 'Shoot') {
-          setShootTarget(selectedUnitId, shoot.targetId);
+        if (draftForUnit(selectedUnitId as string)?.kind === 'Shoot') {
+          setShootTarget(selectedUnitId as string, shoot.targetId);
         } else {
-          startShootDraft(selectedUnitId, shoot.targetId);
+          startShootDraft(selectedUnitId as string, shoot.targetId);
         }
         return;
       }
     }
-    setSelectedUnitId(null);
+    setSelectedUnitId(unitId);
+    notifyMutated();
+  }
+
+  // Right-clicks on the map (issue #131): any unit becomes selected and its
+  // card opens, without drafting or the browser context menu (the menu is
+  // suppressed in the map view). Pure selection: never drafts.
+  function handleBattleUnitRightClick(unitId: string | null): void {
+    if (!unitId) return;
+    const unit = units.find((entry: any) => entry?.id === unitId) || null;
+    if (!unit) return;
+    setSelectedUnitId(unitId);
+    notifyMutated();
   }
 
   // Open-ground clicks draft legs: up to three for the active Move draft,
@@ -783,6 +852,8 @@ export function useTurnDraftController({
     permittedKindsOf,
     chargeCandidatesOf,
     shootCandidatesOf,
+    chargeAttackersOf,
+    shootAttackersOf,
     spacingPresetsOf,
     verdictForDraftIndex,
     conflictUnitIds,
@@ -810,6 +881,7 @@ export function useTurnDraftController({
     clearDraftLegs,
     setDraftFacing,
     handleBattleUnitSelect,
+    handleBattleUnitRightClick,
     handleBattleMapClick,
     handleBattleRotate,
   };
