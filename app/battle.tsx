@@ -684,7 +684,14 @@ export default function BattleScreen({
   }
 
   return (
-    <div data-testid="battle-screen">
+    <div
+      data-testid="battle-screen"
+      data-turn={`${battle?.round ?? ''}:${battle?.turnNumber ?? ''}:${battle?.activeSide ?? ''}:${battle?.phase ?? ''}:${battle?.status ?? ''}`}
+      data-resolving={resolving ? 'true' : 'false'}
+      data-awaiting-handoff={awaitingHandoff ? 'true' : 'false'}
+      data-handoff-side={handoffSide ?? ''}
+      data-active-side={battle?.activeSide ?? ''}
+    >
       <main
         className="workspace battle-workspace"
         data-testid="battle-workspace"
@@ -1112,6 +1119,7 @@ export default function BattleScreen({
                         type="button"
                         className="btn-primary"
                         data-testid="handoff"
+                        data-handoff-side={handoffSide ?? ''}
                         disabled={resolving}
                         onClick={onHandoff}
                       >
