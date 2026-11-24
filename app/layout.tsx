@@ -1,5 +1,7 @@
 import type { Metadata, Viewport } from 'next';
 import './globals.css';
+import './globals-map.css';
+import './globals-battle.css';
 
 export const metadata: Metadata = {
   title: 'PÓLIS — scenario editor',
