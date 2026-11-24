@@ -1098,6 +1098,7 @@ export default function Home() {
               dirty={dirty}
               saveError={saveError}
               saving={saving}
+              revision={revision}
               canUndo={canUndo}
               canRedo={canRedo}
               onChange={handleChange}

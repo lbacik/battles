@@ -58,6 +58,7 @@ interface EditorProps {
   dirty: boolean;
   saveError: string | null;
   saving: boolean;
+  revision: number | null;
   canUndo: boolean;
   canRedo: boolean;
   onChange: (next: ScenarioDocument) => void;
@@ -253,6 +254,7 @@ export default function Editor({
   dirty,
   saveError,
   saving,
+  revision,
   canUndo,
   canRedo,
   onChange,
@@ -1327,7 +1329,13 @@ export default function Editor({
             Unsaved changes
           </span>
         ) : null}
-        <span className="status" data-testid="save-status" role="status">
+        <span
+          className="status"
+          data-testid="save-status"
+          role="status"
+          data-saving={saving ? 'true' : 'false'}
+          data-revision={revision ?? ''}
+        >
           {saving ? 'Saving…' : dirty ? 'Unsaved changes' : saveError ? '' : 'Saved'}
         </span>
         <button

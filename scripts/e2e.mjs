@@ -32,16 +32,73 @@ function check(name, pass, detail = '') {
   log(`${pass ? 'PASS' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
 }
 
-// Waits for the save just clicked to settle. The "Scenario saved." toast
-// lingers for 2.4 s, so a save clicked while an earlier toast is still up
-// would pass a toast-only wait before it finished. The save status leaves
-// "Saving…" only once the save settles, so wait for that first.
+// Timeout budgets for slower machines (issue #137): CI passes with 10-15 s
+// waits, but a loaded small board (e.g. Raspberry Pi 5, 1.5-4 arm64 cores)
+// needs multiples of that for IndexedDB saves, first paints, and battle
+// resolutions. Longer budgets only delay a real failure — every passing wait
+// returns early — so the suite stays fast on CI and stops flaking on slow
+// hardware. Bare Playwright waits and clicks inherit the longest budget
+// through setDefaultTimeout (applied to every context below).
+const T_SAVE = 30000;
+const T_LOAD = 30000;
+const T_BATTLE = 60000;
+const SETTLE_MS = 1000;
+const STEP_MS = 1500;
+const LAYOUT_MS = 1500;
+
+// Waits for the save just clicked to settle through stable app state, not
+// the transient "Scenario saved." toast (2.4 s): the toast can already be
+// gone — or still show the previous save — when the wait polls, so a
+// toast-only wait flakes both ways on slow machines. The editor exposes the
+// saving flag on save-status (data-saving); the clicked save flips it to
+// "true" and settles back to "false" with "Saved" once the store lands.
+// Observing the in-flight save first ties the wait to the click just made.
 async function waitForSave(page) {
   await page
-    .getByTestId('save-status')
-    .filter({ hasNotText: 'Saving…' })
-    .waitFor({ timeout: 10000 });
-  await page.getByText('Scenario saved.').waitFor({ timeout: 10000 });
+    .waitForFunction(
+      () =>
+        document.querySelector('[data-testid="save-status"]')?.getAttribute('data-saving') ===
+        'true',
+      null,
+      { timeout: 5000 },
+    )
+    .catch(() => {});
+  await page.waitForFunction(
+    () => {
+      const status = document.querySelector('[data-testid="save-status"]');
+      return (
+        status?.getAttribute('data-saving') === 'false' &&
+        (status.textContent ?? '').includes('Saved')
+      );
+    },
+    null,
+    { timeout: T_SAVE },
+  );
+}
+
+// Presses the device handoff and waits for the settled state behind it,
+// never for the transient gap in between. Clicking a handoff for a human
+// side unlocks drafting (commit-empty appears); clicking one for an
+// automated side resolves at once behind a fresh handoff for the next side
+// (its text changes) or behind the battle outcome. While the automated turn
+// resolves neither is on screen yet, so waiting for "handoff gone" or for
+// the pre-click handoff still showing both race (issue #137): the wait can
+// miss the gap or pass on the stale handoff before React clears it. Waiting
+// for a changed handoff, drafting controls, or the outcome is stable.
+async function clickHandoffAndSettle(battlePage) {
+  const handoffBefore = (await battlePage.getByTestId('handoff').textContent()) ?? '';
+  await battlePage.getByTestId('handoff').click();
+  await battlePage.waitForFunction(
+    (previous) => {
+      if (document.querySelector('[data-testid="battle-outcome"]')) return true;
+      if (document.querySelector('[data-testid="commit-empty"]')) return true;
+      if (document.querySelector('[data-testid="continue-turn"]')) return true;
+      const handoff = document.querySelector('[data-testid="handoff"]');
+      return !!handoff && handoff.textContent !== previous;
+    },
+    handoffBefore,
+    { timeout: T_BATTLE },
+  );
 }
 
 // Terrain rows live in the Map editor tab, while the editor reopens on the
@@ -151,6 +208,7 @@ try {
     viewport: { width: 1440, height: 900 },
     acceptDownloads: true,
   });
+  await context.setDefaultTimeout(T_BATTLE);
   // A Playwright trace of the whole run lands in e2e-report/ next to
   // report.json and trace.log, so the CI artifact carries the failure
   // context, not just the check list.
@@ -177,7 +235,7 @@ try {
   await page.getByTestId('new-scenario-submit').click();
 
   // The editor opens on an empty battlefield.
-  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page.getByTestId('editor').waitFor({ timeout: T_LOAD });
   check('creating a scenario opens the editor', true);
   const headerTitle = await page.getByTestId('header-title').textContent();
   check('header shows the scenario title', headerTitle === title, `header=${headerTitle}`);
@@ -266,7 +324,7 @@ try {
   const keyX = keyBox.x + keyBox.width / 4;
   const keyY = keyBox.y + keyBox.height / 4;
   await page.mouse.move(keyX, keyY);
-  await page.waitForTimeout(200);
+  await page.waitForTimeout(SETTLE_MS);
   const keyAnchorBefore = await page.getByTestId('cursor-coords').textContent();
   await page.keyboard.press('+');
   await page.waitForFunction(
@@ -292,11 +350,11 @@ try {
   const btnX = btnBox.x + btnBox.width / 4;
   const btnY = btnBox.y + btnBox.height / 4;
   await page.mouse.move(btnX, btnY);
-  await page.waitForTimeout(200);
+  await page.waitForTimeout(SETTLE_MS);
   const btnAnchorBefore = await page.getByTestId('cursor-coords').textContent();
   await page.getByTestId('zoom-in').click();
   await page.mouse.move(btnX, btnY);
-  await page.waitForTimeout(200);
+  await page.waitForTimeout(SETTLE_MS);
   const btnAnchorAfter = await page.getByTestId('cursor-coords').textContent();
   check(
     'zoom control keeps the cursor point fixed',
@@ -421,12 +479,12 @@ try {
   check('save reports the saved state', saveStatus === 'Saved', `status=${saveStatus}`);
 
   await page.reload({ waitUntil: 'networkidle' });
-  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page.getByTestId('editor').waitFor({ timeout: T_LOAD });
   const reloadedTitle = await page.getByTestId('header-title').textContent();
   check('reload keeps the open scenario', reloadedTitle === title, `header=${reloadedTitle}`);
 
   await page.getByTestId('back-to-library').click();
-  await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  await page.getByTestId('scenario-list').waitFor({ timeout: T_SAVE });
   const rows = await page.getByTestId('scenario-row-title').allTextContents();
   check('library lists the saved scenario', rows.includes(title), rows.join(' | '));
   const metas = await page.getByTestId('scenario-row-meta').allTextContents();
@@ -438,7 +496,7 @@ try {
 
   const row = page.getByTestId('scenario-row').filter({ hasText: title });
   await row.getByTestId('open-scenario').click();
-  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page.getByTestId('editor').waitFor({ timeout: T_LOAD });
   const reopenedTitle = await page.getByTestId('editor-title').textContent();
   const reopenedDims = await page.getByTestId('battlefield-dims').textContent();
   const inspectorTitle = await page.getByTestId('inspector-title').inputValue();
@@ -794,14 +852,14 @@ try {
   const linearBefore = await linearVertex.count();
   check('the road shows its vertices', linearBefore === 3);
   await page.getByTestId('terrain-edge-handle').first().click();
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(STEP_MS);
   check(
     'inserting a road vertex adds a handle',
     (await linearVertex.count()) === linearBefore + 1,
   );
   await linearVertex.first().click();
   await page.keyboard.press('Delete');
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(STEP_MS);
   check('deleting a road vertex removes its handle', (await linearVertex.count()) === linearBefore);
 
   // Recategorise the forest, insert a vertex on an edge, delete it again.
@@ -816,14 +874,14 @@ try {
   const vertexHandle = page.getByTestId('terrain-vertex-handle');
   const verticesBefore = await vertexHandle.count();
   await page.getByTestId('terrain-edge-handle').first().click();
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(STEP_MS);
   check(
     'inserting a vertex on an edge adds a handle',
     (await vertexHandle.count()) === verticesBefore + 1,
   );
   await vertexHandle.first().click();
   await page.keyboard.press('Delete');
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(STEP_MS);
   check(
     'deleting a vertex removes its handle',
     (await vertexHandle.count()) === verticesBefore,
@@ -939,13 +997,13 @@ try {
   await page.locator('.map-caption').click();
   await page.getByTestId('unit-position-y').fill('400');
   await page.locator('.map-caption').click();
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(STEP_MS);
 
   // Editing soldiers updates the derived ranks and depth. React 19 flushes
   // the re-render a frame after the commit, so wait a beat before reading.
   await page.getByTestId('unit-soldiers').fill('150');
   await page.locator('.map-caption').click();
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(STEP_MS);
   const derived150 = (await page.getByTestId('unit-derived').textContent()) ?? '';
   check(
     'editing soldiers updates ranks and depth',
@@ -959,14 +1017,14 @@ try {
   // select then applies the open spacings in one step. React 19 flushes the
   // re-render a frame after the commit, so wait a beat before reading.
   await page.getByTestId('unit-troop').selectOption('peltast');
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(STEP_MS);
   check(
     'changing troop type pre-fills its normal spacing',
     (await page.getByTestId('unit-spacing-lateral').inputValue()) === '1.5' &&
       (await page.getByTestId('unit-spacing-depth').inputValue()) === '1.5',
   );
   await page.getByTestId('unit-preset').selectOption('open');
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(STEP_MS);
   const lateralOpen = await page.getByTestId('unit-spacing-lateral').inputValue();
   const depthOpen = await page.getByTestId('unit-spacing-depth').inputValue();
   check(
@@ -986,8 +1044,8 @@ try {
     oobDupTitles.some((entry) => /copy/.test(entry ?? '')),
     oobDupTitles.join(' | ').slice(0, 120),
   );
-  await page.locator(`[data-testid="map-unit"][data-unit-id="${firstUnitId}"]`).waitFor({ state: 'visible', timeout: 10000 });
-  await page.waitForTimeout(500);
+  await page.locator(`[data-testid="map-unit"][data-unit-id="${firstUnitId}"]`).waitFor({ state: 'visible', timeout: T_SAVE });
+  await page.waitForTimeout(STEP_MS);
   await page.locator(`[data-testid="map-unit"][data-unit-id="${firstUnitId}"]`).click();
   const selectedUnitTitle = await page.getByTestId('unit-title').textContent();
   check(
@@ -1279,7 +1337,7 @@ try {
   await page.locator('[data-testid="oob-unit"]', { hasText: 'Athenian peltasts' }).click();
   await page.getByTestId('unit-preset').selectOption('open');
   // React 19 flushes the preset re-render a frame after the commit.
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(STEP_MS);
   check(
     'acceptance step 5 applies the open spacing preset',
     (await page.getByTestId('unit-spacing-lateral').inputValue()) === '3' &&
@@ -1317,7 +1375,7 @@ try {
   await page.getByTestId('save-scenario').click();
   await waitForSave(page);
   await page.reload({ waitUntil: 'networkidle' });
-  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page.getByTestId('editor').waitFor({ timeout: T_LOAD });
   check(
     'acceptance step 9 reloads the finished scenario',
     (await page.getByTestId('header-title').textContent()) === title,
@@ -1491,11 +1549,11 @@ try {
       (await page.evaluate(() => window.localStorage.getItem('polis.panel.battle.left'))) === null,
   );
   await page.reload({ waitUntil: 'networkidle' });
-  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page.getByTestId('editor').waitFor({ timeout: T_LOAD });
   await page.waitForFunction(
     () => document.querySelector('[data-testid="editor-left-panel"]')?.getAttribute('data-collapsed') === 'true',
     null,
-    { timeout: 10000 },
+    { timeout: T_SAVE },
   );
   check(
     'collapsing the editor left panel survives a reload',
@@ -1512,11 +1570,11 @@ try {
     () => document.querySelector('[data-testid="inspector"]')?.getAttribute('data-collapsed') === 'true',
   );
   await page.reload({ waitUntil: 'networkidle' });
-  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page.getByTestId('editor').waitFor({ timeout: T_LOAD });
   await page.waitForFunction(
     () => document.querySelector('[data-testid="inspector"]')?.getAttribute('data-collapsed') === 'true',
     null,
-    { timeout: 10000 },
+    { timeout: T_SAVE },
   );
   check(
     'collapsing the editor right panel survives a reload independently',
@@ -1535,8 +1593,8 @@ try {
     window.localStorage.setItem('polis.panel.editor.right', '{bad json');
   });
   await page.reload({ waitUntil: 'networkidle' });
-  await page.getByTestId('editor').waitFor({ timeout: 15000 });
-  await page.waitForTimeout(500);
+  await page.getByTestId('editor').waitFor({ timeout: T_LOAD });
+  await page.waitForTimeout(STEP_MS);
   check(
     'a corrupt editor preference falls back to expanded without errors',
     (await page.getByTestId('editor-left-panel').getAttribute('data-collapsed')) === 'false' &&
@@ -1561,7 +1619,7 @@ try {
   );
   leaveAccepted = true;
   await page.getByTestId('back-to-library').click();
-  await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  await page.getByTestId('scenario-list').waitFor({ timeout: T_SAVE });
   check('confirming the warning leaves the editor', true);
   // The scenario library is complete and safe: duplicate, delete with
   // confirmation, export/import round-trip, rejected files, save conflicts,
@@ -1583,14 +1641,16 @@ try {
 
   // Duplicate creates a new copy; deleting it asks for confirmation.
   // The previous section already left the editor, so the library is showing.
-  await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  await page.getByTestId('scenario-list').waitFor({ timeout: T_SAVE });
   const countBeforeDup = await page.getByTestId('scenario-row').count();
   const dupRow = page.getByTestId('scenario-row').filter({ hasText: title });
   await dupRow.getByTestId('duplicate-scenario').click();
-  await page.getByText(/Duplicated as/).waitFor({ timeout: 10000 });
+  // The duplicate lands as a new library row (stable state); the
+  // "Duplicated as" toast is transient (2.4 s) and is not waited on.
   await page.waitForFunction(
     (expected) => document.querySelectorAll('[data-testid="scenario-row"]').length === expected,
     countBeforeDup + 1,
+    { timeout: T_SAVE },
   );
   check('duplicate adds a new copy', true, `rows=${countBeforeDup} → ${countBeforeDup + 1}`);
   const dupTitles = await page.getByTestId('scenario-row-title').allTextContents();
@@ -1602,16 +1662,18 @@ try {
   const copyRow = page.getByTestId('scenario-row').filter({ hasText: `${title} (copy)` });
   dialogAction.next = 'dismiss';
   await copyRow.getByTestId('delete-scenario').click();
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(SETTLE_MS);
   check(
     'delete asks for confirmation (dismiss keeps the copy)',
     (await page.getByTestId('scenario-row').count()) === countBeforeDup + 1,
   );
   await copyRow.getByTestId('delete-scenario').click();
-  await page.getByText('Scenario deleted.').waitFor({ timeout: 10000 });
+  // The row disappearing is the stable effect; the "Scenario deleted."
+  // toast is transient and is not waited on.
   await page.waitForFunction(
     (expected) => document.querySelectorAll('[data-testid="scenario-row"]').length === expected,
     countBeforeDup,
+    { timeout: T_SAVE },
   );
   check('delete with confirmation removes the copy', true);
 
@@ -1622,7 +1684,7 @@ try {
   await page.getByTestId('inspector-title').waitFor({ state: 'detached', timeout: 1000 }).catch(() => {});
   const exportRow = page.getByTestId('scenario-row').filter({ hasText: title }).first();
   await exportRow.getByTestId('open-scenario').click();
-  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page.getByTestId('editor').waitFor({ timeout: T_LOAD });
   await page.getByTestId('inspector-width').fill('1400.05');
   await page.getByTestId('inspector-width').blur();
   await page.getByTestId('save-scenario').click();
@@ -1631,7 +1693,7 @@ try {
   const exportedId = exportUrl.searchParams.get('scenario');
   const unitsBeforeExport = await page.getByTestId('oob-unit').count();
   const [firstDownload] = await Promise.all([
-    page.waitForEvent('download', { timeout: 15000 }),
+    page.waitForEvent('download', { timeout: T_LOAD }),
     page.getByTestId('export-open-scenario').click(),
   ]);
   const firstPath = await firstDownload.path();
@@ -1659,19 +1721,19 @@ try {
   const roundTripFile = path.join(reportDir, 'round-trip.json');
   writeFileSync(roundTripFile, firstJson);
   await page.getByTestId('back-to-library').click();
-  await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  await page.getByTestId('scenario-list').waitFor({ timeout: T_SAVE });
   const deleteRow = page.getByTestId('scenario-row').filter({ hasText: title }).first();
   const libCountBeforeDelete = await page.getByTestId('scenario-row').count();
   await deleteRow.getByTestId('delete-scenario').click();
-  await page.getByText('Scenario deleted.').waitFor({ timeout: 10000 });
   await page.waitForFunction(
     (expected) => document.querySelectorAll('[data-testid="scenario-row"]').length === expected,
     libCountBeforeDelete - 1,
+    { timeout: T_SAVE },
   );
   check('persistence step 2 deletes the scenario from the library', true);
   const libCountBefore = await page.getByTestId('scenario-row').count();
   await page.getByTestId('import-file').setInputFiles(roundTripFile);
-  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page.getByTestId('editor').waitFor({ timeout: T_LOAD });
   const importedUrl = new URL(page.url());
   const importedId = importedUrl.searchParams.get('scenario');
   check('import assigns a new id', !!importedId && importedId !== exportedId, `${exportedId} → ${importedId}`);
@@ -1688,14 +1750,14 @@ try {
     JSON.stringify(importedTerrain),
   );
   await page.getByTestId('back-to-library').click();
-  await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  await page.getByTestId('scenario-list').waitFor({ timeout: T_SAVE });
   const libCountAfter = await page.getByTestId('scenario-row').count();
   check('import stores a new copy', libCountAfter === libCountBefore + 1, `${libCountBefore} → ${libCountAfter}`);
 
   // Persistence step 3: importing the same file again stores a second
   // independent copy; editing one never touches the other.
   await page.getByTestId('import-file').setInputFiles(roundTripFile);
-  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page.getByTestId('editor').waitFor({ timeout: T_LOAD });
   const secondCopyId = new URL(page.url()).searchParams.get('scenario');
   check(
     'the second import gets its own id',
@@ -1703,17 +1765,17 @@ try {
     `${importedId} → ${secondCopyId}`,
   );
   await page.getByTestId('back-to-library').click();
-  await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  await page.getByTestId('scenario-list').waitFor({ timeout: T_SAVE });
   const copiesRow = page.getByTestId('scenario-row').filter({ hasText: title });
   check('two independent copies share the title', (await copiesRow.count()) === 2);
   await copiesRow.nth(0).getByTestId('open-scenario').click();
-  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page.getByTestId('editor').waitFor({ timeout: T_LOAD });
   await page.getByTestId('inspector-title').fill('Acceptance plain (edited copy)');
   await page.locator('.map-caption').click();
   await page.getByTestId('save-scenario').click();
   await waitForSave(page);
   await page.getByTestId('back-to-library').click();
-  await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  await page.getByTestId('scenario-list').waitFor({ timeout: T_SAVE });
   const siblingTitles = await page.getByTestId('scenario-row-title').allTextContents();
   check(
     'editing one copy does not change the other',
@@ -1722,10 +1784,10 @@ try {
   );
   const editedRow = page.getByTestId('scenario-row').filter({ hasText: 'Acceptance plain (edited copy)' });
   await editedRow.getByTestId('delete-scenario').click();
-  await page.getByText('Scenario deleted.').waitFor({ timeout: 10000 });
   await page.waitForFunction(
     (expected) => document.querySelectorAll('[data-testid="scenario-row"]').length === expected,
     libCountAfter,
+    { timeout: T_SAVE },
   );
   check('the edited copy deletes, leaving one import', true);
 
@@ -1841,7 +1903,7 @@ try {
   const olderFile = path.join(reportDir, 'older-ruleset.json');
   writeFileSync(olderFile, `${JSON.stringify(olderRuleset, null, 2)}\n`);
   await page.getByTestId('import-file').setInputFiles(olderFile);
-  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page.getByTestId('editor').waitFor({ timeout: T_LOAD });
   check('older ruleset imports against the current catalogue', true);
   const rulesetNotice = await page.getByTestId('ruleset-notice').textContent().catch(() => null);
   check(
@@ -1854,7 +1916,7 @@ try {
     await page.getByTestId('provisional-badge').isVisible().catch(() => false),
   );
   await page.getByTestId('back-to-library').click();
-  await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  await page.getByTestId('scenario-list').waitFor({ timeout: T_SAVE });
 
   const unknownTroop = {
     kind: 'scenario',
@@ -1889,7 +1951,7 @@ try {
   const unknownFile = path.join(reportDir, 'unknown-troop.json');
   writeFileSync(unknownFile, `${JSON.stringify(unknownTroop, null, 2)}\n`);
   await page.getByTestId('import-file').setInputFiles(unknownFile);
-  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page.getByTestId('editor').waitFor({ timeout: T_LOAD });
   const troopWarning = await page.getByTestId('unknown-troop-warning').textContent().catch(() => null);
   check(
     'editor warns about the unknown troop type',
@@ -1904,7 +1966,7 @@ try {
   await page.getByTestId('save-scenario').click();
   await waitForSave(page);
   await page.reload({ waitUntil: 'networkidle' });
-  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page.getByTestId('editor').waitFor({ timeout: T_LOAD });
   const reopenedTroopWarning = await page.getByTestId('unknown-troop-warning').textContent().catch(() => null);
   check(
     'the unknown key survives save and reopen',
@@ -1913,7 +1975,7 @@ try {
     reopenedTroopWarning ?? 'no warning',
   );
   await page.getByTestId('back-to-library').click();
-  await page.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  await page.getByTestId('scenario-list').waitFor({ timeout: T_SAVE });
 
   // Stored records with an unknown ruleset or a newer format list as
   // unreadable with their cause and offer only raw export or delete.
@@ -1955,7 +2017,7 @@ try {
     };
   }));
   await page.reload({ waitUntil: 'networkidle' });
-  await page.getByTestId('scenario-list').waitFor({ timeout: 15000 });
+  await page.getByTestId('scenario-list').waitFor({ timeout: T_LOAD });
   const foreignRow = page.getByTestId('scenario-row').filter({ hasText: 'E2E Foreign Ruleset' });
   const foreignCause = await foreignRow.getByTestId('scenario-row-cause').textContent().catch(() => null);
   check(
@@ -1981,7 +2043,7 @@ try {
   // proceed; nothing is silently overwritten.
   await page.getByTestId('new-scenario-title').fill(`Conflict Probe ${Date.now()}`);
   await page.getByTestId('new-scenario-submit').click();
-  await page.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page.getByTestId('editor').waitFor({ timeout: T_LOAD });
   const conflictId = new URL(page.url()).searchParams.get('scenario');
   check('conflict probe opens', !!conflictId, String(conflictId));
   await page.getByTestId('save-scenario').click();
@@ -1990,7 +2052,7 @@ try {
   page2.on('console', (message) => log(`browser2 console: ${message.text()}`));
   page2.on('pageerror', (error) => log(`browser2 pageerror: ${String(error)}`));
   await page2.goto(`${base}/?scenario=${encodeURIComponent(conflictId)}`, { waitUntil: 'networkidle' });
-  await page2.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page2.getByTestId('editor').waitFor({ timeout: T_LOAD });
   await page2.getByTestId('inspector-title').fill('Conflict Other Tab');
   await page2.getByTestId('inspector-title').blur();
   await page2.getByTestId('save-scenario').click();
@@ -1998,7 +2060,7 @@ try {
   await page.getByTestId('inspector-title').fill('Conflict Mine');
   await page.getByTestId('inspector-title').blur();
   await page.getByTestId('save-scenario').click();
-  await page.getByTestId('conflict-dialog').waitFor({ timeout: 10000 });
+  await page.getByTestId('conflict-dialog').waitFor({ timeout: T_SAVE });
   const conflictText = await page.getByTestId('conflict-dialog').textContent();
   const conflictRevs = [...(conflictText ?? '').matchAll(/revision (\d+)/g)].map((match) => match[1]);
   check(
@@ -2007,14 +2069,14 @@ try {
     (conflictText ?? '').replace(/\s+/g, ' ').slice(0, 200),
   );
   await page.getByTestId('conflict-cancel').click();
-  await page.waitForTimeout(300);
+  await page.waitForTimeout(SETTLE_MS);
   check('cancel keeps the conflicted edits without storing', !(await page.getByTestId('conflict-dialog').count()));
   await page2.reload({ waitUntil: 'networkidle' });
-  await page2.getByTestId('editor').waitFor({ timeout: 15000 });
+  await page2.getByTestId('editor').waitFor({ timeout: T_LOAD });
   const storedAfterCancel = await page2.getByTestId('inspector-title').inputValue();
   check('nothing is silently overwritten on cancel', storedAfterCancel === 'Conflict Other Tab', storedAfterCancel);
   await page.getByTestId('save-scenario').click();
-  await page.getByTestId('conflict-dialog').waitFor({ timeout: 10000 });
+  await page.getByTestId('conflict-dialog').waitFor({ timeout: T_SAVE });
   await page.getByTestId('conflict-overwrite').click();
   await waitForSave(page);
   check('overwrite resolves the conflict', !(await page.getByTestId('conflict-dialog').count()));
@@ -2023,9 +2085,15 @@ try {
   await page2.getByTestId('inspector-title').fill('Conflict Stale Tab');
   await page2.getByTestId('inspector-title').blur();
   await page2.getByTestId('save-scenario').click();
-  await page2.getByTestId('conflict-dialog').waitFor({ timeout: 10000 });
+  await page2.getByTestId('conflict-dialog').waitFor({ timeout: T_SAVE });
   await page2.getByTestId('conflict-copy').click();
-  await page2.getByText(/Saved as a new copy/).waitFor({ timeout: 10000 });
+  // The copy opens under a new scenario id (stable state); the transient
+  // "Saved as a new copy" toast is not waited on.
+  await page2.waitForFunction(
+    (previous) => new URL(window.location.href).searchParams.get('scenario') !== previous,
+    conflictId,
+    { timeout: T_SAVE },
+  );
   const copyId = new URL(page2.url()).searchParams.get('scenario');
   check('save as copy keeps both versions', !!copyId && copyId !== conflictId, `${conflictId} → ${copyId}`);
   await page2.close();
@@ -2049,7 +2117,7 @@ try {
   await page.getByTestId('inspector-title').fill('Conflict Mine Quota');
   await page.getByTestId('inspector-title').blur();
   await page.getByTestId('save-scenario').click();
-  await page.getByTestId('save-error').waitFor({ timeout: 10000 });
+  await page.getByTestId('save-error').waitFor({ timeout: T_SAVE });
   const quotaMsg = await page.getByTestId('save-error').textContent();
   check(
     'quota failure is reported without losing edits',
@@ -2070,6 +2138,7 @@ try {
     viewport: { width: 1440, height: 900 },
     acceptDownloads: true,
   });
+  await storageContext.setDefaultTimeout(T_BATTLE);
   await storageContext.addInitScript(() => {
     try {
       Object.defineProperty(navigator, 'storage', {
@@ -2087,14 +2156,14 @@ try {
   storagePage.on('console', (message) => log(`storage console: ${message.text()}`));
   storagePage.on('pageerror', (error) => log(`storage pageerror: ${String(error)}`));
   await storagePage.goto(`${base}/`, { waitUntil: 'networkidle' });
-  await storagePage.getByTestId('app').waitFor({ timeout: 15000 });
+  await storagePage.getByTestId('app').waitFor({ timeout: T_LOAD });
   await storagePage.getByTestId('new-scenario-title').fill(`Storage Probe ${Date.now()}`);
   await storagePage.getByTestId('new-scenario-submit').click();
-  await storagePage.getByTestId('editor').waitFor({ timeout: 15000 });
+  await storagePage.getByTestId('editor').waitFor({ timeout: T_LOAD });
   await storagePage.getByTestId('save-scenario').click();
   await waitForSave(storagePage);
   await storagePage.getByTestId('back-to-library').click();
-  await storagePage.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  await storagePage.getByTestId('scenario-list').waitFor({ timeout: T_SAVE });
   const storageNote = await storagePage.getByTestId('storage-note').textContent();
   check(
     'refused persistent storage is reported',
@@ -2109,6 +2178,7 @@ try {
   const battleContext = await browser.newContext({
     viewport: { width: 1440, height: 900 },
   });
+  await battleContext.setDefaultTimeout(T_BATTLE);
   const battlePage = await battleContext.newPage();
   battlePage.on('console', (message) => log(`battle console: ${message.text()}`));
   battlePage.on('pageerror', (error) => log(`battle pageerror: ${String(error)}`));
@@ -2117,7 +2187,7 @@ try {
     await dialog.accept();
   });
   await battlePage.goto(`${base}/`, { waitUntil: 'networkidle' });
-  await battlePage.getByTestId('app').waitFor({ timeout: 15000 });
+  await battlePage.getByTestId('app').waitFor({ timeout: T_LOAD });
   await battlePage.evaluate(() => {
     window.__POLIS_TEST_SEED = 7;
   });
@@ -2125,7 +2195,7 @@ try {
   const battleTitle = `Battle Probe ${Date.now()}`;
   await battlePage.getByTestId('new-scenario-title').fill(battleTitle);
   await battlePage.getByTestId('new-scenario-submit').click();
-  await battlePage.getByTestId('editor').waitFor({ timeout: 15000 });
+  await battlePage.getByTestId('editor').waitFor({ timeout: T_LOAD });
 
   // The editor offers Start battle only without unsaved changes.
   check(
@@ -2144,7 +2214,7 @@ try {
 
   // The empty scenario is unplayable: Begin refuses with every problem.
   await battlePage.getByTestId('start-battle-editor').click();
-  await battlePage.getByTestId('battle-setup').waitFor({ timeout: 10000 });
+  await battlePage.getByTestId('battle-setup').waitFor({ timeout: T_SAVE });
   const setupNameA = await battlePage.getByTestId('setup-side-name-side-a').textContent();
   const setupNameB = await battlePage.getByTestId('setup-side-name-side-b').textContent();
   check(
@@ -2168,7 +2238,7 @@ try {
     (await battlePage.getByTestId('battle-seed').count()) === 0,
   );
   await battlePage.getByTestId('begin-battle').click();
-  await battlePage.getByTestId('playability-refusal').waitFor({ timeout: 10000 });
+  await battlePage.getByTestId('playability-refusal').waitFor({ timeout: T_SAVE });
   const problems = await battlePage.getByTestId('playability-problem').allTextContents();
   check(
     'unplayable scenario is refused with every problem',
@@ -2180,7 +2250,7 @@ try {
     await battlePage.getByTestId('open-in-editor').isVisible(),
   );
   await battlePage.getByTestId('setup-back').click();
-  await battlePage.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  await battlePage.getByTestId('scenario-list').waitFor({ timeout: T_SAVE });
   check(
     'refused begin creates no battle',
     await battlePage.getByTestId('empty-battles').isVisible(),
@@ -2236,14 +2306,14 @@ try {
   const unplayableFile = path.join(reportDir, 'unplayable.json');
   writeFileSync(unplayableFile, `${JSON.stringify(unplayable, null, 2)}\n`);
   await battlePage.getByTestId('import-file').setInputFiles(unplayableFile);
-  await battlePage.getByTestId('editor').waitFor({ timeout: 15000 });
+  await battlePage.getByTestId('editor').waitFor({ timeout: T_LOAD });
   await battlePage.getByTestId('back-to-library').click();
-  await battlePage.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  await battlePage.getByTestId('scenario-list').waitFor({ timeout: T_SAVE });
   const unplayableRow = battlePage.getByTestId('scenario-row').filter({ hasText: unplayableTitle });
   await unplayableRow.getByTestId('start-battle').click();
-  await battlePage.getByTestId('battle-setup').waitFor({ timeout: 10000 });
+  await battlePage.getByTestId('battle-setup').waitFor({ timeout: T_SAVE });
   await battlePage.getByTestId('begin-battle').click();
-  await battlePage.getByTestId('playability-refusal').waitFor({ timeout: 10000 });
+  await battlePage.getByTestId('playability-refusal').waitFor({ timeout: T_SAVE });
   const unitProblems = await battlePage.getByTestId('playability-problem').allTextContents();
   check(
     'refusal names each unit and its reason',
@@ -2257,18 +2327,18 @@ try {
     await battlePage.getByTestId('open-in-editor').isVisible(),
   );
   await battlePage.getByTestId('open-in-editor').click();
-  await battlePage.getByTestId('editor').waitFor({ timeout: 15000 });
+  await battlePage.getByTestId('editor').waitFor({ timeout: T_LOAD });
   check(
     'open in editor opens the refused scenario',
     (await battlePage.getByTestId('header-title').textContent()) === unplayableTitle,
   );
   await battlePage.getByTestId('back-to-library').click();
-  await battlePage.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  await battlePage.getByTestId('scenario-list').waitFor({ timeout: T_SAVE });
 
   // Make the scenario playable: one unit per side, then Human vs Passive.
   const playableRow = battlePage.getByTestId('scenario-row').filter({ hasText: editedBattleTitle });
   await playableRow.getByTestId('open-scenario').click();
-  await battlePage.getByTestId('editor').waitFor({ timeout: 15000 });
+  await battlePage.getByTestId('editor').waitFor({ timeout: T_LOAD });
   await battlePage.getByTestId('oob-tab-0').click();
   // New units start near the battlefield corner, under the map tool rail, so
   // place both probe units in the open field: the collapsed-panel probe below
@@ -2287,10 +2357,10 @@ try {
   await battlePage.getByTestId('save-scenario').click();
   await waitForSave(battlePage);
   await battlePage.getByTestId('start-battle-editor').click();
-  await battlePage.getByTestId('battle-setup').waitFor({ timeout: 10000 });
+  await battlePage.getByTestId('battle-setup').waitFor({ timeout: T_SAVE });
   await battlePage.getByTestId('controller-side-b').selectOption('passive');
   await battlePage.getByTestId('begin-battle').click();
-  await battlePage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
+  await battlePage.getByTestId('battle-screen').waitFor({ timeout: T_LOAD });
 
   // Layout A: order of battle, map, inspector, and the bottom turn bar.
   check(
@@ -2553,11 +2623,11 @@ try {
       (await battlePage.evaluate(() => window.localStorage.getItem('polis.panel.editor.left'))) === null,
   );
   await battlePage.reload({ waitUntil: 'networkidle' });
-  await battlePage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
+  await battlePage.getByTestId('battle-screen').waitFor({ timeout: T_LOAD });
   await battlePage.waitForFunction(
     () => document.querySelector('[data-testid="battle-left-panel"]')?.getAttribute('data-collapsed') === 'true',
     null,
-    { timeout: 10000 },
+    { timeout: T_SAVE },
   );
   check(
     'collapsing the battle left panel survives a reload',
@@ -2574,11 +2644,11 @@ try {
     () => document.querySelector('[data-testid="battle-inspector"]')?.getAttribute('data-collapsed') === 'true',
   );
   await battlePage.reload({ waitUntil: 'networkidle' });
-  await battlePage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
+  await battlePage.getByTestId('battle-screen').waitFor({ timeout: T_LOAD });
   await battlePage.waitForFunction(
     () => document.querySelector('[data-testid="battle-inspector"]')?.getAttribute('data-collapsed') === 'true',
     null,
-    { timeout: 10000 },
+    { timeout: T_SAVE },
   );
   check(
     'collapsing the battle right panel survives a reload independently',
@@ -2597,8 +2667,8 @@ try {
     window.localStorage.setItem('polis.panel.battle.right', '{bad json');
   });
   await battlePage.reload({ waitUntil: 'networkidle' });
-  await battlePage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
-  await battlePage.waitForTimeout(500);
+  await battlePage.getByTestId('battle-screen').waitFor({ timeout: T_LOAD });
+  await battlePage.waitForTimeout(STEP_MS);
   check(
     'a corrupt battle preference falls back to expanded without errors',
     (await battlePage.getByTestId('battle-left-panel').getAttribute('data-collapsed')) === 'false' &&
@@ -2612,15 +2682,17 @@ try {
   // waits for Continue. Every resolution ends behind the device handoff, so
   // each step below first presses "<Side> — begin your turn" when it is
   // showing. The starting side is seed-drawn, so either order.
-  async function settleAfterHandoff() {
+  async function settleAfterHandoff(previous) {
     await battlePage.waitForFunction(
-      () =>
-        document.querySelector('[data-testid="commit-empty"]') ||
-        document.querySelector('[data-testid="continue-turn"]') ||
-        document.querySelector('[data-testid="handoff"]') ||
-        document.querySelector('[data-testid="battle-outcome"]'),
-      null,
-      { timeout: 15000 },
+      (expected) => {
+        if (document.querySelector('[data-testid="battle-outcome"]')) return true;
+        if (document.querySelector('[data-testid="commit-empty"]')) return true;
+        if (document.querySelector('[data-testid="continue-turn"]')) return true;
+        const handoff = document.querySelector('[data-testid="handoff"]');
+        return !!handoff && handoff.textContent !== expected;
+      },
+      previous,
+      { timeout: T_BATTLE },
     );
   }
   async function advanceOneStep() {
@@ -2631,15 +2703,18 @@ try {
         /— begin your turn/.test(label),
         label.replace(/\s+/g, ' ').slice(0, 80),
       );
+      // A human side unlocks drafting; an automated side resolves at once
+      // behind a fresh handoff. Waiting for a *changed* handoff (not merely
+      // any handoff, and never the transient gap) keeps slow machines from
+      // passing on the stale pre-click handoff or missing the gap.
       await battlePage.getByTestId('handoff').click();
-      // A human side unlocks drafting; an automated side resolves at once.
-      await settleAfterHandoff();
+      await settleAfterHandoff(label);
       return;
     }
     const controller = (await battlePage.getByTestId('turn-controller').textContent()) ?? '';
     if (controller.startsWith('human')) {
       await battlePage.getByTestId('commit-empty').click();
-      await battlePage.getByTestId('commit-confirm').waitFor({ timeout: 10000 });
+      await battlePage.getByTestId('commit-confirm').waitFor({ timeout: T_SAVE });
       await battlePage.getByTestId('confirm-commit').click();
     } else {
       check(
@@ -2651,7 +2726,7 @@ try {
     }
   }
   await advanceOneStep();
-  await battlePage.getByTestId('turn-result').waitFor({ timeout: 15000 });
+  await battlePage.getByTestId('turn-result').waitFor({ timeout: T_BATTLE });
   const afterFirst = await battlePage.getByTestId('round').textContent();
   check(
     'the first committed turn resolves',
@@ -2667,7 +2742,7 @@ try {
   await battlePage.waitForFunction(
     (expected) => document.querySelector('[data-testid="round"]')?.textContent !== expected,
     afterFirst,
-    { timeout: 15000 },
+    { timeout: T_BATTLE },
   );
   const afterSecond = await battlePage.getByTestId('round').textContent();
   check(
@@ -2682,14 +2757,14 @@ try {
 
   // Reloading mid-battle resumes the identical state from the Battles list.
   await battlePage.reload({ waitUntil: 'networkidle' });
-  await battlePage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
+  await battlePage.getByTestId('battle-screen').waitFor({ timeout: T_LOAD });
   check(
     'reloading resumes the same battle state',
     (await battlePage.getByTestId('round').textContent()) === afterSecond,
     (await battlePage.getByTestId('round').textContent()) ?? 'no round',
   );
   await battlePage.getByTestId('back-to-battles').click();
-  await battlePage.getByTestId('battles-list').waitFor({ timeout: 10000 });
+  await battlePage.getByTestId('battles-list').waitFor({ timeout: T_SAVE });
   const battleRows = battlePage.getByTestId('battle-row');
   check('the battles list resumes the battle in progress', (await battleRows.count()) === 1);
   const battleRowMeta = await battlePage.getByTestId('battle-row-meta').textContent();
@@ -2699,15 +2774,15 @@ try {
     battleRowMeta ?? 'no meta',
   );
   await battleRows.first().getByTestId('resume-battle').click();
-  await battlePage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
+  await battlePage.getByTestId('battle-screen').waitFor({ timeout: T_LOAD });
   check(
     'resume from the battles list restores the same state',
     (await battlePage.getByTestId('round').textContent()) === afterSecond,
   );
   await battlePage.getByTestId('back-to-battles').click();
-  await battlePage.getByTestId('battles-list').waitFor({ timeout: 10000 });
+  await battlePage.getByTestId('battles-list').waitFor({ timeout: T_SAVE });
   await battlePage.getByTestId('delete-battle').click();
-  await battlePage.getByTestId('empty-battles').waitFor({ timeout: 10000 });
+  await battlePage.getByTestId('empty-battles').waitFor({ timeout: T_SAVE });
   check('deleting removes the battle', true);
 
   // Issue #84: Move drafting — available actions and allowance come from the
@@ -2717,6 +2792,7 @@ try {
   const moveContext = await browser.newContext({
     viewport: { width: 1440, height: 900 },
   });
+  await moveContext.setDefaultTimeout(T_BATTLE);
   const movePage = await moveContext.newPage();
   movePage.on('console', (message) => log(`move console: ${message.text()}`));
   movePage.on('pageerror', (error) => log(`move pageerror: ${String(error)}`));
@@ -2725,7 +2801,7 @@ try {
     await dialog.accept();
   });
   await movePage.goto(`${base}/`, { waitUntil: 'networkidle' });
-  await movePage.getByTestId('app').waitFor({ timeout: 15000 });
+  await movePage.getByTestId('app').waitFor({ timeout: T_LOAD });
   await movePage.evaluate(() => {
     window.__POLIS_TEST_SEED = 7;
   });
@@ -2733,7 +2809,7 @@ try {
   const moveTitle = `Move Draft Probe ${Date.now()}`;
   await movePage.getByTestId('new-scenario-title').fill(moveTitle);
   await movePage.getByTestId('new-scenario-submit').click();
-  await movePage.getByTestId('editor').waitFor({ timeout: 15000 });
+  await movePage.getByTestId('editor').waitFor({ timeout: T_LOAD });
 
   // Two side-a units and one side-b unit, placed apart with known facings.
   async function addMoveUnit(sideLabel, x, y, facing) {
@@ -2756,31 +2832,37 @@ try {
   await movePage.getByTestId('save-scenario').click();
   await waitForSave(movePage);
   await movePage.getByTestId('start-battle-editor').click();
-  await movePage.getByTestId('battle-setup').waitFor({ timeout: 10000 });
+  await movePage.getByTestId('battle-setup').waitFor({ timeout: T_SAVE });
   await movePage.getByTestId('controller-side-b').selectOption('passive');
   await movePage.getByTestId('begin-battle').click();
-  await movePage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
+  await movePage.getByTestId('battle-screen').waitFor({ timeout: T_LOAD });
 
   // Reach the human turn: the starting side is seed-drawn, so resolve the
   // automated side first when it starts. Every resolution ends behind the
-  // device handoff, which is what unlocks drafting.
+  // device handoff, which is what unlocks drafting. Handoff presses wait
+  // for a *changed* handoff, drafting controls, or the outcome — never for
+  // the transient gap and never for a merely present handoff (issue #137).
   for (let step = 0; step < 4; step += 1) {
+    if ((await movePage.getByTestId('battle-outcome').count()) > 0) break;
     const controller = (await movePage.getByTestId('turn-controller').textContent()) ?? '';
     if (controller.startsWith('human')) break;
     if ((await movePage.getByTestId('handoff').count()) > 0) {
-      await movePage.getByTestId('handoff').click();
+      await clickHandoffAndSettle(movePage);
     } else {
+      const turnBefore = await movePage.getByTestId('round').textContent();
       await movePage.getByTestId('continue-turn').click();
+      await movePage.waitForFunction(
+        (expected) =>
+          document.querySelector('[data-testid="round"]')?.textContent !== expected ||
+          document.querySelector('[data-testid="handoff"]') ||
+          document.querySelector('[data-testid="battle-outcome"]'),
+        turnBefore,
+        { timeout: T_BATTLE },
+      );
     }
-    await movePage.getByTestId('handoff').waitFor({ timeout: 15000 });
   }
   if ((await movePage.getByTestId('handoff').count()) > 0) {
-    await movePage.getByTestId('handoff').click();
-    await movePage.waitForFunction(
-      () => document.querySelector('[data-testid="handoff"]') === null,
-      null,
-      { timeout: 15000 },
-    );
+    await clickHandoffAndSettle(movePage);
   }
   check(
     'move drafting starts on the human turn',
@@ -2801,7 +2883,7 @@ try {
     await movePage.mouse.click(clientX, clientY);
   }
   await movePage.getByTestId('fit-view').click();
-  await movePage.waitForTimeout(300);
+  await movePage.waitForTimeout(SETTLE_MS);
 
   const ownUnits = movePage
     .getByTestId('battle-oob-side-a')
@@ -2821,9 +2903,9 @@ try {
 
   // An accepted Move: 60 m south, inside the 90 m allowance, shows its ghost.
   await movePage.getByTestId(`start-draft-${id1}`).click();
-  await movePage.getByTestId(`draft-editor-${id1}`).waitFor({ timeout: 10000 });
+  await movePage.getByTestId(`draft-editor-${id1}`).waitFor({ timeout: T_SAVE });
   await clickBattleMap(500, 540);
-  await movePage.getByTestId(`draft-accepted-${id1}`).waitFor({ timeout: 10000 });
+  await movePage.getByTestId(`draft-accepted-${id1}`).waitFor({ timeout: T_SAVE });
   check('an accepted Move shows its detail', true);
   check(
     'an accepted Move shows a ghost footprint',
@@ -2835,7 +2917,7 @@ try {
   await ownUnits.nth(1).click();
   await movePage.getByTestId(`start-draft-${id2}`).click();
   await clickBattleMap(500, 540);
-  await movePage.getByTestId(`draft-rejection-${id2}`).waitFor({ timeout: 10000 });
+  await movePage.getByTestId(`draft-rejection-${id2}`).waitFor({ timeout: T_SAVE });
   const rejectionText = await movePage.getByTestId(`draft-rejection-${id2}`).textContent();
   check(
     'a colliding Move is rejected inline',
@@ -2879,7 +2961,7 @@ try {
   check('removing the rejected draft enables the commit', true);
   const moveRoundBefore = await movePage.getByTestId('round').textContent();
   await movePage.getByTestId('commit-draft').click();
-  await movePage.getByTestId('turn-result').waitFor({ timeout: 15000 });
+  await movePage.getByTestId('turn-result').waitFor({ timeout: T_BATTLE });
   await movePage.waitForFunction(
     (expected) => document.querySelector('[data-testid="round"]')?.textContent !== expected,
     moveRoundBefore,
@@ -2894,24 +2976,24 @@ try {
   // The committed turn is saved: reload resumes it, the battles list shows one
   // row, resume restores it, and delete clears the list.
   await movePage.reload({ waitUntil: 'networkidle' });
-  await movePage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
+  await movePage.getByTestId('battle-screen').waitFor({ timeout: T_LOAD });
   check(
     'reloading resumes the committed turn',
     (await movePage.getByTestId('round').textContent()) === moveRoundAfter,
   );
   await movePage.getByTestId('back-to-battles').click();
-  await movePage.getByTestId('battles-list').waitFor({ timeout: 10000 });
+  await movePage.getByTestId('battles-list').waitFor({ timeout: T_SAVE });
   check('the battles list shows the committed battle', (await movePage.getByTestId('battle-row').count()) === 1);
   await movePage.getByTestId('resume-battle').click();
-  await movePage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
+  await movePage.getByTestId('battle-screen').waitFor({ timeout: T_LOAD });
   check(
     'resume restores the committed turn',
     (await movePage.getByTestId('round').textContent()) === moveRoundAfter,
   );
   await movePage.getByTestId('back-to-battles').click();
-  await movePage.getByTestId('battles-list').waitFor({ timeout: 10000 });
+  await movePage.getByTestId('battles-list').waitFor({ timeout: T_SAVE });
   await movePage.getByTestId('delete-battle').click();
-  await movePage.getByTestId('empty-battles').waitFor({ timeout: 10000 });
+  await movePage.getByTestId('empty-battles').waitFor({ timeout: T_SAVE });
   check('deleting clears the committed battle', true);
 
   await moveContext.close();
@@ -2923,6 +3005,7 @@ try {
   const combatContext = await browser.newContext({
     viewport: { width: 1440, height: 900 },
   });
+  await combatContext.setDefaultTimeout(T_BATTLE);
   const combatPage = await combatContext.newPage();
   combatPage.on('console', (message) => log(`combat console: ${message.text()}`));
   combatPage.on('pageerror', (error) => log(`combat pageerror: ${String(error)}`));
@@ -2933,7 +3016,7 @@ try {
     await dialog.accept();
   });
   await combatPage.goto(`${base}/`, { waitUntil: 'networkidle' });
-  await combatPage.getByTestId('app').waitFor({ timeout: 15000 });
+  await combatPage.getByTestId('app').waitFor({ timeout: T_LOAD });
   await combatPage.evaluate(() => {
     window.__POLIS_TEST_SEED = 7;
   });
@@ -2941,7 +3024,7 @@ try {
   const combatTitle = `Combat Probe ${Date.now()}`;
   await combatPage.getByTestId('new-scenario-title').fill(combatTitle);
   await combatPage.getByTestId('new-scenario-submit').click();
-  await combatPage.getByTestId('editor').waitFor({ timeout: 15000 });
+  await combatPage.getByTestId('editor').waitFor({ timeout: T_LOAD });
 
   // Two hoplite blocks head-on, 80 m apart: far enough to place cleanly, close
   // enough to meet within a few turns.
@@ -2977,10 +3060,10 @@ try {
   await combatPage.getByTestId('save-scenario').click();
   await waitForSave(combatPage);
   await combatPage.getByTestId('start-battle-editor').click();
-  await combatPage.getByTestId('battle-setup').waitFor({ timeout: 10000 });
+  await combatPage.getByTestId('battle-setup').waitFor({ timeout: T_SAVE });
   await combatPage.getByTestId('controller-side-b').selectOption('random');
   await combatPage.getByTestId('begin-battle').click();
-  await combatPage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
+  await combatPage.getByTestId('battle-screen').waitFor({ timeout: T_LOAD });
 
   // The human side holds (empty commits) while the Random side manoeuvres and
   // charges. Every resolution ends behind the device handoff; an automated
@@ -2994,7 +3077,7 @@ try {
           document.querySelector('[data-testid="round"]')?.textContent !== expected ||
           document.querySelector('[data-testid="battle-outcome"]'),
         roundBefore,
-        { timeout: 15000 },
+        { timeout: T_BATTLE },
       );
     const handoffBefore = (await combatPage.getByTestId('handoff').count()) > 0;
     const controller = (await combatPage.getByTestId('turn-controller').textContent()) ?? '';
@@ -3011,13 +3094,13 @@ try {
           document.querySelector('[data-testid="handoff"]') ||
           document.querySelector('[data-testid="battle-outcome"]'),
         null,
-        { timeout: 15000 },
+        { timeout: T_BATTLE },
       );
       return true;
     }
-    await combatPage.getByTestId('commit-empty').waitFor({ timeout: 15000 });
+    await combatPage.getByTestId('commit-empty').waitFor({ timeout: T_BATTLE });
     await combatPage.getByTestId('commit-empty').click();
-    await combatPage.getByTestId('commit-confirm').waitFor({ timeout: 10000 });
+    await combatPage.getByTestId('commit-confirm').waitFor({ timeout: T_SAVE });
     await combatPage.getByTestId('confirm-commit').click();
     await outcomeWait();
     return true;
@@ -3077,14 +3160,9 @@ try {
     combatHandoff.replace(/\s+/g, ' ').slice(0, 80),
   );
   const combatNext = (await combatPage.getByTestId('turn-controller').textContent()) ?? '';
-  await combatPage.getByTestId('handoff').click();
-  await combatPage.waitForFunction(
-    () => document.querySelector('[data-testid="handoff"]') === null,
-    null,
-    { timeout: 15000 },
-  );
+  await clickHandoffAndSettle(combatPage);
   if (combatNext.startsWith('human')) {
-    await combatPage.getByTestId('commit-empty').waitFor({ timeout: 15000 });
+    await combatPage.getByTestId('commit-empty').waitFor({ timeout: T_BATTLE });
     check(
       'highlights persist after the handoff',
       (await combatPage.locator('[data-testid="map-unit"][data-changed="true"]').count()) >= 1,
@@ -3094,7 +3172,7 @@ try {
       await combatPage.getByTestId('commit-empty').isVisible(),
     );
   } else {
-    await combatPage.getByTestId('handoff').waitFor({ timeout: 15000 });
+    await combatPage.getByTestId('handoff').waitFor({ timeout: T_BATTLE });
     check('an automated side resolves at once behind a fresh handoff', true);
   }
 
@@ -3103,7 +3181,7 @@ try {
   const combatResultBefore = (await combatPage.getByTestId('turn-result').textContent()) ?? '';
   const combatLogBefore = (await combatPage.getByTestId('battle-log').textContent()) ?? '';
   await combatPage.reload({ waitUntil: 'networkidle' });
-  await combatPage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
+  await combatPage.getByTestId('battle-screen').waitFor({ timeout: T_LOAD });
   check(
     'reloading keeps the round after combat',
     (await combatPage.getByTestId('round').textContent()) === combatRoundBefore,
@@ -3119,13 +3197,13 @@ try {
     ((await combatPage.getByTestId('battle-log').textContent()) ?? '') === combatLogBefore,
   );
   await combatPage.getByTestId('back-to-battles').click();
-  await combatPage.getByTestId('battles-list').waitFor({ timeout: 10000 });
+  await combatPage.getByTestId('battles-list').waitFor({ timeout: T_SAVE });
   check(
     'the battles list shows the combat battle',
     (await combatPage.getByTestId('battle-row').count()) === 1,
   );
   await combatPage.getByTestId('delete-battle').click();
-  await combatPage.getByTestId('empty-battles').waitFor({ timeout: 10000 });
+  await combatPage.getByTestId('empty-battles').waitFor({ timeout: T_SAVE });
   check('deleting removes the combat battle', true);
 
   await combatContext.close();
@@ -3141,6 +3219,7 @@ try {
   const fullContext = await browser.newContext({
     viewport: { width: 1440, height: 900 },
   });
+  await fullContext.setDefaultTimeout(T_BATTLE);
   const fullPage = await fullContext.newPage();
   fullPage.on('console', (message) => log(`full console: ${message.text()}`));
   fullPage.on('pageerror', (error) => log(`full pageerror: ${String(error)}`));
@@ -3149,7 +3228,7 @@ try {
     await dialog.accept();
   });
   await fullPage.goto(`${base}/`, { waitUntil: 'networkidle' });
-  await fullPage.getByTestId('app').waitFor({ timeout: 15000 });
+  await fullPage.getByTestId('app').waitFor({ timeout: T_LOAD });
   // The seed fixes every draw of this story. With it the Athenians start and
   // the seventh draw (the Withdraw good-order chance, 0.5) fails at 0.945, so
   // the charger is disordered and the next human turn can Rally.
@@ -3160,7 +3239,7 @@ try {
   const fullTitle = `Full Orders Probe ${Date.now()}`;
   await fullPage.getByTestId('new-scenario-title').fill(fullTitle);
   await fullPage.getByTestId('new-scenario-submit').click();
-  await fullPage.getByTestId('editor').waitFor({ timeout: 15000 });
+  await fullPage.getByTestId('editor').waitFor({ timeout: T_LOAD });
 
   // The probe geometry from the engine suite: the charger faces its target
   // across 80 m of open ground, the archer faces its victim across 100 m.
@@ -3190,10 +3269,10 @@ try {
   await fullPage.getByTestId('save-scenario').click();
   await waitForSave(fullPage);
   await fullPage.getByTestId('start-battle-editor').click();
-  await fullPage.getByTestId('battle-setup').waitFor({ timeout: 10000 });
+  await fullPage.getByTestId('battle-setup').waitFor({ timeout: T_SAVE });
   await fullPage.getByTestId('controller-side-b').selectOption('passive');
   await fullPage.getByTestId('begin-battle').click();
-  await fullPage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
+  await fullPage.getByTestId('battle-screen').waitFor({ timeout: T_LOAD });
 
   // Reach the human turn: the starting side is seed-drawn, so resolve the
   // automated side first when it starts. Every resolved turn ends behind the
@@ -3201,21 +3280,33 @@ try {
   // drafts or continues.
   async function reachFullHumanTurn() {
     for (let step = 0; step < 6; step += 1) {
+      if ((await fullPage.getByTestId('battle-outcome').count()) > 0) return;
       if ((await fullPage.getByTestId('handoff').count()) > 0) {
-        await fullPage.getByTestId('handoff').click();
-        await fullPage.waitForFunction(
-          () => document.querySelector('[data-testid="handoff"]') === null,
-        );
+        // Never wait for the transient handoff gap (issue #137): an
+        // automated side pressed through the handoff resolves at once
+        // behind a fresh handoff, so "handoff gone" can miss the gap while
+        // a merely present handoff can be the stale pre-click one. Pressing
+        // re-loops: the fresh human handoff already reports a human
+        // controller, so falling through here would return while the human
+        // turn is still locked behind its own handoff press.
+        await clickHandoffAndSettle(fullPage);
+        continue;
       }
       const controller = (await fullPage.getByTestId('turn-controller').textContent()) ?? '';
       if (controller.startsWith('human')) return;
       const turnBefore = await fullPage.getByTestId('round').textContent();
       await fullPage.getByTestId('continue-turn').click();
       await fullPage.waitForFunction(
-        (expected) => document.querySelector('[data-testid="round"]')?.textContent !== expected,
+        (expected) =>
+          document.querySelector('[data-testid="round"]')?.textContent !== expected ||
+          document.querySelector('[data-testid="handoff"]') ||
+          document.querySelector('[data-testid="battle-outcome"]'),
         turnBefore,
-        { timeout: 15000 },
+        { timeout: T_BATTLE },
       );
+    }
+    if ((await fullPage.getByTestId('handoff').count()) > 0) {
+      await clickHandoffAndSettle(fullPage);
     }
   }
   await reachFullHumanTurn();
@@ -3238,7 +3329,7 @@ try {
     await fullPage.mouse.click(clientX, clientY);
   }
   await fullPage.getByTestId('fit-view').click();
-  await fullPage.waitForTimeout(300);
+  await fullPage.waitForTimeout(SETTLE_MS);
 
   const fullOwn = fullPage.getByTestId('battle-oob-side-a').getByTestId('battle-oob-unit');
   const fullFoe = fullPage.getByTestId('battle-oob-side-b').getByTestId('battle-oob-unit');
@@ -3289,20 +3380,20 @@ try {
   // optional approach leg keeps it accepted.
   await fullOwn.nth(2).click();
   await fullPage.getByTestId(`charge-${chargerId}-${targetId}`).click();
-  await fullPage.getByTestId(`draft-accepted-${chargerId}`).waitFor({ timeout: 10000 });
+  await fullPage.getByTestId(`draft-accepted-${chargerId}`).waitFor({ timeout: T_SAVE });
   check(
     'a Charge drafts from its candidate with a contact ghost',
     ((await fullPage.getByTestId(`draft-${chargerId}`).textContent()) ?? '').includes('Charge') &&
       (await fullPage.getByTestId('draft-ghost').count()) >= 1,
   );
   await clickFullMap(600, 620);
-  await fullPage.waitForTimeout(300);
+  await fullPage.waitForTimeout(SETTLE_MS);
   check(
     'an approach leg keeps the Charge accepted',
     await fullPage.getByTestId(`draft-accepted-${chargerId}`).isVisible(),
   );
   await fullPage.getByTestId(`remove-last-approach-${chargerId}`).click();
-  await fullPage.waitForTimeout(300);
+  await fullPage.waitForTimeout(SETTLE_MS);
   check(
     'removing the approach leg keeps the direct Charge accepted',
     await fullPage.getByTestId(`draft-accepted-${chargerId}`).isVisible(),
@@ -3311,7 +3402,7 @@ try {
   // A Shoot drafted from its candidate validates with its shot line.
   await fullOwn.nth(3).click();
   await fullPage.getByTestId(`shoot-${archerId}-${victimId}`).click();
-  await fullPage.getByTestId(`draft-accepted-${archerId}`).waitFor({ timeout: 10000 });
+  await fullPage.getByTestId(`draft-accepted-${archerId}`).waitFor({ timeout: T_SAVE });
   check(
     'a Shoot drafts from its candidate with a shot line',
     ((await fullPage.getByTestId(`draft-${archerId}`).textContent()) ?? '').includes('Shoot') &&
@@ -3323,14 +3414,14 @@ try {
   await fullOwn.nth(4).click();
   await fullPage.getByTestId(`start-reform-${reformerId}`).click();
   await fullPage.getByTestId(`reform-files-${reformerId}`).fill('8');
-  await fullPage.getByTestId(`draft-accepted-${reformerId}`).waitFor({ timeout: 10000 });
+  await fullPage.getByTestId(`draft-accepted-${reformerId}`).waitFor({ timeout: T_SAVE });
   check(
     'a Reform validates through its form with the new footprint',
     ((await fullPage.getByTestId(`draft-accepted-${reformerId}`).textContent()) ?? '').includes('8 files') &&
       (await fullPage.getByTestId('draft-ghost').count()) >= 2,
   );
   await fullPage.getByTestId(`apply-preset-${reformerId}-open`).click();
-  await fullPage.waitForTimeout(300);
+  await fullPage.waitForTimeout(SETTLE_MS);
   check(
     'a spacing preset keeps the Reform accepted',
     await fullPage.getByTestId(`draft-accepted-${reformerId}`).isVisible(),
@@ -3339,7 +3430,7 @@ try {
   // A Reform with no files is rejected inline and blocks the commit; removing
   // it enables the commit again.
   await fullPage.getByTestId(`reform-files-${reformerId}`).fill('0');
-  await fullPage.getByTestId(`draft-rejection-${reformerId}`).waitFor({ timeout: 10000 });
+  await fullPage.getByTestId(`draft-rejection-${reformerId}`).waitFor({ timeout: T_SAVE });
   const reformRejection = await fullPage.getByTestId(`draft-rejection-${reformerId}`).textContent();
   check(
     'a Reform with no files is rejected inline',
@@ -3361,11 +3452,11 @@ try {
   await fullOwn.nth(0).click();
   await fullPage.getByTestId(`start-draft-${mover1Id}`).click();
   await clickFullMap(400, 560);
-  await fullPage.getByTestId(`draft-accepted-${mover1Id}`).waitFor({ timeout: 10000 });
+  await fullPage.getByTestId(`draft-accepted-${mover1Id}`).waitFor({ timeout: T_SAVE });
   await fullOwn.nth(1).click();
   await fullPage.getByTestId(`start-draft-${mover2Id}`).click();
   await clickFullMap(400, 560);
-  await fullPage.getByTestId(`draft-rejection-${mover2Id}`).waitFor({ timeout: 10000 });
+  await fullPage.getByTestId(`draft-rejection-${mover2Id}`).waitFor({ timeout: T_SAVE });
   check(
     'a colliding Move is rejected inline with its conflict',
     /collid/i.test((await fullPage.getByTestId(`draft-rejection-${mover2Id}`).textContent()) ?? ''),
@@ -3382,7 +3473,7 @@ try {
   // Committing the Charge, the Shoot, and the Move advances the turn.
   const fullRoundBefore = await fullPage.getByTestId('round').textContent();
   await fullPage.getByTestId('commit-draft').click();
-  await fullPage.getByTestId('turn-result').waitFor({ timeout: 15000 });
+  await fullPage.getByTestId('turn-result').waitFor({ timeout: T_BATTLE });
   await fullPage.waitForFunction(
     (expected) => document.querySelector('[data-testid="round"]')?.textContent !== expected,
     fullRoundBefore,
@@ -3402,7 +3493,7 @@ try {
     await fullPage.getByTestId(`start-withdraw-${chargerId}`).isVisible(),
   );
   await fullPage.getByTestId(`start-withdraw-${chargerId}`).click();
-  await fullPage.getByTestId(`draft-accepted-${chargerId}`).waitFor({ timeout: 10000 });
+  await fullPage.getByTestId(`draft-accepted-${chargerId}`).waitFor({ timeout: T_SAVE });
   check(
     'a Withdraw drafts in place with its step-back ghost',
     (await fullPage.getByTestId('draft-ghost').count()) >= 1,
@@ -3425,7 +3516,7 @@ try {
       (await fullPage.getByTestId(`start-rally-${chargerId}`).isVisible()),
   );
   await fullPage.getByTestId(`start-rally-${chargerId}`).click();
-  await fullPage.getByTestId(`draft-accepted-${chargerId}`).waitFor({ timeout: 10000 });
+  await fullPage.getByTestId(`draft-accepted-${chargerId}`).waitFor({ timeout: T_SAVE });
   const rallyDetail = await fullPage.getByTestId(`draft-accepted-${chargerId}`).textContent();
   check(
     'a Rally drafts in place for the disordered charger',
@@ -3448,6 +3539,7 @@ try {
   const concedeContext = await browser.newContext({
     viewport: { width: 1440, height: 900 },
   });
+  await concedeContext.setDefaultTimeout(T_BATTLE);
   const concedePage = await concedeContext.newPage();
   concedePage.on('console', (message) => log(`concede console: ${message.text()}`));
   concedePage.on('pageerror', (error) => log(`concede pageerror: ${String(error)}`));
@@ -3456,7 +3548,7 @@ try {
     await dialog.accept();
   });
   await concedePage.goto(`${base}/`, { waitUntil: 'networkidle' });
-  await concedePage.getByTestId('app').waitFor({ timeout: 15000 });
+  await concedePage.getByTestId('app').waitFor({ timeout: T_LOAD });
   await concedePage.evaluate(() => {
     window.__POLIS_TEST_SEED = 7;
   });
@@ -3464,7 +3556,7 @@ try {
   const concedeTitle = `Concede Probe ${Date.now()}`;
   await concedePage.getByTestId('new-scenario-title').fill(concedeTitle);
   await concedePage.getByTestId('new-scenario-submit').click();
-  await concedePage.getByTestId('editor').waitFor({ timeout: 15000 });
+  await concedePage.getByTestId('editor').waitFor({ timeout: T_LOAD });
   await concedePage.getByTestId('oob-tab-0').click();
   await concedePage.getByTestId('oob-add').click();
   await concedePage.getByTestId('oob-tab-1').click();
@@ -3472,9 +3564,9 @@ try {
   await concedePage.getByTestId('save-scenario').click();
   await waitForSave(concedePage);
   await concedePage.getByTestId('start-battle-editor').click();
-  await concedePage.getByTestId('battle-setup').waitFor({ timeout: 10000 });
+  await concedePage.getByTestId('battle-setup').waitFor({ timeout: T_SAVE });
   await concedePage.getByTestId('begin-battle').click();
-  await concedePage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
+  await concedePage.getByTestId('battle-screen').waitFor({ timeout: T_LOAD });
 
   // Concede is offered on one's own turn: the first turn needs no handoff and
   // both sides are human, so the button starts enabled.
@@ -3497,15 +3589,15 @@ try {
   // Behind the device handoff it is nobody's turn: concede stays unavailable
   // until the next side begins.
   await concedePage.getByTestId('commit-empty').click();
-  await concedePage.getByTestId('commit-confirm').waitFor({ timeout: 10000 });
+  await concedePage.getByTestId('commit-confirm').waitFor({ timeout: T_SAVE });
   await concedePage.getByTestId('confirm-commit').click();
-  await concedePage.getByTestId('handoff').waitFor({ timeout: 15000 });
+  await concedePage.getByTestId('handoff').waitFor({ timeout: T_BATTLE });
   check(
     'concede is unavailable behind the device handoff',
     await concedePage.getByTestId('concede').isDisabled(),
   );
   await concedePage.getByTestId('handoff').click();
-  await concedePage.getByTestId('commit-empty').waitFor({ timeout: 15000 });
+  await concedePage.getByTestId('commit-empty').waitFor({ timeout: T_BATTLE });
   check(
     "concede is offered again on the next side's turn",
     await concedePage.getByTestId('concede').isEnabled(),
@@ -3515,7 +3607,7 @@ try {
   const concederPattern = conceder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   await concedePage.getByTestId('concede').click();
   await concedePage.getByTestId('concede-confirm').click();
-  await concedePage.getByTestId('battle-outcome').waitFor({ timeout: 15000 });
+  await concedePage.getByTestId('battle-outcome').waitFor({ timeout: T_BATTLE });
   const concededBattleId = new URL(concedePage.url()).searchParams.get('battle');
   const concedeOutcomeTitle = (await concedePage.getByTestId('outcome-title').textContent()) ?? '';
   const concedeOutcomeReason = (await concedePage.getByTestId('outcome-reason').textContent()) ?? '';
@@ -3551,13 +3643,13 @@ try {
 
   // Reloading keeps the outcome; the Battles list keeps the finished battle.
   await concedePage.reload({ waitUntil: 'networkidle' });
-  await concedePage.getByTestId('battle-outcome').waitFor({ timeout: 15000 });
+  await concedePage.getByTestId('battle-outcome').waitFor({ timeout: T_BATTLE });
   check(
     'reloading keeps the concession outcome',
     ((await concedePage.getByTestId('outcome-title').textContent()) ?? '') === concedeOutcomeTitle,
   );
   await concedePage.getByTestId('back-to-battles').click();
-  await concedePage.getByTestId('battles-list').waitFor({ timeout: 10000 });
+  await concedePage.getByTestId('battles-list').waitFor({ timeout: T_SAVE });
   check(
     'the battles list keeps the finished battle',
     (await concedePage.getByTestId('battle-row').count()) === 1,
@@ -3569,7 +3661,7 @@ try {
     concedeMeta.replace(/\s+/g, ' ').slice(0, 160),
   );
   await concedePage.getByTestId('view-battle').click();
-  await concedePage.getByTestId('battle-outcome').waitFor({ timeout: 15000 });
+  await concedePage.getByTestId('battle-outcome').waitFor({ timeout: T_BATTLE });
   check(
     'viewing resumes the finished battle read-only',
     (await concedePage.getByTestId('commit-empty').count()) === 0 &&
@@ -3579,7 +3671,7 @@ try {
   // Rematch starts a new battle from the same snapshot: round 1, turn 1, a new
   // battle id, and the finished battle stays on the list.
   await concedePage.getByTestId('rematch').click();
-  await concedePage.getByTestId('starting-announcement').waitFor({ timeout: 15000 });
+  await concedePage.getByTestId('starting-announcement').waitFor({ timeout: T_BATTLE });
   const rematchRound = (await concedePage.getByTestId('round').textContent()) ?? '';
   const rematchBattleId = new URL(concedePage.url()).searchParams.get('battle');
   const rematchAnnouncement = (await concedePage.getByTestId('starting-announcement').textContent()) ?? '';
@@ -3599,7 +3691,7 @@ try {
     `${concededBattleId} → ${rematchBattleId}`,
   );
   await concedePage.getByTestId('back-to-battles').click();
-  await concedePage.getByTestId('battles-list').waitFor({ timeout: 10000 });
+  await concedePage.getByTestId('battles-list').waitFor({ timeout: T_SAVE });
   check(
     'rematch keeps the finished battle on the list',
     (await concedePage.getByTestId('battle-row').count()) === 2,
@@ -3624,9 +3716,9 @@ try {
   // Open scenario in editor opens the library's current scenario (not the
   // snapshot): the editor shows the probe title and its two units.
   await finishedRow.getByTestId('view-battle').click();
-  await concedePage.getByTestId('battle-outcome').waitFor({ timeout: 15000 });
+  await concedePage.getByTestId('battle-outcome').waitFor({ timeout: T_BATTLE });
   await concedePage.getByTestId('open-scenario-in-editor').click();
-  await concedePage.getByTestId('editor').waitFor({ timeout: 15000 });
+  await concedePage.getByTestId('editor').waitFor({ timeout: T_LOAD });
   check(
     'open scenario in editor opens the current scenario',
     (await concedePage.getByTestId('header-title').textContent()) === concedeTitle &&
@@ -3634,7 +3726,7 @@ try {
       (await concedePage.getByTestId('oob-unit').count()) === 2,
   );
   await concedePage.getByTestId('back-to-library').click();
-  await concedePage.getByTestId('battles-list').waitFor({ timeout: 10000 });
+  await concedePage.getByTestId('battles-list').waitFor({ timeout: T_SAVE });
   await concedePage
     .locator(`[data-testid="battle-row"][data-battle-id="${rematchBattleId}"]`)
     .getByTestId('delete-battle')
@@ -3642,13 +3734,13 @@ try {
   await concedePage.waitForFunction(
     () => document.querySelectorAll('[data-testid="battle-row"]').length === 1,
     null,
-    { timeout: 15000 },
+    { timeout: T_LOAD },
   );
   await concedePage
     .locator(`[data-testid="battle-row"][data-battle-id="${concededBattleId}"]`)
     .getByTestId('delete-battle')
     .click();
-  await concedePage.getByTestId('empty-battles').waitFor({ timeout: 10000 });
+  await concedePage.getByTestId('empty-battles').waitFor({ timeout: T_SAVE });
   check('deleting clears both battles', true);
 
   await concedeContext.close();
@@ -3666,6 +3758,7 @@ try {
   const gateContext = await browser.newContext({
     viewport: { width: 1440, height: 900 },
   });
+  await gateContext.setDefaultTimeout(T_BATTLE);
   const gatePage = await gateContext.newPage();
   gatePage.on('console', (message) => log(`gate console: ${message.text()}`));
   gatePage.on('pageerror', (error) => log(`gate pageerror: ${String(error)}`));
@@ -3674,7 +3767,7 @@ try {
     await dialog.accept();
   });
   await gatePage.goto(`${base}/`, { waitUntil: 'networkidle' });
-  await gatePage.getByTestId('app').waitFor({ timeout: 15000 });
+  await gatePage.getByTestId('app').waitFor({ timeout: T_LOAD });
   await gatePage.evaluate(() => {
     window.__POLIS_TEST_SEED = 7;
   });
@@ -3727,16 +3820,16 @@ try {
   const gateFile = path.join(reportDir, 'gate-reference.json');
   writeFileSync(gateFile, `${JSON.stringify(gateReference, null, 2)}\n`);
   await gatePage.getByTestId('import-file').setInputFiles(gateFile);
-  await gatePage.getByTestId('editor').waitFor({ timeout: 15000 });
+  await gatePage.getByTestId('editor').waitFor({ timeout: T_LOAD });
   await gatePage.getByTestId('back-to-library').click();
-  await gatePage.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  await gatePage.getByTestId('scenario-list').waitFor({ timeout: T_SAVE });
 
   // Step 1: starting the unplayable reference is refused, naming the unit.
   const gateRow = gatePage.getByTestId('scenario-row').filter({ hasText: gateTitle });
   await gateRow.getByTestId('start-battle').click();
-  await gatePage.getByTestId('battle-setup').waitFor({ timeout: 10000 });
+  await gatePage.getByTestId('battle-setup').waitFor({ timeout: T_SAVE });
   await gatePage.getByTestId('begin-battle').click();
-  await gatePage.getByTestId('playability-refusal').waitFor({ timeout: 10000 });
+  await gatePage.getByTestId('playability-refusal').waitFor({ timeout: T_SAVE });
   const gateProblems = await gatePage.getByTestId('playability-problem').allTextContents();
   check(
     'gate: an unplayable reference is refused, naming the unit',
@@ -3753,14 +3846,14 @@ try {
 
   // Step 2: open in editor, fix the spacing through the inspector, save.
   await gatePage.getByTestId('open-in-editor').click();
-  await gatePage.getByTestId('editor').waitFor({ timeout: 15000 });
+  await gatePage.getByTestId('editor').waitFor({ timeout: T_LOAD });
   check(
     'gate: open in editor opens the refused reference',
     (await gatePage.getByTestId('header-title').textContent()) === gateTitle,
   );
   await gatePage.getByTestId('oob-tab-all').click();
   await gatePage.locator('[data-testid="oob-unit"]', { hasText: 'Spartan mora' }).click();
-  await gatePage.getByTestId('unit-inspector').waitFor({ timeout: 10000 });
+  await gatePage.getByTestId('unit-inspector').waitFor({ timeout: T_SAVE });
   check(
     'gate: the bad unit is selected for the fix',
     (await gatePage.getByTestId('unit-title').textContent()) === 'Spartan mora',
@@ -3804,7 +3897,7 @@ try {
 
   // Step 3: start Human vs Passive from the fixed reference.
   await gatePage.getByTestId('start-battle-editor').click();
-  await gatePage.getByTestId('battle-setup').waitFor({ timeout: 10000 });
+  await gatePage.getByTestId('battle-setup').waitFor({ timeout: T_SAVE });
   await gatePage.getByTestId('controller-side-b').selectOption('passive');
   check(
     'gate: setup fields Human vs Passive',
@@ -3812,7 +3905,7 @@ try {
       (await gatePage.getByTestId('controller-side-b').inputValue()) === 'passive',
   );
   await gatePage.getByTestId('begin-battle').click();
-  await gatePage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
+  await gatePage.getByTestId('battle-screen').waitFor({ timeout: T_LOAD });
   const gateRoundStart = await gatePage.getByTestId('round').textContent();
   check(
     'gate: Human vs Passive begins on round 1, turn 1',
@@ -3825,22 +3918,26 @@ try {
   // automated side first when it starts. Every resolution ends behind the
   // device handoff, which is what unlocks drafting.
   for (let step = 0; step < 4; step += 1) {
+    if ((await gatePage.getByTestId('battle-outcome').count()) > 0) break;
     const controller = (await gatePage.getByTestId('turn-controller').textContent()) ?? '';
     if (controller.startsWith('human')) break;
     if ((await gatePage.getByTestId('handoff').count()) > 0) {
-      await gatePage.getByTestId('handoff').click();
+      await clickHandoffAndSettle(gatePage);
     } else {
+      const gateTurnBefore = await gatePage.getByTestId('round').textContent();
       await gatePage.getByTestId('continue-turn').click();
+      await gatePage.waitForFunction(
+        (expected) =>
+          document.querySelector('[data-testid="round"]')?.textContent !== expected ||
+          document.querySelector('[data-testid="handoff"]') ||
+          document.querySelector('[data-testid="battle-outcome"]'),
+        gateTurnBefore,
+        { timeout: T_BATTLE },
+      );
     }
-    await gatePage.getByTestId('handoff').waitFor({ timeout: 15000 });
   }
   if ((await gatePage.getByTestId('handoff').count()) > 0) {
-    await gatePage.getByTestId('handoff').click();
-    await gatePage.waitForFunction(
-      () => document.querySelector('[data-testid="handoff"]') === null,
-      null,
-      { timeout: 15000 },
-    );
+    await clickHandoffAndSettle(gatePage);
   }
   check(
     'gate: drafting starts on the human turn',
@@ -3861,7 +3958,7 @@ try {
     await gatePage.mouse.click(clientX, clientY);
   }
   await gatePage.getByTestId('fit-view').click();
-  await gatePage.waitForTimeout(300);
+  await gatePage.waitForTimeout(SETTLE_MS);
 
   const gateOwn = gatePage.getByTestId('battle-oob-side-a').getByTestId('battle-oob-unit');
   const gateFoe = gatePage.getByTestId('battle-oob-side-b').getByTestId('battle-oob-unit');
@@ -3880,14 +3977,14 @@ try {
   await gateOwn.filter({ hasText: 'Gate mover one' }).click();
   await gatePage.getByTestId(`start-draft-${gateMoverOne}`).click();
   await clickGateMap(400, 560);
-  await gatePage.getByTestId(`draft-accepted-${gateMoverOne}`).waitFor({ timeout: 10000 });
+  await gatePage.getByTestId(`draft-accepted-${gateMoverOne}`).waitFor({ timeout: T_SAVE });
   check(
     'gate: a Move drafts with its ghost',
     (await gatePage.getByTestId('draft-ghost').count()) >= 1,
   );
   await gateOwn.filter({ hasText: 'Gate charger' }).click();
   await gatePage.getByTestId(`charge-${gateCharger}-${gateTarget}`).click();
-  await gatePage.getByTestId(`draft-accepted-${gateCharger}`).waitFor({ timeout: 10000 });
+  await gatePage.getByTestId(`draft-accepted-${gateCharger}`).waitFor({ timeout: T_SAVE });
   check(
     'gate: a Charge drafts from its candidate',
     ((await gatePage.getByTestId(`draft-${gateCharger}`).textContent()) ?? '').includes('Charge'),
@@ -3898,7 +3995,7 @@ try {
   await gateOwn.filter({ hasText: 'Gate mover two' }).click();
   await gatePage.getByTestId(`start-draft-${gateMoverTwo}`).click();
   await clickGateMap(410, 560);
-  await gatePage.getByTestId(`draft-rejection-${gateMoverTwo}`).waitFor({ timeout: 10000 });
+  await gatePage.getByTestId(`draft-rejection-${gateMoverTwo}`).waitFor({ timeout: T_SAVE });
   const gateCollision = await gatePage.getByTestId(`draft-rejection-${gateMoverTwo}`).textContent();
   check(
     'gate: a colliding order is rejected inline',
@@ -3927,9 +4024,9 @@ try {
         .querySelector('[data-testid="draft-list"] .draft-rows > li')
         ?.getAttribute('data-testid') === expected,
     `draft-${gateMoverTwo}`,
-    { timeout: 10000 },
+    { timeout: T_SAVE },
   );
-  await gatePage.getByTestId(`draft-rejection-${gateMoverOne}`).waitFor({ timeout: 10000 });
+  await gatePage.getByTestId(`draft-rejection-${gateMoverOne}`).waitFor({ timeout: T_SAVE });
   check(
     'gate: reordering flips the culprit to the now-later order',
     /collid/i.test(
@@ -3957,16 +4054,16 @@ try {
   await gatePage.waitForFunction(
     () => document.querySelector('[data-testid="commit-draft"]')?.disabled === false,
     null,
-    { timeout: 10000 },
+    { timeout: T_SAVE },
   );
   check('gate: removing the rejected order enables the commit', true);
   const gateRoundBefore = await gatePage.getByTestId('round').textContent();
   await gatePage.getByTestId('commit-draft').click();
-  await gatePage.getByTestId('turn-result').waitFor({ timeout: 15000 });
+  await gatePage.getByTestId('turn-result').waitFor({ timeout: T_BATTLE });
   await gatePage.waitForFunction(
     (expected) => document.querySelector('[data-testid="round"]')?.textContent !== expected,
     gateRoundBefore,
-    { timeout: 15000 },
+    { timeout: T_BATTLE },
   );
   check('gate: committing the Move and the Charge advances the turn', true);
 
@@ -3991,7 +4088,7 @@ try {
   // Step 6: reload mid-battle and resume from the battles list.
   const gateRoundAfter = await gatePage.getByTestId('round').textContent();
   await gatePage.reload({ waitUntil: 'networkidle' });
-  await gatePage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
+  await gatePage.getByTestId('battle-screen').waitFor({ timeout: T_LOAD });
   check(
     'gate: reloading resumes the committed turn',
     (await gatePage.getByTestId('round').textContent()) === gateRoundAfter,
@@ -4001,13 +4098,13 @@ try {
     /Gate charger/.test((await gatePage.getByTestId('battle-log').textContent()) ?? ''),
   );
   await gatePage.getByTestId('back-to-battles').click();
-  await gatePage.getByTestId('battles-list').waitFor({ timeout: 10000 });
+  await gatePage.getByTestId('battles-list').waitFor({ timeout: T_SAVE });
   check(
     'gate: the battles list keeps the battle in progress',
     (await gatePage.getByTestId('battle-row').count()) === 1,
   );
   await gatePage.getByTestId('resume-battle').click();
-  await gatePage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
+  await gatePage.getByTestId('battle-screen').waitFor({ timeout: T_LOAD });
   check(
     'gate: resume restores the committed turn',
     (await gatePage.getByTestId('round').textContent()) === gateRoundAfter,
@@ -4019,29 +4116,14 @@ try {
   for (let step = 0; step < 8; step += 1) {
     if ((await gatePage.getByTestId('battle-outcome').count()) > 0) break;
     if ((await gatePage.getByTestId('handoff').count()) > 0) {
-      await gatePage.getByTestId('handoff').click();
-      await gatePage.waitForFunction(
-        () =>
-          document.querySelector('[data-testid="handoff"]') === null ||
-          document.querySelector('[data-testid="battle-outcome"]'),
-        null,
-        { timeout: 15000 },
-      );
-      await gatePage.waitForFunction(
-        () =>
-          document.querySelector('[data-testid="commit-empty"]') ||
-          document.querySelector('[data-testid="continue-turn"]') ||
-          document.querySelector('[data-testid="handoff"]') ||
-          document.querySelector('[data-testid="battle-outcome"]'),
-        null,
-        { timeout: 15000 },
-      );
+      await clickHandoffAndSettle(gatePage);
+      continue;
     }
     if ((await gatePage.getByTestId('battle-outcome').count()) > 0) break;
     const controller = (await gatePage.getByTestId('turn-controller').textContent()) ?? '';
     if (controller.startsWith('human')) break;
     await gatePage.getByTestId('continue-turn').click();
-    await gatePage.getByTestId('handoff').waitFor({ timeout: 15000 });
+    await gatePage.getByTestId('handoff').waitFor({ timeout: T_BATTLE });
   }
   check(
     'gate: the human side is up to concede',
@@ -4051,7 +4133,7 @@ try {
   const gateConceder = ((await gatePage.getByTestId('active-side').textContent()) ?? '').trim();
   await gatePage.getByTestId('concede').click();
   await gatePage.getByTestId('concede-confirm').click();
-  await gatePage.getByTestId('battle-outcome').waitFor({ timeout: 15000 });
+  await gatePage.getByTestId('battle-outcome').waitFor({ timeout: T_BATTLE });
   const gateBattleId = new URL(gatePage.url()).searchParams.get('battle');
   const gateOutcomeTitle = (await gatePage.getByTestId('outcome-title').textContent()) ?? '';
   const gateOutcomeReason = (await gatePage.getByTestId('outcome-reason').textContent()) ?? '';
@@ -4084,7 +4166,7 @@ try {
   // Step 8: a rematch starts a new battle from the snapshot; both battles are
   // listed, then deleted.
   await gatePage.getByTestId('rematch').click();
-  await gatePage.getByTestId('starting-announcement').waitFor({ timeout: 15000 });
+  await gatePage.getByTestId('starting-announcement').waitFor({ timeout: T_BATTLE });
   const gateRematchRound = (await gatePage.getByTestId('round').textContent()) ?? '';
   const gateRematchId = new URL(gatePage.url()).searchParams.get('battle');
   const gateRematchAnnouncement =
@@ -4105,7 +4187,7 @@ try {
     `${gateBattleId} → ${gateRematchId}`,
   );
   await gatePage.getByTestId('back-to-battles').click();
-  await gatePage.getByTestId('battles-list').waitFor({ timeout: 10000 });
+  await gatePage.getByTestId('battles-list').waitFor({ timeout: T_SAVE });
   check(
     'gate: the rematch keeps the finished battle on the list',
     (await gatePage.getByTestId('battle-row').count()) === 2,
@@ -4117,13 +4199,13 @@ try {
   await gatePage.waitForFunction(
     () => document.querySelectorAll('[data-testid="battle-row"]').length === 1,
     null,
-    { timeout: 15000 },
+    { timeout: T_LOAD },
   );
   await gatePage
     .locator(`[data-testid="battle-row"][data-battle-id="${gateBattleId}"]`)
     .getByTestId('delete-battle')
     .click();
-  await gatePage.getByTestId('empty-battles').waitFor({ timeout: 10000 });
+  await gatePage.getByTestId('empty-battles').waitFor({ timeout: T_SAVE });
   check('gate: deleting clears both battles', true);
 
   await gateContext.close();
@@ -4136,6 +4218,7 @@ try {
   const endContext = await browser.newContext({
     viewport: { width: 1440, height: 900 },
   });
+  await endContext.setDefaultTimeout(T_BATTLE);
   const endPage = await endContext.newPage();
   endPage.on('console', (message) => log(`end console: ${message.text()}`));
   endPage.on('pageerror', (error) => log(`end pageerror: ${String(error)}`));
@@ -4144,7 +4227,7 @@ try {
     await dialog.accept();
   });
   await endPage.goto(`${base}/`, { waitUntil: 'networkidle' });
-  await endPage.getByTestId('app').waitFor({ timeout: 15000 });
+  await endPage.getByTestId('app').waitFor({ timeout: T_LOAD });
   await endPage.evaluate(() => {
     window.__POLIS_TEST_SEED = 7;
   });
@@ -4152,7 +4235,7 @@ try {
   const endProbeTitle = `End Probe ${Date.now()}`;
   await endPage.getByTestId('new-scenario-title').fill(endProbeTitle);
   await endPage.getByTestId('new-scenario-submit').click();
-  await endPage.getByTestId('editor').waitFor({ timeout: 15000 });
+  await endPage.getByTestId('editor').waitFor({ timeout: T_LOAD });
 
   // Two hoplite blocks head-on, 80 m apart: far enough to place cleanly, close
   // enough to meet within a few turns.
@@ -4188,10 +4271,10 @@ try {
   await endPage.getByTestId('save-scenario').click();
   await waitForSave(endPage);
   await endPage.getByTestId('start-battle-editor').click();
-  await endPage.getByTestId('battle-setup').waitFor({ timeout: 10000 });
+  await endPage.getByTestId('battle-setup').waitFor({ timeout: T_SAVE });
   await endPage.getByTestId('controller-side-b').selectOption('random');
   await endPage.getByTestId('begin-battle').click();
-  await endPage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
+  await endPage.getByTestId('battle-screen').waitFor({ timeout: T_LOAD });
 
   // The automated side's own turn never offers concede: the button stays
   // disabled while the test player is up.
@@ -4222,7 +4305,7 @@ try {
           return !!handoff && handoff.textContent !== previous;
         },
         handoffBefore,
-        { timeout: 30000 },
+        { timeout: T_BATTLE },
       );
       return true;
     }
@@ -4234,19 +4317,19 @@ try {
           document.querySelector('[data-testid="handoff"]') ||
           document.querySelector('[data-testid="battle-outcome"]'),
         null,
-        { timeout: 30000 },
+        { timeout: T_BATTLE },
       );
       return true;
     }
     await endPage.getByTestId('commit-empty').click();
-    await endPage.getByTestId('commit-confirm').waitFor({ timeout: 10000 });
+    await endPage.getByTestId('commit-confirm').waitFor({ timeout: T_SAVE });
     await endPage.getByTestId('confirm-commit').click();
     await endPage.waitForFunction(
       () =>
         document.querySelector('[data-testid="handoff"]') ||
         document.querySelector('[data-testid="battle-outcome"]'),
       null,
-      { timeout: 30000 },
+      { timeout: T_BATTLE },
     );
     return true;
   }
@@ -4292,20 +4375,20 @@ try {
 
   // The end state survives a reload unchanged.
   await endPage.reload({ waitUntil: 'networkidle' });
-  await endPage.getByTestId('battle-outcome').waitFor({ timeout: 15000 });
+  await endPage.getByTestId('battle-outcome').waitFor({ timeout: T_BATTLE });
   check(
     'reloading keeps the end-condition outcome',
     ((await endPage.getByTestId('outcome-title').textContent()) ?? '') === endOutcomeTitle,
   );
   await endPage.getByTestId('back-to-battles').click();
-  await endPage.getByTestId('battles-list').waitFor({ timeout: 10000 });
+  await endPage.getByTestId('battles-list').waitFor({ timeout: T_SAVE });
   check(
     'the battles list shows the ended battle',
     (await endPage.getByTestId('battle-row').count()) === 1 &&
       /Finished/.test((await endPage.getByTestId('battle-row-meta').textContent()) ?? ''),
   );
   await endPage.getByTestId('delete-battle').click();
-  await endPage.getByTestId('empty-battles').waitFor({ timeout: 10000 });
+  await endPage.getByTestId('empty-battles').waitFor({ timeout: T_SAVE });
   check('deleting removes the ended battle', true);
 
   await endContext.close();
@@ -4331,6 +4414,7 @@ try {
     const narrowContext = await browser.newContext({
       viewport: { width: viewportWidth, height: viewportHeight },
     });
+  await narrowContext.setDefaultTimeout(T_BATTLE);
     const narrowPage = await narrowContext.newPage();
     narrowPage.on('console', (message) => log(`narrow ${label} console: ${message.text()}`));
     narrowPage.on('pageerror', (error) => log(`narrow ${label} pageerror: ${String(error)}`));
@@ -4339,7 +4423,7 @@ try {
       await dialog.accept();
     });
     await narrowPage.goto(`${base}/`, { waitUntil: 'networkidle' });
-    await narrowPage.getByTestId('app').waitFor({ timeout: 15000 });
+    await narrowPage.getByTestId('app').waitFor({ timeout: T_LOAD });
     check(
       `narrow ${label}: no narrow-viewport notice exists`,
       (await narrowPage.locator('#narrow-notice').count()) === 0,
@@ -4358,7 +4442,7 @@ try {
     const narrowTitle = `Narrow ${label} ${Date.now()}`;
     await narrowPage.getByTestId('new-scenario-title').fill(narrowTitle);
     await narrowPage.getByTestId('new-scenario-submit').click();
-    await narrowPage.getByTestId('editor').waitFor({ timeout: 15000 });
+    await narrowPage.getByTestId('editor').waitFor({ timeout: T_LOAD });
     check(
       `narrow ${label}: editor renders`,
       await narrowPage.getByTestId('editor').isVisible(),
@@ -4477,9 +4561,9 @@ try {
       await narrowPage.getByTestId('start-battle-editor').isEnabled(),
     );
     await narrowPage.getByTestId('start-battle-editor').click();
-    await narrowPage.getByTestId('battle-setup').waitFor({ timeout: 10000 });
+    await narrowPage.getByTestId('battle-setup').waitFor({ timeout: T_SAVE });
     await narrowPage.getByTestId('begin-battle').click();
-    await narrowPage.getByTestId('battle-screen').waitFor({ timeout: 15000 });
+    await narrowPage.getByTestId('battle-screen').waitFor({ timeout: T_LOAD });
     check(
       `narrow ${label}: battle renders`,
       await narrowPage.getByTestId('battle-screen').isVisible(),
@@ -4529,6 +4613,7 @@ try {
   const shellContext = await browser.newContext({
     viewport: { width: 1440, height: 900 },
   });
+  await shellContext.setDefaultTimeout(T_BATTLE);
   const shellPage = await shellContext.newPage();
   shellPage.on('console', (message) => log(`shell console: ${message.text()}`));
   shellPage.on('pageerror', (error) => log(`shell pageerror: ${String(error)}`));
@@ -4537,11 +4622,11 @@ try {
     await dialog.accept();
   });
   await shellPage.goto(`${base}/`, { waitUntil: 'networkidle' });
-  await shellPage.getByTestId('app').waitFor({ timeout: 15000 });
+  await shellPage.getByTestId('app').waitFor({ timeout: T_LOAD });
   const shellTitle = `Shell Probe ${Date.now()}`;
   await shellPage.getByTestId('new-scenario-title').fill(shellTitle);
   await shellPage.getByTestId('new-scenario-submit').click();
-  await shellPage.getByTestId('editor').waitFor({ timeout: 15000 });
+  await shellPage.getByTestId('editor').waitFor({ timeout: T_LOAD });
   // Enough units that both side panels overflow the workspace at 900 px, so
   // the internal-scroll checks below are meaningful.
   for (let index = 0; index < 16; index += 1) {
@@ -4576,7 +4661,7 @@ try {
     `viewport=${JSON.stringify(shellMap900)} svg=${JSON.stringify(shellSvg900)}`,
   );
   await shellPage.setViewportSize({ width: 1440, height: 1200 });
-  await shellPage.waitForTimeout(600);
+  await shellPage.waitForTimeout(LAYOUT_MS);
   const shellWs1200 = await shellWorkspaceBox();
   check(
     'shell: workspace bottom sits at the viewport height minus its margin at 1440x1200',
@@ -4601,7 +4686,7 @@ try {
     `viewport=${JSON.stringify(shellMap1200)} svg=${JSON.stringify(shellSvg1200)}`,
   );
   await shellPage.setViewportSize({ width: 1440, height: 500 });
-  await shellPage.waitForTimeout(600);
+  await shellPage.waitForTimeout(LAYOUT_MS);
   const shellWs500 = await shellWorkspaceBox();
   const shellShort = await shellPage.evaluate(() => ({
     scrollHeight: document.documentElement.scrollHeight,
@@ -4618,7 +4703,7 @@ try {
     JSON.stringify(shellShort),
   );
   await shellPage.setViewportSize({ width: 1440, height: 900 });
-  await shellPage.waitForTimeout(600);
+  await shellPage.waitForTimeout(LAYOUT_MS);
   const shellWsRestored = await shellWorkspaceBox();
   check(
     'shell: restoring the viewport restores the workspace fit',
@@ -4645,7 +4730,7 @@ try {
   await shellPage.getByTestId('inspector-title').fill(`${shellTitle} quota`);
   await shellPage.locator('.map-caption').click();
   await shellPage.getByTestId('save-scenario').click();
-  await shellPage.getByTestId('save-error').waitFor({ timeout: 10000 });
+  await shellPage.getByTestId('save-error').waitFor({ timeout: T_SAVE });
   const shellWsError = await shellWorkspaceBox();
   check(
     'shell: with a save error the workspace still fits the window',
@@ -4682,7 +4767,7 @@ try {
     JSON.stringify({ pageScrollHeight: shellPanels.pageScrollHeight, innerHeight: shellPanels.innerHeight }),
   );
   await shellPage.getByTestId('back-to-library').click();
-  await shellPage.getByTestId('scenario-list').waitFor({ timeout: 10000 });
+  await shellPage.getByTestId('scenario-list').waitFor({ timeout: T_SAVE });
   const shellLibrary = await shellPage.evaluate(() => {
     const app = document.querySelector('[data-testid="app"]');
     const box = app?.getBoundingClientRect() ?? null;
