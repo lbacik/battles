@@ -1938,3 +1938,115 @@ textarea:focus-visible {
 .unavailable strong {
   color: var(--ink);
 }
+
+/* Tethered unit context card (issue #123): read-only status beside the
+   selected active-side unit during a human Orders phase. The overlay covers
+   the map viewport but lets the map through everywhere except the card; the
+   tether joins the unit footprint centre to the card edge. */
+.unit-card-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.unit-card-tether-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.unit-card {
+  position: absolute;
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #faf9f2f7;
+  border: 1px solid #c9ceba;
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(38, 48, 35, 0.22);
+}
+
+.unit-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--line);
+  background: #f4f3e8;
+  flex-shrink: 0;
+}
+
+.unit-card-titles {
+  flex: 1;
+  min-width: 0;
+}
+
+.unit-card-titles h4 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.unit-card-head-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.unit-card-cohesion {
+  font-size: 10px;
+  font-weight: 650;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #e6ecdc;
+  color: var(--green-deep);
+}
+
+.unit-card-cohesion.state-disordered {
+  background: #faf0d4;
+  color: #8a6418;
+}
+
+.unit-card-cohesion.state-routed {
+  background: #f9e4df;
+  color: #9b2c1c;
+}
+
+.unit-card-icon-btn {
+  width: 24px;
+  height: 24px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  border: 1px solid transparent;
+}
+
+.unit-card-icon-btn:hover {
+  border-color: var(--line);
+  background: #ffffff88;
+  color: var(--ink);
+}
+
+.unit-card-body {
+  padding: 8px 14px 12px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+  overscroll-behavior: contain;
+}
+
+.unit-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  font-size: 11px;
+  color: #5c665a;
+  margin: 6px 0 2px;
+}

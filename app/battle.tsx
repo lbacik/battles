@@ -808,6 +808,15 @@ export default function BattleScreen({
                 : null
             }
             onBattleRotate={handleBattleRotate}
+            unitCard={
+              canDraft && selectedUnit && selectedUnit.side === activeSide
+                ? {
+                    unit: selectedUnit,
+                    movementAllowanceM: selectedEntry?.movementAllowanceM,
+                  }
+                : null
+            }
+            onCloseUnitCard={() => setSelectedUnitId(null)}
           />
           <p className="map-hint">
             {canDraft
