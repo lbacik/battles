@@ -16,104 +16,35 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { BattleChargeCandidate } from './battlefield-map';
-import { SUBMISSION_FORMAT_VERSION, availableActions, validateTurn } from '../domain/turn.js';
+import { availableActions } from '../domain/turn.js';
+import type {
+  DraftLeg,
+  NewOrderDraft,
+  OrderDraft,
+  TurnDraftController,
+  TurnDraftControllerOptions,
+} from './turn-draft-types';
+import {
+  buildDraftSubmission,
+  conflictPointsIn,
+  conflictUnitIdsIn,
+  draftKindOfDraft,
+  validateDraftSubmission,
+  verdictForDraftIndexIn,
+} from './turn-draft-helpers';
 import { CHARGE_EDGES, MAX_APPROACH_LEGS } from '../domain/charge.js';
 import { MAX_MOVE_LEGS } from '../domain/movement.js';
 import { getTroopType } from '../domain/polis-classical.js';
 import { normalizeFacing } from '../domain/scenario.js';
 import { round1 } from '../domain/geometry.js';
 
-// An order draft for one unit. Move holds up to three `{ face, to }` leg
-// points in draft order (a leg with only a rotation is allowed); Charge holds
-// its target, edge, and up to two optional approach legs; Shoot holds its
-// target; Reform holds the files with the spacings; Withdraw and Rally hold
-// no parameters. Drafting a second kind for the same unit replaces the first.
-// The engine alone decides legality.
-export interface DraftLeg {
-  face: number | null;
-  to: { x: number; y: number } | null;
-}
-
-export type OrderDraft =
-  | { key: string; unitId: string; kind: 'Move'; legs: DraftLeg[] }
-  | { key: string; unitId: string; kind: 'Charge'; targetId: string; edge: string; approach: DraftLeg[] }
-  | { key: string; unitId: string; kind: 'Shoot'; targetId: string }
-  | { key: string; unitId: string; kind: 'Reform'; files: number; lateralInterval: number; rankDepth: number }
-  | { key: string; unitId: string; kind: 'Withdraw' }
-  | { key: string; unitId: string; kind: 'Rally' };
-
-// A new order draft without its key: drafting a second kind for the same
-// unit replaces the first, so at most one draft per unit, and the button
-// pressed names the intent.
-export type NewOrderDraft =
-  | { kind: 'Move'; legs: DraftLeg[] }
-  | { kind: 'Charge'; targetId: string; edge: string; approach: DraftLeg[] }
-  | { kind: 'Shoot'; targetId: string }
-  | { kind: 'Reform'; files: number; lateralInterval: number; rankDepth: number }
-  | { kind: 'Withdraw' }
-  | { kind: 'Rally' };
-
-export interface TurnDraftControllerOptions {
-  battle: any;
-  activeSide: string;
-  canDraft: boolean;
-  finished: boolean;
-  // Called wherever the battle screen used to clear its commit confirmation:
-  // every draft mutation exits the confirm step. The controller itself owns
-  // no confirmation UI.
-  onDraftMutated?: () => void;
-}
-
-export interface TurnDraftController {
-  selectedUnitId: string | null;
-  selectedUnit: any;
-  drafts: OrderDraft[];
-  draftSubmission: any;
-  validation: any;
-  selectedEntry: any;
-  battleGhosts: { unitId: string; corners: { x: number; y: number }[]; kind: string }[];
-  battlePaths: { points: { x: number; y: number }[]; rejected: boolean; label: string }[];
-  battleShootLines: { from: { x: number; y: number }; to: { x: number; y: number }; rejected: boolean; shooterId: string; targetId: string }[];
-  battleCandidateCharges: BattleChargeCandidate[];
-  battleCandidateShoots: string[];
-  selectUnit: (unitId: string | null) => void;
-  ownUnit: (unitId: string | null) => any;
-  draftForUnit: (unitId: string) => OrderDraft | null;
-  draftKindOf: (draft: OrderDraft | null) => string;
-  actionsEntryFor: (unitId: string) => any;
-  permittedKindsOf: (unitId: string) => string[];
-  chargeCandidatesOf: (unitId: string) => any[];
-  shootCandidatesOf: (unitId: string) => any[];
-  spacingPresetsOf: (unit: any) => Record<string, any> | null;
-  verdictForDraftIndex: (index: number) => any;
-  conflictUnitIds: () => Set<string>;
-  conflictPoints: () => { x: number; y: number }[];
-  unitDisplayName: (unitId: string) => string;
-  startMoveDraft: (unitId: string) => void;
-  upsertDraft: (unitId: string, draft: NewOrderDraft) => void;
-  startChargeDraft: (unitId: string, targetId?: string | null, edge?: string | null) => void;
-  startShootDraft: (unitId: string, targetId?: string | null) => void;
-  startReformDraft: (unitId: string) => void;
-  startWithdrawDraft: (unitId: string) => void;
-  startRallyDraft: (unitId: string) => void;
-  setChargeTarget: (unitId: string, targetId: string, edge?: string | null) => void;
-  setChargeEdge: (unitId: string, edge: string) => void;
-  setShootTarget: (unitId: string, targetId: string) => void;
-  setReformField: (unitId: string, field: string, raw: string) => void;
-  applyReformPreset: (unitId: string, preset: string) => void;
-  appendApproachLeg: (unitId: string, point: { x: number; y: number }) => void;
-  removeLastApproachLeg: (unitId: string) => void;
-  clearApproachLegs: (unitId: string) => void;
-  removeDraft: (unitId: string) => void;
-  moveDraft: (unitId: string, direction: number) => void;
-  appendDraftLeg: (unitId: string, point: { x: number; y: number }) => void;
-  removeLastDraftLeg: (unitId: string) => void;
-  clearDraftLegs: (unitId: string) => void;
-  setDraftFacing: (unitId: string, raw: string) => void;
-  handleBattleUnitSelect: (unitId: string | null) => void;
-  handleBattleMapClick: (point: { x: number; y: number }) => void;
-  handleBattleRotate: (facing: number) => void;
-}
+export type {
+  DraftLeg,
+  NewOrderDraft,
+  OrderDraft,
+  TurnDraftController,
+  TurnDraftControllerOptions,
+} from './turn-draft-types';
 
 export function useTurnDraftController({
   battle,
@@ -169,7 +100,7 @@ export function useTurnDraftController({
   }
 
   function draftKindOf(draft: OrderDraft | null): string {
-    return draft?.kind || 'Move';
+    return draftKindOfDraft(draft);
   }
 
   // The inspector reads the engine's available actions, never its own rules:
@@ -213,117 +144,28 @@ export function useTurnDraftController({
 
   // The draft submission in draft order, one order per draft. Every kind the
   // inspector can draft maps to the order shape the engine validates.
-  const draftSubmission = useMemo(() => {
-    if (!battle) return null;
-    return {
-      formatVersion: SUBMISSION_FORMAT_VERSION,
-      battleId: battle.id,
-      turnNumber: battle.turnNumber,
-      side: battle.activeSide,
-      orders: drafts.map((draft) => {
-        switch (draft.kind) {
-          case 'Charge':
-            return {
-              unitId: draft.unitId,
-              kind: 'Charge',
-              targetId: draft.targetId,
-              edge: draft.edge,
-              approach: draft.approach.map((leg) => ({
-                ...(leg.face === null || leg.face === undefined ? {} : { face: leg.face }),
-                ...(leg.to ? { to: { ...leg.to } } : {}),
-              })),
-            };
-          case 'Shoot':
-            return { unitId: draft.unitId, kind: 'Shoot', targetId: draft.targetId };
-          case 'Reform': {
-            const order: any = { unitId: draft.unitId, kind: 'Reform' };
-            if (draft.files !== null && draft.files !== undefined) order.files = draft.files;
-            if (draft.lateralInterval !== null && draft.lateralInterval !== undefined) {
-              order.lateralInterval = draft.lateralInterval;
-            }
-            if (draft.rankDepth !== null && draft.rankDepth !== undefined) {
-              order.rankDepth = draft.rankDepth;
-            }
-            return order;
-          }
-          case 'Withdraw':
-            return { unitId: draft.unitId, kind: 'Withdraw' };
-          case 'Rally':
-            return { unitId: draft.unitId, kind: 'Rally' };
-          case 'Move':
-          default:
-            return {
-              unitId: draft.unitId,
-              kind: 'Move',
-              legs: draft.legs.map((leg) => ({
-                ...(leg.face === null || leg.face === undefined ? {} : { face: leg.face }),
-                ...(leg.to ? { to: { ...leg.to } } : {}),
-              })),
-            };
-        }
-      }),
-    };
-  }, [battle, drafts]);
+  const draftSubmission = useMemo(() => buildDraftSubmission(battle, drafts), [battle, drafts]);
 
   // Every draft change calls the engine's `validate`: pure, never throws for
   // a missing battle, and stores the per-order verdicts for the draft list
   // and the map ghosts/highlights.
-  const validation = useMemo(() => {
-    if (!battle || !draftSubmission) return null;
-    try {
-      return validateTurn(battle, draftSubmission);
-    } catch {
-      return null;
-    }
-  }, [battle, draftSubmission]);
+  const validation = useMemo(
+    () => validateDraftSubmission(battle, draftSubmission),
+    [battle, draftSubmission],
+  );
 
   function verdictForDraftIndex(index: number): any {
-    const verdicts = validation?.verdicts;
-    if (!Array.isArray(verdicts)) return null;
-    return verdicts.find((verdict: any) => verdict?.orderIndex === index) || null;
+    return verdictForDraftIndexIn(validation, index);
   }
 
-  // Units named as the conflict by a rejection, drawn as map highlights: the
-  // collision partner (`details.withUnitId`), the charge or shoot target
-  // (`details.targetId`), a line-of-fire blocker (`details.blockedBy`), or
-  // the nearest enemy a rally objects to (`details.nearestEnemyId`). The
-  // rejected unit itself is outlined by its draft row; the other parties
-  // highlight on the map.
+  // Units named as the conflict by a rejection, drawn as map highlights;
+  // the rejected unit itself is outlined by its draft row (see helpers).
   function conflictUnitIds(): Set<string> {
-    const ids = new Set<string>();
-    const unitIds = new Set(units.map((unit: any) => unit?.id));
-    for (const verdict of validation?.verdicts || []) {
-      const details = verdict?.accepted === false ? verdict?.rejection?.details : null;
-      if (!details) continue;
-      if (typeof details.withUnitId === 'string') ids.add(details.withUnitId);
-      if (
-        typeof details.targetId === 'string' &&
-        details.targetId !== verdict.unitId &&
-        unitIds.has(details.targetId)
-      ) {
-        ids.add(details.targetId);
-      }
-      if (typeof details.blockedBy === 'string' && unitIds.has(details.blockedBy)) {
-        ids.add(details.blockedBy);
-      }
-      if (typeof details.nearestEnemyId === 'string') ids.add(details.nearestEnemyId);
-    }
-    return ids;
+    return conflictUnitIdsIn(validation, units);
   }
 
   function conflictPoints(): { x: number; y: number }[] {
-    const points: { x: number; y: number }[] = [];
-    for (const verdict of validation?.verdicts || []) {
-      if (verdict?.accepted !== false) continue;
-      const details = verdict?.rejection?.details;
-      for (const key of ['at', 'aimPoint']) {
-        const point = details?.[key];
-        if (point && Number.isFinite(point?.x) && Number.isFinite(point?.y)) {
-          points.push({ x: point.x, y: point.y });
-        }
-      }
-    }
-    return points;
+    return conflictPointsIn(validation);
   }
 
   function upsertDraft(unitId: string, draft: NewOrderDraft): void {
