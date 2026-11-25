@@ -6,8 +6,10 @@
 // nearest to the unit centre. The placement shape is the prototype-validated
 // Variant A trim (prototype branch `prototype/unit-context-menu`, commit
 // `0a376fb`): right of the unit, flipped left when there is no room, clamped
-// against the measured rendered height and the viewport size. No manual
-// position yet — see the drag ticket.
+// against the measured rendered height and the viewport size. An optional
+// manual position (`manualPos: { x, y }` in viewport pixels, set while the
+// player drags the card — see the drag ticket) overrides the automatic
+// placement, clamped to the viewport margins.
 
 import { deriveFootprint } from './geometry.js';
 import { mapViewBox } from './scenario.js';
@@ -121,7 +123,9 @@ export function projectUnitBounds(unit, view, battlefield, viewportW, viewportH)
 // Compute the card position (`left`, `top`, `maxCardH`, `placedLeft`) plus
 // the effective height used for clamping. `measuredH` is the card's measured
 // rendered height (ResizeObserver); `estimatedH` is the fallback before the
-// first measurement.
+// first measurement. An optional manual position (`manualPos: { x, y }` in
+// viewport pixels, held while the player drags the card) overrides the
+// automatic placement, clamped to the viewport margins.
 export function layoutUnitCard(bounds, options = {}) {
   const viewportW = Number(bounds?.viewportW);
   const viewportH = Number(bounds?.viewportH);
@@ -138,14 +142,25 @@ export function layoutUnitCard(bounds, options = {}) {
   );
   const fitsRight = bounds.maxX + gap + cardW <= viewportW - margin;
   const placedLeft = !fitsRight && bounds.minX - gap - cardW >= margin;
-  const left = placedLeft
+  const autoLeft = placedLeft
     ? bounds.minX - gap - cardW
     : clamp(bounds.maxX + gap, margin, Math.max(margin, viewportW - cardW - margin));
-  const top = clamp(
+  const autoTop = clamp(
     bounds.centerY - effectiveH / 2,
     margin,
     Math.max(margin, viewportH - effectiveH - margin),
   );
+  const manualPos = options?.manualPos;
+  const manualX = Number(manualPos?.x);
+  const manualY = Number(manualPos?.y);
+  const hasManual =
+    manualPos != null && Number.isFinite(manualX) && Number.isFinite(manualY);
+  const left = hasManual
+    ? clamp(manualX, margin, Math.max(margin, viewportW - cardW - margin))
+    : autoLeft;
+  const top = hasManual
+    ? clamp(manualY, margin, Math.max(margin, viewportH - effectiveH - margin))
+    : autoTop;
   return { left, top, maxCardH, placedLeft, effectiveH };
 }
 
