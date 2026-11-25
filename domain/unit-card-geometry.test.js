@@ -8,6 +8,7 @@ import {
   UNIT_CARD_MARGIN,
   anchorUnitCard,
   layoutUnitCard,
+  layoutUnitContextCard,
   projectUnitBounds,
 } from './unit-card-geometry.js';
 
@@ -153,6 +154,74 @@ describe('anchorUnitCard', () => {
       { left: 230, top: 130, cardW: 300, effectiveH: 340 },
     );
     assert.deepEqual(below, { anchorX: 530, anchorY: 470 });
+  });
+});
+
+describe('manualPosition', () => {
+  const bounds = (overrides = {}) => ({
+    unitId: 'u1',
+    centerX: 200,
+    centerY: 300,
+    frontX: 200,
+    frontY: 290,
+    minX: 190,
+    maxX: 210,
+    minY: 290,
+    maxY: 310,
+    radiusPx: 15,
+    viewportW: 800,
+    viewportH: 600,
+    ...overrides,
+  });
+
+  it('honours a manual position inside the viewport', () => {
+    const layout = layoutUnitCard(bounds(), {
+      cardW: 300,
+      measuredH: 0,
+      estimatedH: 340,
+      manualPos: { x: 100, y: 50 },
+    });
+    assert.equal(layout.left, 100);
+    assert.equal(layout.top, 50);
+    assert.equal(layout.effectiveH, 340);
+  });
+
+  it('clamps a manual position to the viewport margins', () => {
+    const layout = layoutUnitCard(bounds(), {
+      cardW: 300,
+      measuredH: 0,
+      estimatedH: 340,
+      manualPos: { x: -500, y: 590 },
+    });
+    assert.equal(layout.left, UNIT_CARD_MARGIN);
+    // 600 - 340 - 12 = 248 is the lowest fully-inside top.
+    assert.equal(layout.top, 600 - 340 - UNIT_CARD_MARGIN);
+    assert.ok(layout.left + 300 <= 800 - UNIT_CARD_MARGIN + 1e-9);
+    assert.ok(layout.top + layout.effectiveH <= 600 - UNIT_CARD_MARGIN + 1e-9);
+  });
+
+  it('clamps a manual position past the right and bottom edges', () => {
+    const layout = layoutUnitCard(bounds(), {
+      cardW: 300,
+      measuredH: 0,
+      estimatedH: 340,
+      manualPos: { x: 900, y: 900 },
+    });
+    assert.equal(layout.left, 800 - 300 - UNIT_CARD_MARGIN);
+    assert.equal(layout.top, 600 - 340 - UNIT_CARD_MARGIN);
+  });
+
+  it('anchors the tether on the moved card perimeter', () => {
+    const placed = layoutUnitContextCard(bounds(), {
+      cardW: 300,
+      measuredH: 0,
+      estimatedH: 340,
+      manualPos: { x: 400, y: 100 },
+    });
+    assert.equal(placed.left, 400);
+    assert.equal(placed.top, 100);
+    // Unit centre (200, 300) is left of the moved card and vertically inside it.
+    assert.deepEqual({ anchorX: placed.anchorX, anchorY: placed.anchorY }, { anchorX: 400, anchorY: 300 });
   });
 });
 
