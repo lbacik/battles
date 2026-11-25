@@ -94,6 +94,28 @@ export async function clickHandoffAndSettle(battlePage) {
   );
 }
 
+// Clicks a map position in metres (y up from the south-west corner) through
+// the SVG's own transform, which accounts for the viewBox and
+// preserveAspectRatio letterboxing: getScreenCTM maps user units to client
+// pixels, so the click lands on the intended map position even when the SVG
+// box has a different aspect ratio than its viewBox. Reads the field height
+// from the battlefield-map SVG's data-height attribute.
+export async function clickMapAt(page, atX, atY) {
+  const svg = page.getByTestId('battlefield-map');
+  const fieldH = Number(await svg.getAttribute('data-height'));
+  const { clientX, clientY } = await svg.evaluate(
+    (el, [ux, uy]) => {
+      const p = el.createSVGPoint();
+      p.x = ux;
+      p.y = uy;
+      const s = p.matrixTransform(el.getScreenCTM());
+      return { clientX: s.x, clientY: s.y };
+    },
+    [atX, fieldH - atY],
+  );
+  await page.mouse.click(clientX, clientY);
+}
+
 // Terrain rows live in the Map editor tab, while the editor reopens on the
 // battle tab. Count them there and return to the battle tab.
 export async function terrainRowCounts(page) {

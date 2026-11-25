@@ -1,7 +1,7 @@
 // issue #84: Move drafting (scripts/e2e.mjs lines 2876-3088).
 // Runs in today's order against the shared run context; the steps
 // below are the steps this section performs today, unchanged.
-import { waitForSave, clickHandoffAndSettle, T_SAVE, T_LOAD, T_BATTLE, SETTLE_MS } from './helpers.mjs';
+import { waitForSave, clickHandoffAndSettle, clickMapAt, T_SAVE, T_LOAD, T_BATTLE, SETTLE_MS } from './helpers.mjs';
 
 export async function runIssue84(ctx) {
   const { page, context, browser, base, check, log } = ctx;
@@ -89,19 +89,6 @@ export async function runIssue84(ctx) {
     ((await movePage.getByTestId('turn-controller').textContent()) ?? '').startsWith('human'),
   );
 
-  // Map metres (y up from the south-west corner) to client pixels through the
-  // live SVG viewBox, so draft legs land on exact points.
-  async function clickBattleMap(atX, atY) {
-    const svg = movePage.getByTestId('battlefield-map');
-    const box = await svg.boundingBox();
-    const viewBox = ((await svg.getAttribute('viewBox')) ?? '0 0 1200 800')
-      .split(/\s+/)
-      .map(Number);
-    const fieldH = Number(await svg.getAttribute('data-height'));
-    const clientX = box.x + ((atX - viewBox[0]) / viewBox[2]) * box.width;
-    const clientY = box.y + ((fieldH - atY - viewBox[1]) / viewBox[3]) * box.height;
-    await movePage.mouse.click(clientX, clientY);
-  }
   await movePage.getByTestId('fit-view').click();
   await movePage.waitForTimeout(SETTLE_MS);
 
@@ -124,7 +111,7 @@ export async function runIssue84(ctx) {
   // An accepted Move: 60 m south, inside the 90 m allowance, shows its ghost.
   await movePage.getByTestId(`start-draft-${id1}`).click();
   await movePage.getByTestId(`draft-editor-${id1}`).waitFor({ timeout: T_SAVE });
-  await clickBattleMap(500, 540);
+  await clickMapAt(movePage, 500, 540);
   await movePage.getByTestId(`draft-accepted-${id1}`).waitFor({ timeout: T_SAVE });
   check('an accepted Move shows its detail', true);
   check(
@@ -136,7 +123,7 @@ export async function runIssue84(ctx) {
   // so the engine rejects it and names the conflict.
   await ownUnits.nth(1).click();
   await movePage.getByTestId(`start-draft-${id2}`).click();
-  await clickBattleMap(500, 540);
+  await clickMapAt(movePage, 500, 540);
   await movePage.getByTestId(`draft-rejection-${id2}`).waitFor({ timeout: T_SAVE });
   const rejectionText = await movePage.getByTestId(`draft-rejection-${id2}`).textContent();
   check(

@@ -1,7 +1,7 @@
 // issue #85: full-orders drafting - Charge, Shoot, Reform, Withdraw (scripts/e2e.mjs lines 3298-3623).
 // Runs in today's order against the shared run context; the steps
 // below are the steps this section performs today, unchanged.
-import { waitForSave, clickHandoffAndSettle, T_SAVE, T_LOAD, T_BATTLE, SETTLE_MS } from './helpers.mjs';
+import { waitForSave, clickHandoffAndSettle, clickMapAt, T_SAVE, T_LOAD, T_BATTLE, SETTLE_MS } from './helpers.mjs';
 
 export async function runIssue85(ctx) {
   const { page, context, browser, base, check, log } = ctx;
@@ -113,19 +113,6 @@ export async function runIssue85(ctx) {
     ((await fullPage.getByTestId('turn-controller').textContent()) ?? '').startsWith('human'),
   );
 
-  // Map metres (y up from the south-west corner) to client pixels through the
-  // live SVG viewBox, so approach and leg points land on exact points.
-  async function clickFullMap(atX, atY) {
-    const svg = fullPage.getByTestId('battlefield-map');
-    const box = await svg.boundingBox();
-    const viewBox = ((await svg.getAttribute('viewBox')) ?? '0 0 1200 800')
-      .split(/\s+/)
-      .map(Number);
-    const fieldH = Number(await svg.getAttribute('data-height'));
-    const clientX = box.x + ((atX - viewBox[0]) / viewBox[2]) * box.width;
-    const clientY = box.y + ((fieldH - atY - viewBox[1]) / viewBox[3]) * box.height;
-    await fullPage.mouse.click(clientX, clientY);
-  }
   await fullPage.getByTestId('fit-view').click();
   await fullPage.waitForTimeout(SETTLE_MS);
 
@@ -184,7 +171,7 @@ export async function runIssue85(ctx) {
     ((await fullPage.getByTestId(`draft-${chargerId}`).textContent()) ?? '').includes('Charge') &&
       (await fullPage.getByTestId('draft-ghost').count()) >= 1,
   );
-  await clickFullMap(600, 620);
+  await clickMapAt(fullPage, 600, 620);
   await fullPage.waitForTimeout(SETTLE_MS);
   check(
     'an approach leg keeps the Charge accepted',
@@ -249,11 +236,11 @@ export async function runIssue85(ctx) {
   // first unit's destination, so the engine rejects it and names the conflict.
   await fullOwn.nth(0).click();
   await fullPage.getByTestId(`start-draft-${mover1Id}`).click();
-  await clickFullMap(400, 560);
+  await clickMapAt(fullPage, 400, 560);
   await fullPage.getByTestId(`draft-accepted-${mover1Id}`).waitFor({ timeout: T_SAVE });
   await fullOwn.nth(1).click();
   await fullPage.getByTestId(`start-draft-${mover2Id}`).click();
-  await clickFullMap(400, 560);
+  await clickMapAt(fullPage, 400, 560);
   await fullPage.getByTestId(`draft-rejection-${mover2Id}`).waitFor({ timeout: T_SAVE });
   check(
     'a colliding Move is rejected inline with its conflict',

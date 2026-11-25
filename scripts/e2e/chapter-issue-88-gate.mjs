@@ -1,7 +1,7 @@
 // issue #88: local battle gate on a fixed setup seed (scripts/e2e.mjs lines 3836-4300).
 // Runs in today's order against the shared run context; the steps
 // below are the steps this section performs today, unchanged.
-import { waitForSave, clickHandoffAndSettle, T_SAVE, T_LOAD, T_BATTLE, SETTLE_MS } from './helpers.mjs';
+import { waitForSave, clickHandoffAndSettle, clickMapAt, T_SAVE, T_LOAD, T_BATTLE, SETTLE_MS } from './helpers.mjs';
 import { reportDir } from './helpers.mjs';
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -207,19 +207,6 @@ export async function runIssue88Gate(ctx) {
     ((await gatePage.getByTestId('turn-controller').textContent()) ?? '').startsWith('human'),
   );
 
-  // Map metres (y up from the south-west corner) to client pixels through the
-  // live SVG viewBox, so draft legs land on exact points.
-  async function clickGateMap(atX, atY) {
-    const svg = gatePage.getByTestId('battlefield-map');
-    const box = await svg.boundingBox();
-    const viewBox = ((await svg.getAttribute('viewBox')) ?? '0 0 1200 800')
-      .split(/\s+/)
-      .map(Number);
-    const fieldH = Number(await svg.getAttribute('data-height'));
-    const clientX = box.x + ((atX - viewBox[0]) / viewBox[2]) * box.width;
-    const clientY = box.y + ((fieldH - atY - viewBox[1]) / viewBox[3]) * box.height;
-    await gatePage.mouse.click(clientX, clientY);
-  }
   await gatePage.getByTestId('fit-view').click();
   await gatePage.waitForTimeout(SETTLE_MS);
 
@@ -239,7 +226,7 @@ export async function runIssue88Gate(ctx) {
   // names the conflict.
   await gateOwn.filter({ hasText: 'Gate mover one' }).click();
   await gatePage.getByTestId(`start-draft-${gateMoverOne}`).click();
-  await clickGateMap(400, 560);
+  await clickMapAt(gatePage, 400, 560);
   await gatePage.getByTestId(`draft-accepted-${gateMoverOne}`).waitFor({ timeout: T_SAVE });
   check(
     'gate: a Move drafts with its ghost',
@@ -257,7 +244,7 @@ export async function runIssue88Gate(ctx) {
   // bill the doubled sideways rate and overrun the allowance once reordered).
   await gateOwn.filter({ hasText: 'Gate mover two' }).click();
   await gatePage.getByTestId(`start-draft-${gateMoverTwo}`).click();
-  await clickGateMap(410, 560);
+  await clickMapAt(gatePage, 410, 560);
   await gatePage.getByTestId(`draft-rejection-${gateMoverTwo}`).waitFor({ timeout: T_SAVE });
   const gateCollision = await gatePage.getByTestId(`draft-rejection-${gateMoverTwo}`).textContent();
   check(
