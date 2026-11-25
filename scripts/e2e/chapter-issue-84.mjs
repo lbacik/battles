@@ -1,7 +1,7 @@
 // issue #84: Move drafting (scripts/e2e.mjs lines 2876-3088).
 // Runs in today's order against the shared run context; the steps
 // below are the steps this section performs today, unchanged.
-import { waitForSave, clickHandoffAndSettle, T_SAVE, T_LOAD, T_BATTLE, SETTLE_MS } from './helpers.mjs';
+import { waitForSave, reachHumanTurn, T_SAVE, T_LOAD, T_BATTLE, SETTLE_MS } from './helpers.mjs';
 
 export async function runIssue84(ctx) {
   const { page, context, browser, base, check, log } = ctx;
@@ -59,31 +59,10 @@ export async function runIssue84(ctx) {
 
   // Reach the human turn: the starting side is seed-drawn, so resolve the
   // automated side first when it starts. Every resolution ends behind the
-  // device handoff, which is what unlocks drafting. Handoff presses wait
-  // for a *changed* handoff, drafting controls, or the outcome — never for
-  // the transient gap and never for a merely present handoff (issue #137).
-  for (let step = 0; step < 4; step += 1) {
-    if ((await movePage.getByTestId('battle-outcome').count()) > 0) break;
-    const controller = (await movePage.getByTestId('turn-controller').textContent()) ?? '';
-    if (controller.startsWith('human')) break;
-    if ((await movePage.getByTestId('handoff').count()) > 0) {
-      await clickHandoffAndSettle(movePage);
-    } else {
-      const turnBefore = await movePage.getByTestId('round').textContent();
-      await movePage.getByTestId('continue-turn').click();
-      await movePage.waitForFunction(
-        (expected) =>
-          document.querySelector('[data-testid="round"]')?.textContent !== expected ||
-          document.querySelector('[data-testid="handoff"]') ||
-          document.querySelector('[data-testid="battle-outcome"]'),
-        turnBefore,
-        { timeout: T_BATTLE },
-      );
-    }
-  }
-  if ((await movePage.getByTestId('handoff').count()) > 0) {
-    await clickHandoffAndSettle(movePage);
-  }
+  // device handoff, which is what unlocks drafting. The shared helper waits
+  // for a settled state first and never assumes whether the automated side
+  // is still waiting or has already resolved (issue #157).
+  await reachHumanTurn(movePage);
   check(
     'move drafting starts on the human turn',
     ((await movePage.getByTestId('turn-controller').textContent()) ?? '').startsWith('human'),
