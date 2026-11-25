@@ -1,7 +1,7 @@
 // issue #88: local battle gate on a fixed setup seed (scripts/e2e.mjs lines 3836-4300).
 // Runs in today's order against the shared run context; the steps
 // below are the steps this section performs today, unchanged.
-import { waitForSave, clickHandoffAndSettle, T_SAVE, T_LOAD, T_BATTLE, SETTLE_MS } from './helpers.mjs';
+import { waitForSave, reachHumanTurn, T_SAVE, T_LOAD, T_BATTLE, SETTLE_MS } from './helpers.mjs';
 import { reportDir } from './helpers.mjs';
 import { writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -179,29 +179,10 @@ export async function runIssue88Gate(ctx) {
 
   // Reach the human turn: the starting side is seed-drawn, so resolve the
   // automated side first when it starts. Every resolution ends behind the
-  // device handoff, which is what unlocks drafting.
-  for (let step = 0; step < 4; step += 1) {
-    if ((await gatePage.getByTestId('battle-outcome').count()) > 0) break;
-    const controller = (await gatePage.getByTestId('turn-controller').textContent()) ?? '';
-    if (controller.startsWith('human')) break;
-    if ((await gatePage.getByTestId('handoff').count()) > 0) {
-      await clickHandoffAndSettle(gatePage);
-    } else {
-      const gateTurnBefore = await gatePage.getByTestId('round').textContent();
-      await gatePage.getByTestId('continue-turn').click();
-      await gatePage.waitForFunction(
-        (expected) =>
-          document.querySelector('[data-testid="round"]')?.textContent !== expected ||
-          document.querySelector('[data-testid="handoff"]') ||
-          document.querySelector('[data-testid="battle-outcome"]'),
-        gateTurnBefore,
-        { timeout: T_BATTLE },
-      );
-    }
-  }
-  if ((await gatePage.getByTestId('handoff').count()) > 0) {
-    await clickHandoffAndSettle(gatePage);
-  }
+  // device handoff, which is what unlocks drafting. The shared helper waits
+  // for a settled state first and never assumes whether the automated side
+  // is still waiting or has already resolved (issue #157).
+  await reachHumanTurn(gatePage);
   check(
     'gate: drafting starts on the human turn',
     ((await gatePage.getByTestId('turn-controller').textContent()) ?? '').startsWith('human'),
@@ -376,18 +357,11 @@ export async function runIssue88Gate(ctx) {
   // Step 7: play on to a concession. Behind the handoff it is nobody's turn,
   // so press through it (resolving the passive side when it is up) until the
   // human side is up, then concede with confirmation.
-  for (let step = 0; step < 8; step += 1) {
-    if ((await gatePage.getByTestId('battle-outcome').count()) > 0) break;
-    if ((await gatePage.getByTestId('handoff').count()) > 0) {
-      await clickHandoffAndSettle(gatePage);
-      continue;
-    }
-    if ((await gatePage.getByTestId('battle-outcome').count()) > 0) break;
-    const controller = (await gatePage.getByTestId('turn-controller').textContent()) ?? '';
-    if (controller.startsWith('human')) break;
-    await gatePage.getByTestId('continue-turn').click();
-    await gatePage.getByTestId('handoff').waitFor({ timeout: T_BATTLE });
-  }
+  // Behind the handoff it is nobody's turn: press through it (resolving the
+  // passive side when it is up) until unlocked human drafting is showing.
+  // The shared helper never presses the transient disabled Continue and
+  // never returns on a locked human handoff (issue #157).
+  await reachHumanTurn(gatePage, 12);
   check(
     'gate: the human side is up to concede',
     ((await gatePage.getByTestId('turn-controller').textContent()) ?? '').startsWith('human'),

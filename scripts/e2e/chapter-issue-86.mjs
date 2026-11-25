@@ -89,11 +89,22 @@ export async function runIssue86(ctx) {
     const handoffBefore = (await combatPage.getByTestId('handoff').count()) > 0;
     const controller = (await combatPage.getByTestId('turn-controller').textContent()) ?? '';
     if (handoffBefore) {
-      await combatPage.getByTestId('handoff').click();
+      await clickHandoffAndSettle(combatPage);
     }
     if (!controller.startsWith('human')) {
       if (!handoffBefore) {
-        await combatPage.getByTestId('continue-turn').click();
+        // The settled automated first turn is the only place Continue is
+        // pressed: it is stable until pressed, so an enabled guard plus the
+        // default 60 s wait covers slow first paints without ever touching
+        // the transient disabled Continue while a handoff resolution is in
+        // flight (issue #157).
+        await combatPage.getByTestId('continue-turn').waitFor({ timeout: T_BATTLE });
+        if ((await combatPage.getByTestId('handoff').count()) > 0) {
+          // A handoff appeared while waiting: the turn already resolved
+          // behind it, so there is no settled Continue to press (issue #157).
+        } else if (await combatPage.getByTestId('continue-turn').isEnabled()) {
+          await combatPage.getByTestId('continue-turn').click();
+        }
       }
       await outcomeWait();
       await combatPage.waitForFunction(

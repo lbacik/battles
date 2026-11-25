@@ -96,6 +96,7 @@ export async function runIssue87End(ctx) {
         (previous) => {
           if (document.querySelector('[data-testid="battle-outcome"]')) return true;
           if (document.querySelector('[data-testid="commit-empty"]')) return true;
+          if (document.querySelector('[data-testid="commit-draft"]')) return true;
           const handoff = document.querySelector('[data-testid="handoff"]');
           return !!handoff && handoff.textContent !== previous;
         },
@@ -106,7 +107,17 @@ export async function runIssue87End(ctx) {
     }
     const endController = (await endPage.getByTestId('turn-controller').textContent()) ?? '';
     if (!endController.startsWith('human')) {
-      await endPage.getByTestId('continue-turn').click();
+      // The settled automated first turn is the only place Continue is
+      // pressed: guard the press and re-check for a handoff that may have
+      // appeared while waiting, so a resolved turn behind its handoff is
+      // never missed for a 60 s wait on a gone Continue (issue #157).
+      await endPage.getByTestId('continue-turn').waitFor({ timeout: T_BATTLE });
+      if ((await endPage.getByTestId('handoff').count()) > 0) {
+        return true;
+      }
+      if (await endPage.getByTestId('continue-turn').isEnabled()) {
+        await endPage.getByTestId('continue-turn').click();
+      }
       await endPage.waitForFunction(
         () =>
           document.querySelector('[data-testid="handoff"]') ||
