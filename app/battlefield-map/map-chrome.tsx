@@ -17,6 +17,29 @@ import {
 import { LINEAR_LABELS } from './svg-helpers';
 import { UnitCardReform } from './unit-card-reform';
 
+// The engine's acceptance summary for the card footer's single verdict line.
+function acceptedSummary(verdict: any, displayName?: (unitId: string) => string): string {
+  if (verdict?.movement && Number.isFinite(verdict.movement.requiredM)) {
+    return `Accepted · needs ${verdict.movement.requiredM} m of ${verdict.movement.availableM} m.`;
+  }
+  if (verdict?.charge) {
+    return `Accepted · ${verdict.charge.aspect} contact, ${verdict.charge.frontageM} m, ${verdict.charge.fightingFiles} files.`;
+  }
+  if (verdict?.shoot) {
+    return `Accepted · ${verdict.shoot.distanceM} m to ${displayName?.(verdict.shoot.targetId) ?? verdict.shoot.targetId}.`;
+  }
+  if (verdict?.reform) {
+    return `Accepted · ${verdict.reform.files} files · ${verdict.reform.lateralInterval}×${verdict.reform.rankDepth} m.`;
+  }
+  if (verdict?.withdraw) {
+    return `Accepted · steps back ${verdict.withdraw.distanceM} m.`;
+  }
+  if (verdict?.rally) {
+    return `Accepted · rallies from ${verdict.rally.state}.`;
+  }
+  return 'Accepted.';
+}
+
 // Map chrome (unit context card overlay, terrain hint, tool rails, scale bar
 // and zoom controls). Verbatim move from ../battlefield-map: markup,
 // data-testid attributes, class names and event handling are unchanged, and
@@ -300,6 +323,140 @@ export function MapChrome(props: MapChromeProps) {
                 ) : null}
                 {cardOrders ? (
                   <>
+                    <div
+                      className="unit-card-orders"
+                      aria-label="Order actions"
+                      data-testid={`unit-card-orders-${cardOrders.unitId}`}
+                    >
+                      <span className="field-label">Orders</span>
+                      <div className="handoff-actions">
+                        {['Move', 'Charge', 'Shoot', 'Reform', 'Withdraw', 'Rally'].map((kind: string) => {
+                          const permitted: string[] = cardOrders.permitted || [];
+                          const unavailable: any[] = cardOrders.unavailable || [];
+                          const chargeCandidates: any[] = cardOrders.chargeCandidates || [];
+                          const shootCandidates: any[] = cardOrders.shootCandidates || [];
+                          const isPermitted = permitted.includes(kind);
+                          const noCandidates =
+                            (kind === 'Charge' && chargeCandidates.length === 0) ||
+                            (kind === 'Shoot' && shootCandidates.length === 0);
+                          const disabled = !isPermitted || noCandidates;
+                          const reason: string | null =
+                            (unavailable.find((entry: any) => entry?.kind === kind)?.reason as string) ||
+                            (noCandidates && isPermitted
+                              ? 'No reachable target.'
+                              : !isPermitted
+                                ? 'Not permitted for this unit.'
+                                : null);
+                          const active = cardOrders.draft?.kind === kind;
+                          return (
+                            <button
+                              key={kind}
+                              type="button"
+                              className={active ? 'btn-secondary active' : 'btn-secondary'}
+                              data-testid={`unit-card-order-${kind.toLowerCase()}-${cardOrders.unitId}`}
+                              disabled={disabled}
+                              title={reason || kind}
+                              aria-pressed={active}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                cardOrders.onSelectKind?.(kind);
+                              }}
+                            >
+                              {kind}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {(cardOrders.unavailable || []).length > 0 ||
+                      ((cardOrders.permitted || []).includes('Charge') &&
+                        (cardOrders.chargeCandidates || []).length === 0) ||
+                      ((cardOrders.permitted || []).includes('Shoot') &&
+                        (cardOrders.shootCandidates || []).length === 0) ? (
+                        <ul
+                          className="unavailable"
+                          data-testid={`unit-card-unavailable-${cardOrders.unitId}`}
+                        >
+                          {['Move', 'Charge', 'Shoot', 'Reform', 'Withdraw', 'Rally']
+                            .filter((kind: string) => {
+                              const permitted: string[] = cardOrders.permitted || [];
+                              const isPermitted = permitted.includes(kind);
+                              const noCandidates =
+                                (kind === 'Charge' &&
+                                  (cardOrders.chargeCandidates || []).length === 0) ||
+                                (kind === 'Shoot' &&
+                                  (cardOrders.shootCandidates || []).length === 0);
+                              return !isPermitted || noCandidates;
+                            })
+                            .map((kind: string) => {
+                              const unavailable: any[] = cardOrders.unavailable || [];
+                              const isPermitted: boolean = (cardOrders.permitted || []).includes(kind);
+                              const noCandidates =
+                                (kind === 'Charge' &&
+                                  (cardOrders.chargeCandidates || []).length === 0) ||
+                                (kind === 'Shoot' &&
+                                  (cardOrders.shootCandidates || []).length === 0);
+                              const reason: string =
+                                unavailable.find((entry: any) => entry?.kind === kind)?.reason ||
+                                (noCandidates && isPermitted
+                                  ? 'No reachable target.'
+                                  : 'Not permitted for this unit.');
+                              return (
+                                <li
+                                  key={kind}
+                                  data-testid={`unit-card-order-reason-${kind.toLowerCase()}-${cardOrders.unitId}`}
+                                >
+                                  <strong>{kind}</strong> — {reason}
+                                </li>
+                              );
+                            })}
+                        </ul>
+                      ) : null}
+                      {(cardOrders.permitted || []).includes('Charge') &&
+                      (cardOrders.chargeCandidates || []).length === 0 ? (
+                        <p
+                          className="draft-hint"
+                          data-testid={`unit-card-no-target-charge-${cardOrders.unitId}`}
+                        >
+                          No reachable target.
+                        </p>
+                      ) : null}
+                      {(cardOrders.permitted || []).includes('Shoot') &&
+                      (cardOrders.shootCandidates || []).length === 0 ? (
+                        <p
+                          className="draft-hint"
+                          data-testid={`unit-card-no-target-shoot-${cardOrders.unitId}`}
+                        >
+                          No reachable target.
+                        </p>
+                      ) : null}
+                      {cardOrders.draft ? (
+                        <div data-testid={`unit-card-draft-${cardOrders.unitId}`}>
+                          {/* The verdict itself is shown once, in the card footer. */}
+                          {cardOrders.draftVerdict?.accepted !== true &&
+                          cardOrders.draftVerdict?.accepted !== false ? (
+                            <p
+                              className="draft-pending"
+                              data-testid={`unit-card-pending-${cardOrders.unitId}`}
+                            >
+                              Validating…
+                            </p>
+                          ) : null}
+                          <div className="draft-actions">
+                            <button
+                              type="button"
+                              className="btn-quiet btn-danger"
+                              data-testid={`unit-card-hold-${cardOrders.unitId}`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                cardOrders.onClearDraft?.();
+                              }}
+                            >
+                              Hold (Clear)
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
                     {(cardOrders.permitted || []).includes('Charge') &&
                     (cardOrders.chargeCandidates || []).length > 0 ? (
                       <div
@@ -498,7 +655,7 @@ export function MapChrome(props: MapChromeProps) {
                         className="draft-ok"
                         data-testid={`unit-card-accepted-${cardOrders.unitId}`}
                       >
-                        Accepted
+                        {acceptedSummary(cardOrders.draftVerdict, cardOrders.displayName)}
                       </p>
                     ) : cardOrders?.draftVerdict?.accepted === false &&
                       cardOrders?.draftVerdict?.rejection ? (

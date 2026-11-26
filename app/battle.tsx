@@ -385,10 +385,20 @@ export default function BattleScreen({
                     orders: {
                       unitId: selectedUnit.id,
                       permitted: permittedKindsOf(selectedUnit.id),
+                      unavailable: selectedEntry?.unavailable || [],
                       chargeCandidates: chargeCandidatesOf(selectedUnit.id),
                       shootCandidates: shootCandidatesOf(selectedUnit.id),
                       draft: draftForUnit(selectedUnit.id),
                       displayName: unitDisplayName,
+                      onSelectKind: (kind: string) => {
+                        if (kind === 'Move') startMoveDraft(selectedUnit.id);
+                        else if (kind === 'Charge') startChargeDraft(selectedUnit.id);
+                        else if (kind === 'Shoot') startShootDraft(selectedUnit.id);
+                        else if (kind === 'Reform') startReformDraft(selectedUnit.id);
+                        else if (kind === 'Withdraw') startWithdrawDraft(selectedUnit.id);
+                        else if (kind === 'Rally') startRallyDraft(selectedUnit.id);
+                      },
+                      onClearDraft: () => removeDraft(selectedUnit.id),
                       draftIndex: cardDraftIndex,
                       draftCount: drafts.length,
                       draftVerdict: cardDraftVerdict,
