@@ -5,10 +5,10 @@ import { REFORM_FILE_STEPS, reformRanksFor } from '../turn-draft-helpers';
 export interface UnitCardReformProps {
   unit: any;
   draft: any | null;
-  verdict: any | null;
+  verdict?: any | null;
   presets: Record<string, any> | null;
-  permitted: string[];
-  onStartReformDraft: (unitId: string) => void;
+  permitted?: string[];
+  onStartReformDraft?: (unitId: string) => void;
   onApplyReformPreset: (unitId: string, preset: string) => void;
   onStepReformFiles: (unitId: string, delta: number) => void;
 }
@@ -21,55 +21,26 @@ function stepLabel(delta: number): string {
   return delta < 0 ? `${delta}` : `+${delta}`;
 }
 
-function acceptedDetail(verdict: any): string {
-  if (verdict?.reform && Number.isFinite(verdict.reform.files)) {
-    const lateral = verdict.reform.lateralInterval;
-    const depth = verdict.reform.rankDepth;
-    if (Number.isFinite(lateral) && Number.isFinite(depth)) {
-      return `Accepted · ${verdict.reform.files} files · ${lateral}×${depth} m.`;
-    }
-    return `Accepted · ${verdict.reform.files} files.`;
-  }
-  return 'Accepted.';
-}
-
 // Reform drafting from the unit context card (issue #128): the same Reform
 // draft the inspector edits, driven with one-click spacing presets from the
 // troop type's catalogue, quick file-count steppers, and a live files ×
 // ranks readout. The ghost footprint on the map and the engine verdict update
 // after every click through the shared turn-draft controller.
+//
+// Battle screen (issue #166): the card has one Reform entry point and one
+// verdict. Drafts start only from the order-kind button row, and the draft's
+// verdict appears once in the card footer, so this section renders nothing
+// without a Reform draft and never renders a verdict or a pending line —
+// only the readout, steppers and presets.
 export function UnitCardReform(props: UnitCardReformProps) {
-  const { unit, draft, verdict, presets, permitted } = props;
-  const { onStartReformDraft, onApplyReformPreset, onStepReformFiles } = props;
+  const { unit, draft, presets } = props;
+  const { onApplyReformPreset, onStepReformFiles } = props;
   if (!unit) return null;
   const unitId = String(unit?.id ?? '');
-  const isReform = draft?.kind === 'Reform';
-  const canStart = !draft && (permitted || []).includes('Reform');
-
-  if (!isReform) {
-    if (!canStart) return null;
-    return (
-      <div className="unit-card-reform" data-testid={`card-reform-${unitId}`}>
-        <button
-          type="button"
-          className="btn-secondary"
-          data-testid={`card-start-reform-${unitId}`}
-          onClick={(event) => {
-            event.stopPropagation();
-            onStartReformDraft(unitId);
-          }}
-        >
-          Draft Reform
-        </button>
-      </div>
-    );
-  }
+  if (draft?.kind !== 'Reform') return null;
 
   const ranks = reformRanksFor(unit?.soldiers, draft.files);
   const readout = ranks != null ? `${draft.files} × ${ranks}` : '—';
-  const rejected = verdict?.accepted === false;
-  const accepted = verdict?.accepted === true;
-  const rejectionMessage = rejected ? String(verdict?.rejection?.message || 'Rejected.') : '';
 
   return (
     <div className="unit-card-reform" data-testid={`card-reform-${unitId}`}>
@@ -119,19 +90,6 @@ export function UnitCardReform(props: UnitCardReformProps) {
           )}
         </div>
       </div>
-      {rejected ? (
-        <p className="field-error" role="alert" data-testid={`card-draft-rejection-${unitId}`}>
-          {rejectionMessage}
-        </p>
-      ) : accepted ? (
-        <p className="draft-ok" data-testid={`card-draft-accepted-${unitId}`}>
-          {acceptedDetail(verdict)}
-        </p>
-      ) : (
-        <p className="draft-pending" data-testid={`card-draft-pending-${unitId}`}>
-          Validating…
-        </p>
-      )}
     </div>
   );
 }

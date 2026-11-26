@@ -30,7 +30,14 @@ function acceptedSummary(verdict: any, displayName?: (unitId: string) => string)
     return `Accepted · ${verdict.shoot.distanceM} m to ${displayName?.(verdict.shoot.targetId) ?? verdict.shoot.targetId}.`;
   }
   if (verdict?.reform) {
-    return `Accepted · ${verdict.reform.files} files · ${verdict.reform.lateralInterval}×${verdict.reform.rankDepth} m.`;
+    if (Number.isFinite(verdict.reform.files)) {
+      const lateral = verdict.reform.lateralInterval;
+      const depth = verdict.reform.rankDepth;
+      if (Number.isFinite(lateral) && Number.isFinite(depth)) {
+        return `Accepted · ${verdict.reform.files} files · ${lateral}×${depth} m.`;
+      }
+      return `Accepted · ${verdict.reform.files} files.`;
+    }
   }
   if (verdict?.withdraw) {
     return `Accepted · steps back ${verdict.withdraw.distanceM} m.`;
