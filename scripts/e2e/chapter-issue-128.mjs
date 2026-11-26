@@ -84,12 +84,12 @@ export async function runIssue128(ctx) {
     await cardPage.getByTestId('unit-context-card').isVisible(),
   );
   check(
-    'card offers a Draft Reform start',
-    await cardPage.getByTestId(`card-start-reform-${reformerId}`).isVisible(),
+    'card offers a Reform order start',
+    await cardPage.getByTestId(`unit-card-order-reform-${reformerId}`).isVisible(),
   );
 
-  // Draft the Reform from the card (not the inspector).
-  await cardPage.getByTestId(`card-start-reform-${reformerId}`).click();
+  // Draft the Reform from the card order buttons (not the inspector).
+  await cardPage.getByTestId(`unit-card-order-reform-${reformerId}`).click();
   await cardPage.getByTestId(`card-reform-${reformerId}`).waitFor({ timeout: T_SAVE });
   const cardReadoutBefore = await cardPage.getByTestId(`card-reform-readout-${reformerId}`).textContent();
   const filesBefore = Number((cardReadoutBefore ?? '').split('×')[0].replace(/[^0-9]/g, ''));
@@ -106,8 +106,8 @@ export async function runIssue128(ctx) {
     (inspectorReadoutBefore ?? '').trim() === (cardReadoutBefore ?? '').trim(),
     `card=${(cardReadoutBefore ?? '').trim()} inspector=${(inspectorReadoutBefore ?? '').trim()}`,
   );
-  await cardPage.getByTestId(`card-draft-accepted-${reformerId}`).waitFor({ timeout: T_SAVE });
-  const verdictBefore = await cardPage.getByTestId(`card-draft-accepted-${reformerId}`).textContent();
+  await cardPage.getByTestId(`unit-card-accepted-${reformerId}`).waitFor({ timeout: T_SAVE });
+  const verdictBefore = await cardPage.getByTestId(`unit-card-accepted-${reformerId}`).textContent();
   check(
     'card Reform validates with a ghost and an accepted verdict',
     new RegExp(`${filesBefore} files`).test(verdictBefore ?? '') && (await cardPage.getByTestId('draft-ghost').count()) >= 1,
@@ -119,7 +119,7 @@ export async function runIssue128(ctx) {
   await cardPage.waitForTimeout(SETTLE_MS);
   check(
     'a catalogue preset from the card keeps the Reform accepted',
-    await cardPage.getByTestId(`card-draft-accepted-${reformerId}`).isVisible(),
+    await cardPage.getByTestId(`unit-card-accepted-${reformerId}`).isVisible(),
   );
 
   // Stepping files from the card updates the readout and the verdict.
@@ -138,7 +138,7 @@ export async function runIssue128(ctx) {
     (inspectorReadoutAfter ?? '').trim() === (cardReadoutAfter ?? '').trim(),
     `card=${(cardReadoutAfter ?? '').trim()} inspector=${(inspectorReadoutAfter ?? '').trim()}`,
   );
-  const verdictAfter = await cardPage.getByTestId(`card-draft-accepted-${reformerId}`).textContent();
+  const verdictAfter = await cardPage.getByTestId(`unit-card-accepted-${reformerId}`).textContent();
   check(
     'stepping files from the card updates the verdict',
     new RegExp(`${filesAfter} files`).test(verdictAfter ?? '') && (verdictBefore ?? '').trim() !== (verdictAfter ?? '').trim(),
@@ -148,8 +148,8 @@ export async function runIssue128(ctx) {
   // A rejected Reform from the shared draft shows the engine's message on
   // both surfaces.
   await cardPage.getByTestId(`reform-files-${reformerId}`).fill('0');
-  await cardPage.getByTestId(`card-draft-rejection-${reformerId}`).waitFor({ timeout: T_SAVE });
-  const cardRejection = await cardPage.getByTestId(`card-draft-rejection-${reformerId}`).textContent();
+  await cardPage.getByTestId(`unit-card-rejection-${reformerId}`).waitFor({ timeout: T_SAVE });
+  const cardRejection = await cardPage.getByTestId(`unit-card-rejection-${reformerId}`).textContent();
   const inspectorRejection = await cardPage.getByTestId(`draft-rejection-${reformerId}`).textContent();
   check(
     'a rejected Reform shows the engine message on the card',
