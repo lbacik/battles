@@ -149,7 +149,7 @@ export function createDraftEditor(deps: DraftEditorDeps) {
             >
               {candidates.map((candidate: any) => (
                 <option key={candidate.targetId} value={candidate.targetId}>
-                  {unitDisplayName(candidate.targetId)} · {candidate.distanceM} m
+                  {unitDisplayName(candidate.targetId)} · {candidate.distanceM} m · {candidate.aspect} ({candidate.edge})
                 </option>
               ))}
             </select>

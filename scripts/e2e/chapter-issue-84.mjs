@@ -77,6 +77,10 @@ export async function runIssue84(ctx) {
   const id1 = await ownUnits.nth(0).getAttribute('data-unit-id');
   const id2 = await ownUnits.nth(1).getAttribute('data-unit-id');
   await ownUnits.nth(0).click();
+  // The unit card floats over the map and now drafts Charge and Shoot orders
+  // from its candidate buttons (issue #127): minimize it so the intended map
+  // clicks below land on the map instead of the card.
+  await movePage.getByTestId('unit-card-minimize').click();
   check(
     'inspector shows the engine Move permission and 90 m allowance',
     ((await movePage.getByTestId('battle-unit-permitted').textContent()) ?? '').includes('Move') &&
@@ -101,6 +105,7 @@ export async function runIssue84(ctx) {
   // A colliding Move: the second unit ends on the first unit's destination,
   // so the engine rejects it and names the conflict.
   await ownUnits.nth(1).click();
+  await movePage.getByTestId('unit-card-minimize').click();
   await movePage.getByTestId(`start-draft-${id2}`).click();
   await clickMapAt(movePage, 500, 540);
   await movePage.getByTestId(`draft-rejection-${id2}`).waitFor({ timeout: T_SAVE });

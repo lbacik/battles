@@ -371,6 +371,41 @@ export default function BattleScreen({
                 ? {
                     unit: selectedUnit,
                     movementAllowanceM: selectedEntry?.movementAllowanceM,
+                    orders: {
+                      unitId: selectedUnit.id,
+                      permitted: permittedKindsOf(selectedUnit.id),
+                      chargeCandidates: chargeCandidatesOf(selectedUnit.id),
+                      shootCandidates: shootCandidatesOf(selectedUnit.id),
+                      draft: draftForUnit(selectedUnit.id),
+                      displayName: unitDisplayName,
+                      onPickChargeTarget: (targetId: string) => {
+                        const candidates = chargeCandidatesOf(selectedUnit.id);
+                        const chosen = candidates.find(
+                          (candidate: any) => String(candidate.targetId) === String(targetId),
+                        );
+                        if (!chosen) return;
+                        if (draftForUnit(selectedUnit.id)?.kind === 'Charge') {
+                          setChargeTarget(selectedUnit.id, chosen.targetId, chosen.edge);
+                        } else {
+                          startChargeDraft(selectedUnit.id, chosen.targetId, chosen.edge);
+                        }
+                      },
+                      onChargeEdge: (edge: string) => setChargeEdge(selectedUnit.id, edge),
+                      onPickShootTarget: (targetId: string) => {
+                        const candidates = shootCandidatesOf(selectedUnit.id);
+                        const chosen = candidates.find(
+                          (candidate: any) => String(candidate.targetId) === String(targetId),
+                        );
+                        if (!chosen) return;
+                        if (draftForUnit(selectedUnit.id)?.kind === 'Shoot') {
+                          setShootTarget(selectedUnit.id, chosen.targetId);
+                        } else {
+                          startShootDraft(selectedUnit.id, chosen.targetId);
+                        }
+                      },
+                      onUndoApproach: () => removeLastApproachLeg(selectedUnit.id),
+                      onClearApproach: () => clearApproachLegs(selectedUnit.id),
+                    },
                   }
                 : null
             }
