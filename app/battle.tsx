@@ -389,12 +389,6 @@ export default function BattleScreen({
                       chargeCandidates: chargeCandidatesOf(selectedUnit.id),
                       shootCandidates: shootCandidatesOf(selectedUnit.id),
                       draft: draftForUnit(selectedUnit.id),
-                      verdict: (() => {
-                        const idx = drafts.findIndex(
-                          (entry: any) => entry?.unitId === selectedUnit.id,
-                        );
-                        return idx >= 0 ? verdictForDraftIndex(idx) : null;
-                      })(),
                       displayName: unitDisplayName,
                       onSelectKind: (kind: string) => {
                         if (kind === 'Move') startMoveDraft(selectedUnit.id);

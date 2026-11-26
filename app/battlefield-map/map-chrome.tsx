@@ -17,6 +17,29 @@ import {
 import { LINEAR_LABELS } from './svg-helpers';
 import { UnitCardReform } from './unit-card-reform';
 
+// The engine's acceptance summary for the card footer's single verdict line.
+function acceptedSummary(verdict: any, displayName?: (unitId: string) => string): string {
+  if (verdict?.movement && Number.isFinite(verdict.movement.requiredM)) {
+    return `Accepted · needs ${verdict.movement.requiredM} m of ${verdict.movement.availableM} m.`;
+  }
+  if (verdict?.charge) {
+    return `Accepted · ${verdict.charge.aspect} contact, ${verdict.charge.frontageM} m, ${verdict.charge.fightingFiles} files.`;
+  }
+  if (verdict?.shoot) {
+    return `Accepted · ${verdict.shoot.distanceM} m to ${displayName?.(verdict.shoot.targetId) ?? verdict.shoot.targetId}.`;
+  }
+  if (verdict?.reform) {
+    return `Accepted · ${verdict.reform.files} files · ${verdict.reform.lateralInterval}×${verdict.reform.rankDepth} m.`;
+  }
+  if (verdict?.withdraw) {
+    return `Accepted · steps back ${verdict.withdraw.distanceM} m.`;
+  }
+  if (verdict?.rally) {
+    return `Accepted · rallies from ${verdict.rally.state}.`;
+  }
+  return 'Accepted.';
+}
+
 // Map chrome (unit context card overlay, terrain hint, tool rails, scale bar
 // and zoom controls). Verbatim move from ../battlefield-map: markup,
 // data-testid attributes, class names and event handling are unchanged, and
@@ -407,54 +430,17 @@ export function MapChrome(props: MapChromeProps) {
                         </p>
                       ) : null}
                       {cardOrders.draft ? (
-                        <div data-testid={`unit-card-verdict-${cardOrders.unitId}`}>
-                          {cardOrders.verdict?.accepted === false ? (
-                            <p
-                              className="field-error"
-                              role="alert"
-                              data-testid={`unit-card-rejected-${cardOrders.unitId}`}
-                            >
-                              {cardOrders.verdict.rejection.message}
-                            </p>
-                          ) : cardOrders.verdict?.accepted === true ? (
-                            <p
-                              className="draft-ok"
-                              data-testid={`unit-card-accepted-${cardOrders.unitId}`}
-                            >
-                              {(() => {
-                                const verdict: any = cardOrders.verdict;
-                                if (
-                                  verdict?.movement &&
-                                  Number.isFinite(verdict.movement.requiredM)
-                                ) {
-                                  return `Accepted · needs ${verdict.movement.requiredM} m of ${verdict.movement.availableM} m.`;
-                                }
-                                if (verdict?.charge) {
-                                  return `Accepted · ${verdict.charge.aspect} contact, ${verdict.charge.frontageM} m, ${verdict.charge.fightingFiles} files.`;
-                                }
-                                if (verdict?.shoot) {
-                                  return `Accepted · ${verdict.shoot.distanceM} m to ${cardOrders.displayName?.(verdict.shoot.targetId) ?? verdict.shoot.targetId}.`;
-                                }
-                                if (verdict?.reform) {
-                                  return `Accepted · ${verdict.reform.files} files · ${verdict.reform.lateralInterval}×${verdict.reform.rankDepth} m.`;
-                                }
-                                if (verdict?.withdraw) {
-                                  return `Accepted · steps back ${verdict.withdraw.distanceM} m.`;
-                                }
-                                if (verdict?.rally) {
-                                  return `Accepted · rallies from ${verdict.rally.state}.`;
-                                }
-                                return 'Accepted.';
-                              })()}
-                            </p>
-                          ) : (
+                        <div data-testid={`unit-card-draft-${cardOrders.unitId}`}>
+                          {/* The verdict itself is shown once, in the card footer. */}
+                          {cardOrders.draftVerdict?.accepted !== true &&
+                          cardOrders.draftVerdict?.accepted !== false ? (
                             <p
                               className="draft-pending"
                               data-testid={`unit-card-pending-${cardOrders.unitId}`}
                             >
                               Validating…
                             </p>
-                          )}
+                          ) : null}
                           <div className="draft-actions">
                             <button
                               type="button"
@@ -669,7 +655,7 @@ export function MapChrome(props: MapChromeProps) {
                         className="draft-ok"
                         data-testid={`unit-card-accepted-${cardOrders.unitId}`}
                       >
-                        Accepted
+                        {acceptedSummary(cardOrders.draftVerdict, cardOrders.displayName)}
                       </p>
                     ) : cardOrders?.draftVerdict?.accepted === false &&
                       cardOrders?.draftVerdict?.rejection ? (
