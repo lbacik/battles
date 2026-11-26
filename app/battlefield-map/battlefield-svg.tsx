@@ -47,6 +47,7 @@ interface BattlefieldSvgProps {
   svgRef: RefObject<SVGSVGElement | null>;
   selectionEnabled: boolean;
   onSelectUnit?: (id: string | null) => void;
+  onUnitContextSelect?: (id: string) => void;
   terrainFeatures: any[];
   selectedTerrainId: string | null;
   selectedVertexIndex: number | null;
@@ -97,6 +98,7 @@ export const BattlefieldSvg = memo(function BattlefieldSvg({
   placed,
   selectionEnabled,
   onSelectUnit,
+  onUnitContextSelect,
   terrainFeatures,
   selectedTerrainId,
   selectedVertexIndex,
@@ -484,6 +486,11 @@ export const BattlefieldSvg = memo(function BattlefieldSvg({
               data-candidate-charge={entry.candidateCharge ? 'true' : 'false'}
               data-candidate-shoot={entry.candidateShoot ? 'true' : 'false'}
               data-candidate-edge={entry.candidateEdge ?? undefined}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onUnitContextSelect?.(unitId);
+              }}
               style={{
                 cursor:
                   selectionEnabled || entry.candidateCharge || entry.candidateShoot

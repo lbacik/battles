@@ -199,6 +199,7 @@ export default function BattleScreen({
     setDraftFacing,
     stepDraftFacing,
     handleBattleUnitSelect,
+    handleBattleUnitContextSelect,
     handleBattleMapClick,
     handleBattleRotate,
   } = turnDraft;
@@ -211,6 +212,62 @@ export default function BattleScreen({
     : -1;
   const cardDraftVerdict =
     cardDraftIndex >= 0 ? verdictForDraftIndex(cardDraftIndex) : null;
+
+  // Opposing-unit card hunters (battle screen, issue #168): for the selected
+  // enemy, every active-side unit whose availableActions list it as a Charge
+  // or Shoot candidate. Clicking Charge/Shoot with drafts that order for the
+  // friendly unit through the shared controller (replacing its draft), then
+  // selects the friendly unit so its card, inspector and map agree.
+  const opposingIsEnemy = Boolean(canDraft && selectedUnit && selectedUnit.side !== activeSide);
+  const opposingTargetId: string | null = opposingIsEnemy ? String(selectedUnit.id) : null;
+  const opposingChargeWith: { unitId: string; name: string }[] = opposingIsEnemy
+    ? units
+        .filter((entry: any) => entry?.side === activeSide)
+        .filter((entry: any) =>
+          chargeCandidatesOf(entry.id).some(
+            (candidate: any) => String(candidate.targetId) === String(opposingTargetId),
+          ),
+        )
+        .map((entry: any) => ({ unitId: String(entry.id), name: String(entry.name || entry.id) }))
+    : [];
+  const opposingShootWith: { unitId: string; name: string }[] = opposingIsEnemy
+    ? units
+        .filter((entry: any) => entry?.side === activeSide)
+        .filter((entry: any) =>
+          shootCandidatesOf(entry.id).some(
+            (candidate: any) => String(candidate?.targetId) === String(opposingTargetId),
+          ),
+        )
+        .map((entry: any) => ({ unitId: String(entry.id), name: String(entry.name || entry.id) }))
+    : [];
+  function handleOpposingChargeWith(friendlyUnitId: string): void {
+    if (!opposingTargetId) return;
+    const candidates = chargeCandidatesOf(friendlyUnitId);
+    const chosen = candidates.find(
+      (candidate: any) => String(candidate.targetId) === String(opposingTargetId),
+    );
+    if (!chosen) return;
+    if (draftForUnit(friendlyUnitId)?.kind === 'Charge') {
+      setChargeTarget(friendlyUnitId, chosen.targetId, chosen.edge);
+    } else {
+      startChargeDraft(friendlyUnitId, chosen.targetId, chosen.edge);
+    }
+    setSelectedUnitId(friendlyUnitId);
+  }
+  function handleOpposingShootWith(friendlyUnitId: string): void {
+    if (!opposingTargetId) return;
+    const candidates = shootCandidatesOf(friendlyUnitId);
+    const chosen = candidates.find(
+      (candidate: any) => String(candidate?.targetId) === String(opposingTargetId),
+    );
+    if (!chosen) return;
+    if (draftForUnit(friendlyUnitId)?.kind === 'Shoot') {
+      setShootTarget(friendlyUnitId, chosen.targetId);
+    } else {
+      startShootDraft(friendlyUnitId, chosen.targetId);
+    }
+    setSelectedUnitId(friendlyUnitId);
+  }
 
   // A committed turn moves play on: the confirmations belong to the turn that
   // was committed, never to the next one. The draft and selection reset live
@@ -362,6 +419,7 @@ export default function BattleScreen({
             sides={sides}
             selectedUnitId={selectedUnitId}
             onSelectUnit={handleBattleUnitSelect}
+            onUnitContextSelect={handleBattleUnitContextSelect}
             terrainFeatures={scenario?.terrainFeatures}
             unitConflictIds={[...conflictUnitIds()]}
             changedUnitIds={[...changedByUnit.keys()]}
@@ -380,8 +438,9 @@ export default function BattleScreen({
             }
             onBattleRotate={handleBattleRotate}
             unitCard={
-              canDraft && selectedUnit && selectedUnit.side === activeSide
-                ? {
+              canDraft && selectedUnit
+                ? selectedUnit.side === activeSide
+                  ? {
                     unit: selectedUnit,
                     movementAllowanceM: selectedEntry?.movementAllowanceM,
                     orders: {
@@ -439,6 +498,16 @@ export default function BattleScreen({
                       onStepMoveFacing: (delta: number) => stepDraftFacing(selectedUnit.id, delta),
                     },
                   }
+                  : {
+                      unit: selectedUnit,
+                      opposing: {
+                        unitId: selectedUnit.id,
+                        chargeWith: opposingChargeWith,
+                        shootWith: opposingShootWith,
+                        onChargeWith: handleOpposingChargeWith,
+                        onShootWith: handleOpposingShootWith,
+                      },
+                    }
                 : null
             }
             onCloseUnitCard={() => setSelectedUnitId(null)}

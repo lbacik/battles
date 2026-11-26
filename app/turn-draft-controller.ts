@@ -522,7 +522,22 @@ export function useTurnDraftController({
         return;
       }
     }
-    setSelectedUnitId(null);
+    setSelectedUnitId(unitId);
+    notifyMutated();
+  }
+
+  // Right-click selection (battle screen, issue #168): selecting the unit
+  // under the pointer, never drafting. A right-click on a Charge or Shoot
+  // candidate still selects that enemy instead of retargeting.
+  function handleBattleUnitContextSelect(unitId: string | null): void {
+    if (!unitId) return;
+    const unit = units.find((entry: any) => entry?.id === unitId) || null;
+    if (!unit) {
+      setSelectedUnitId(null);
+      return;
+    }
+    setSelectedUnitId(unitId);
+    notifyMutated();
   }
 
   // Open-ground clicks draft legs: up to three for the active Move draft,
@@ -684,6 +699,7 @@ export function useTurnDraftController({
     setDraftFacing,
     stepDraftFacing,
     handleBattleUnitSelect,
+    handleBattleUnitContextSelect,
     handleBattleMapClick,
     handleBattleRotate,
   };
