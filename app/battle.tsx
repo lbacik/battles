@@ -197,6 +197,7 @@ export default function BattleScreen({
     removeLastDraftLeg,
     clearDraftLegs,
     setDraftFacing,
+    stepDraftFacing,
     handleBattleUnitSelect,
     handleBattleMapClick,
     handleBattleRotate,
@@ -432,6 +433,10 @@ export default function BattleScreen({
                       },
                       onUndoApproach: () => removeLastApproachLeg(selectedUnit.id),
                       onClearApproach: () => clearApproachLegs(selectedUnit.id),
+                      onUndoMoveLeg: () => removeLastDraftLeg(selectedUnit.id),
+                      onClearMoveLegs: () => clearDraftLegs(selectedUnit.id),
+                      onSetMoveFacing: (raw: string) => setDraftFacing(selectedUnit.id, raw),
+                      onStepMoveFacing: (delta: number) => stepDraftFacing(selectedUnit.id, delta),
                     },
                   }
                 : null

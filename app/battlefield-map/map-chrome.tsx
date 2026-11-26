@@ -16,6 +16,7 @@ import {
 } from './map-helpers';
 import { LINEAR_LABELS } from './svg-helpers';
 import { UnitCardReform } from './unit-card-reform';
+import { UnitCardMove } from './unit-card-move';
 
 // The engine's acceptance summary for the card footer's single verdict line.
 function acceptedSummary(verdict: any, displayName?: (unitId: string) => string): string {
@@ -457,6 +458,16 @@ export function MapChrome(props: MapChromeProps) {
                         </div>
                       ) : null}
                     </div>
+                    {cardOrders?.draft?.kind === 'Move' ? (
+                      <UnitCardMove
+                        unit={cardUnit}
+                        draft={cardOrders.draft}
+                        onUndoMoveLeg={() => cardOrders.onUndoMoveLeg?.()}
+                        onClearMoveLegs={() => cardOrders.onClearMoveLegs?.()}
+                        onSetMoveFacing={(raw: string) => cardOrders.onSetMoveFacing?.(raw)}
+                        onStepMoveFacing={(delta: number) => cardOrders.onStepMoveFacing?.(delta)}
+                      />
+                    ) : null}
                     {(cardOrders.permitted || []).includes('Charge') &&
                     (cardOrders.chargeCandidates || []).length > 0 ? (
                       <div

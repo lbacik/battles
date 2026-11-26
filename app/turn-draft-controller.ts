@@ -29,6 +29,7 @@ import {
   conflictPointsIn,
   conflictUnitIdsIn,
   draftKindOfDraft,
+  stepMoveFacingIn,
   stepReformFilesIn,
   validateDraftSubmission,
   verdictForDraftIndexIn,
@@ -463,6 +464,17 @@ export function useTurnDraftController({
     notifyMutated();
   }
 
+  function stepDraftFacing(unitId: string, delta: number): void {
+    if (!canDraft) return;
+    if (!ownUnit(unitId)) return;
+    const step = Number(delta);
+    if (!Number.isFinite(step)) return;
+    const draft = draftForUnit(unitId);
+    if (!draft || draft.kind !== 'Move') return;
+    setDrafts((prev) => stepMoveFacingIn(prev, units, unitId, step));
+    notifyMutated();
+  }
+
   // Unit clicks on the map: an own unit selects it; an enemy candidate drafts
   // (or retargets) a Charge or Shoot for the selected unit, Charge first; any
   // other click clears the selection.
@@ -670,6 +682,7 @@ export function useTurnDraftController({
     removeLastDraftLeg,
     clearDraftLegs,
     setDraftFacing,
+    stepDraftFacing,
     handleBattleUnitSelect,
     handleBattleMapClick,
     handleBattleRotate,

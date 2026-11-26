@@ -59,6 +59,7 @@ import { runIssue87End } from './e2e/chapter-issue-87-end.mjs';
 import { runIssue119 } from './e2e/chapter-issue-119.mjs';
 import { runIssue120 } from './e2e/chapter-issue-120.mjs';
 import { runIssue127 } from './e2e/chapter-issue-127.mjs';
+import { runIssue126 } from './e2e/chapter-issue-126.mjs';
 import { runIssue128 } from './e2e/chapter-issue-128.mjs';
 import { runIssue129 } from './e2e/chapter-issue-129.mjs';
 import { runIssue161 } from './e2e/chapter-issue-161.mjs';
@@ -149,6 +150,7 @@ try {
   await runIssue119(ctx);
   await runIssue120(ctx);
   await runIssue127(ctx);
+  await runIssue126(ctx);
   await runIssue128(ctx);
   await runIssue129(ctx);
   await runIssue161(ctx);
