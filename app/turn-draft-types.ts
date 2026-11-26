@@ -84,6 +84,8 @@ export interface TurnDraftController {
   setShootTarget: (unitId: string, targetId: string) => void;
   setReformField: (unitId: string, field: string, raw: string) => void;
   applyReformPreset: (unitId: string, preset: string) => void;
+  stepReformFiles: (unitId: string, delta: number) => void;
+  verdictForUnit: (unitId: string) => any;
   appendApproachLeg: (unitId: string, point: { x: number; y: number }) => void;
   removeLastApproachLeg: (unitId: string) => void;
   clearApproachLegs: (unitId: string) => void;

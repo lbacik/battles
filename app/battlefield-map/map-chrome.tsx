@@ -15,6 +15,7 @@ import {
   releaseFocus,
 } from './map-helpers';
 import { LINEAR_LABELS } from './svg-helpers';
+import { UnitCardReform } from './unit-card-reform';
 
 // Map chrome (unit context card overlay, terrain hint, tool rails, scale bar
 // and zoom controls). Verbatim move from ../battlefield-map: markup,
@@ -36,6 +37,13 @@ export interface MapChromeProps {
   cardRanks: any;
   cardMovementM: any;
   onCloseUnitCard: any;
+  cardDraft?: any;
+  cardVerdict?: any;
+  cardPresets?: Record<string, any> | null;
+  cardPermitted?: string[];
+  onStartReformDraft?: (unitId: string) => void;
+  onApplyReformPreset?: (unitId: string, preset: string) => void;
+  onStepReformFiles?: (unitId: string, delta: number) => void;
   cardOrders?: any;
   draft: any;
   tool: any;
@@ -73,6 +81,13 @@ export function MapChrome(props: MapChromeProps) {
     cardRanks,
     cardMovementM,
     onCloseUnitCard,
+    cardDraft,
+    cardVerdict,
+    cardPresets,
+    cardPermitted,
+    onStartReformDraft,
+    onApplyReformPreset,
+    onStepReformFiles,
     cardOrders = null,
     draft,
     tool,
@@ -271,6 +286,18 @@ export function MapChrome(props: MapChromeProps) {
                     {Number.isFinite(cardMovementM) ? `Reach ${cardMovementM} m` : 'Reach —'}
                   </strong>
                 </div>
+                {onStartReformDraft && onApplyReformPreset && onStepReformFiles ? (
+                  <UnitCardReform
+                    unit={cardUnit}
+                    draft={cardDraft ?? null}
+                    verdict={cardVerdict ?? null}
+                    presets={cardPresets ?? null}
+                    permitted={cardPermitted || []}
+                    onStartReformDraft={onStartReformDraft}
+                    onApplyReformPreset={onApplyReformPreset}
+                    onStepReformFiles={onStepReformFiles}
+                  />
+                ) : null}
                 {cardOrders ? (
                   <>
                     <div
