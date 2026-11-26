@@ -95,6 +95,7 @@ export interface TurnDraftController {
   removeLastDraftLeg: (unitId: string) => void;
   clearDraftLegs: (unitId: string) => void;
   setDraftFacing: (unitId: string, raw: string) => void;
+  stepDraftFacing: (unitId: string, delta: number) => void;
   handleBattleUnitSelect: (unitId: string | null) => void;
   handleBattleMapClick: (point: { x: number; y: number }) => void;
   handleBattleRotate: (facing: number) => void;

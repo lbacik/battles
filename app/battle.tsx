@@ -196,6 +196,7 @@ export default function BattleScreen({
     removeLastDraftLeg,
     clearDraftLegs,
     setDraftFacing,
+    stepDraftFacing,
     handleBattleUnitSelect,
     handleBattleMapClick,
     handleBattleRotate,
@@ -431,6 +432,10 @@ export default function BattleScreen({
                       },
                       onUndoApproach: () => removeLastApproachLeg(selectedUnit.id),
                       onClearApproach: () => clearApproachLegs(selectedUnit.id),
+                      onUndoMoveLeg: () => removeLastDraftLeg(selectedUnit.id),
+                      onClearMoveLegs: () => clearDraftLegs(selectedUnit.id),
+                      onSetMoveFacing: (raw: string) => setDraftFacing(selectedUnit.id, raw),
+                      onStepMoveFacing: (delta: number) => stepDraftFacing(selectedUnit.id, delta),
                     },
                   }
                 : null
@@ -707,6 +712,22 @@ export default function BattleScreen({
           Phase: {battle?.phase}
         </span>
         <span className="spacer" />
+        {canDraft && drafts.length > 0 ? (
+          <button
+            type="button"
+            className="btn-primary"
+            data-testid="commit-draft-turnbar"
+            disabled={!validation?.ok}
+            title={
+              validation?.ok
+                ? `Commit turn (${drafts.length} ${drafts.length === 1 ? 'order' : 'orders'})`
+                : 'Resolve the rejected orders to commit'
+            }
+            onClick={() => draftSubmission && onCommitDraft(draftSubmission.orders)}
+          >
+            Commit turn ({drafts.length} {drafts.length === 1 ? 'order' : 'orders'})
+          </button>
+        ) : null}
         {finished ? null : concedeConfirming ? (
           <span className="concede-confirm" data-testid="concede-confirm-box">
             Concede the battle?

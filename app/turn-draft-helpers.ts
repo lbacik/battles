@@ -7,6 +7,8 @@
 // its own state through unchanged.
 
 import { SUBMISSION_FORMAT_VERSION, validateTurn } from '../domain/turn.js';
+import { normalizeFacing } from '../domain/scenario.js';
+import { round1 } from '../domain/geometry.js';
 import type { OrderDraft } from './turn-draft-types';
 
 export function draftKindOfDraft(draft: OrderDraft | null): string {
@@ -83,6 +85,58 @@ export function verdictForDraftIndexIn(validation: any, index: number): any {
   const verdicts = validation?.verdicts;
   if (!Array.isArray(verdicts)) return null;
   return verdicts.find((verdict: any) => verdict?.orderIndex === index) || null;
+}
+
+// Quick wheeling buttons for the unit context card (issue #126): one tap
+// turns the Move draft facing by `delta` degrees. Pure over the draft list
+// so the controller stays a thin state wrapper; the engine alone decides
+// legality, so no clamping happens here.
+export const MOVE_WHEEL_STEPS: number[] = [-45, -15, 15, 45, 180];
+
+// The latest set facing of a Move draft, searching legs from the end: the
+// value the card's numeric facing field and the inspector's facing field
+// both show, so the map rotation handle and both surfaces stay in sync.
+export function latestMoveFaceFor(draft: OrderDraft | null): number | null {
+  if (!draft || draft.kind !== 'Move') return null;
+  for (let index = draft.legs.length - 1; index >= 0; index -= 1) {
+    const face = draft.legs[index]?.face;
+    if (face !== null && face !== undefined) return face;
+  }
+  return null;
+}
+
+// Wheeling the Move draft facing from the unit context card (issue #126):
+// one tap adds `delta` to the latest set facing, or to the unit's current
+// facing when the draft has none yet (a wheeled facing with no legs becomes
+// a rotation-only leg, exactly like typing a facing with no legs). Pure over
+// the draft list and the units, so the controller stays a thin state
+// wrapper; the engine alone decides legality.
+export function stepMoveFacingIn(
+  drafts: OrderDraft[],
+  units: any[],
+  unitId: string,
+  delta: number,
+): OrderDraft[] {
+  if (!Number.isFinite(delta)) return drafts;
+  let changed = false;
+  const next = drafts.map((draft) => {
+    if (draft.unitId !== unitId || draft.kind !== 'Move') return draft;
+    const base = latestMoveFaceFor(draft)
+      ?? Number((units || []).find((unit: any) => unit?.id === unitId)?.facing)
+      ?? 0;
+    const face = normalizeFacing(round1((Number.isFinite(base) ? base : 0) + delta));
+    changed = true;
+    if (draft.legs.length === 0) {
+      return { ...draft, legs: [{ face, to: null }] };
+    }
+    return {
+      ...draft,
+      legs: draft.legs.map((leg, index) => (
+        index === draft.legs.length - 1 ? { face, to: leg.to ? { ...leg.to } : null } : leg
+      )),
+    };
+  });
+  return changed ? (next as OrderDraft[]) : drafts;
 }
 
 // Quick file-count steppers for the unit context card (issue #128): one tap
