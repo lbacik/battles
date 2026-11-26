@@ -19,7 +19,9 @@ import { LINEAR_LABELS } from './svg-helpers';
 // Map chrome (unit context card overlay, terrain hint, tool rails, scale bar
 // and zoom controls). Verbatim move from ../battlefield-map: markup,
 // data-testid attributes, class names and event handling are unchanged, and
-// all state still lives in BattlefieldMap and arrives through props.
+// all state still lives in BattlefieldMap and arrives through props, except
+// the unit card footer (battle screen, issue #129) showing the draft position
+// with Earlier/Later reorder controls and the live verdict.
 export interface MapChromeProps {
   cardUnit: any;
   cardBounds: any;
@@ -420,6 +422,68 @@ export function MapChrome(props: MapChromeProps) {
                       </div>
                     ) : null}
                   </>
+                ) : null}
+                {cardOrders?.draft &&
+                typeof cardOrders?.draftIndex === 'number' &&
+                cardOrders.draftIndex >= 0 &&
+                typeof cardOrders?.draftCount === 'number' &&
+                cardOrders.draftCount > 0 ? (
+                  <footer
+                    className="unit-card-footer"
+                    data-testid={`unit-card-footer-${cardOrders.unitId}`}
+                  >
+                    <span
+                      className="unit-card-order"
+                      data-testid={`unit-card-order-${cardOrders.unitId}`}
+                    >
+                      Order #{cardOrders.draftIndex + 1} of {cardOrders.draftCount}
+                    </span>
+                    <div className="unit-card-order-actions">
+                      <button
+                        type="button"
+                        className="btn-quiet"
+                        data-testid={`unit-card-move-earlier-${cardOrders.unitId}`}
+                        disabled={cardOrders.draftIndex <= 0}
+                        title="Move earlier (re-validates)"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          cardOrders.onMoveEarlier?.();
+                        }}
+                      >
+                        ↑ Earlier
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-quiet"
+                        data-testid={`unit-card-move-later-${cardOrders.unitId}`}
+                        disabled={cardOrders.draftIndex >= cardOrders.draftCount - 1}
+                        title="Move later (re-validates)"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          cardOrders.onMoveLater?.();
+                        }}
+                      >
+                        ↓ Later
+                      </button>
+                    </div>
+                    {cardOrders?.draftVerdict?.accepted === true ? (
+                      <p
+                        className="draft-ok"
+                        data-testid={`unit-card-accepted-${cardOrders.unitId}`}
+                      >
+                        Accepted
+                      </p>
+                    ) : cardOrders?.draftVerdict?.accepted === false &&
+                      cardOrders?.draftVerdict?.rejection ? (
+                      <p
+                        className="field-error"
+                        role="alert"
+                        data-testid={`unit-card-rejection-${cardOrders.unitId}`}
+                      >
+                        {cardOrders.draftVerdict.rejection.message}
+                      </p>
+                    ) : null}
+                  </footer>
                 ) : null}
               </div>
             ) : null}
