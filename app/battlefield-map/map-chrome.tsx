@@ -7,6 +7,7 @@ import {
   UNIT_CARD_MARGIN,
   clamp,
 } from '../../domain/unit-card-geometry.js';
+import { CHARGE_EDGES, MAX_APPROACH_LEGS } from '../../domain/charge.js';
 import {
   UNIT_CARD_W,
   ZOOM_STEP,
@@ -33,6 +34,7 @@ export interface MapChromeProps {
   cardRanks: any;
   cardMovementM: any;
   onCloseUnitCard: any;
+  cardOrders?: any;
   draft: any;
   tool: any;
   setTool: (next: any) => void;
@@ -69,6 +71,7 @@ export function MapChrome(props: MapChromeProps) {
     cardRanks,
     cardMovementM,
     onCloseUnitCard,
+    cardOrders = null,
     draft,
     tool,
     setTool,
@@ -266,6 +269,158 @@ export function MapChrome(props: MapChromeProps) {
                     {Number.isFinite(cardMovementM) ? `Reach ${cardMovementM} m` : 'Reach —'}
                   </strong>
                 </div>
+                {cardOrders ? (
+                  <>
+                    {(cardOrders.permitted || []).includes('Charge') &&
+                    (cardOrders.chargeCandidates || []).length > 0 ? (
+                      <div
+                        className="unit-card-orders"
+                        aria-label="Charge orders"
+                        data-testid={`unit-card-charge-section-${cardOrders.unitId}`}
+                      >
+                        <span className="field-label">Charge</span>
+                        <ul className="candidate-list">
+                          {(cardOrders.chargeCandidates || []).map((candidate: any) => (
+                            <li key={candidate.targetId}>
+                              <button
+                                type="button"
+                                className="btn-quiet candidate-pick"
+                                data-testid={`unit-card-charge-${cardOrders.unitId}-${candidate.targetId}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  cardOrders.onPickChargeTarget?.(candidate.targetId);
+                                }}
+                              >
+                                Charge {cardOrders.displayName?.(candidate.targetId) ?? candidate.targetId} (
+                                {candidate.edge}, {candidate.aspect}, {candidate.distanceM} m)
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                        {cardOrders.draft?.kind === 'Charge' ? (
+                          <>
+                            <label className="field">
+                              Target
+                              <select
+                                data-testid={`unit-card-charge-target-${cardOrders.unitId}`}
+                                value={cardOrders.draft.targetId}
+                                onChange={(event) => {
+                                  event.stopPropagation();
+                                  cardOrders.onPickChargeTarget?.(event.target.value);
+                                }}
+                              >
+                                {(cardOrders.chargeCandidates || []).map((candidate: any) => (
+                                  <option key={candidate.targetId} value={candidate.targetId}>
+                                    {cardOrders.displayName?.(candidate.targetId) ?? candidate.targetId} ·{' '}
+                                    {candidate.distanceM} m · {candidate.aspect} ({candidate.edge})
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <label className="field">
+                              Edge
+                              <select
+                                data-testid={`unit-card-charge-edge-${cardOrders.unitId}`}
+                                value={cardOrders.draft.edge}
+                                onChange={(event) => {
+                                  event.stopPropagation();
+                                  cardOrders.onChargeEdge?.(event.target.value);
+                                }}
+                              >
+                                {CHARGE_EDGES.map((edge: string) => (
+                                  <option key={edge} value={edge}>
+                                    {edge}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+                            <p
+                              className="draft-hint"
+                              data-testid={`unit-card-approach-${cardOrders.unitId}`}
+                            >
+                              Approach legs: {(cardOrders.draft.approach || []).length} /{' '}
+                              {MAX_APPROACH_LEGS} — click open ground for the next leg.
+                            </p>
+                            <div className="draft-actions">
+                              <button
+                                type="button"
+                                className="btn-secondary"
+                                data-testid={`unit-card-remove-last-approach-${cardOrders.unitId}`}
+                                disabled={(cardOrders.draft.approach || []).length === 0}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  cardOrders.onUndoApproach?.();
+                                }}
+                              >
+                                Undo
+                              </button>
+                              <button
+                                type="button"
+                                className="btn-secondary"
+                                data-testid={`unit-card-clear-approach-${cardOrders.unitId}`}
+                                disabled={(cardOrders.draft.approach || []).length === 0}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  cardOrders.onClearApproach?.();
+                                }}
+                              >
+                                Clear
+                              </button>
+                            </div>
+                          </>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {(cardOrders.permitted || []).includes('Shoot') &&
+                    (cardOrders.shootCandidates || []).length > 0 ? (
+                      <div
+                        className="unit-card-orders"
+                        aria-label="Shoot orders"
+                        data-testid={`unit-card-shoot-section-${cardOrders.unitId}`}
+                      >
+                        <span className="field-label">Shoot</span>
+                        <ul className="candidate-list">
+                          {(cardOrders.shootCandidates || []).map((candidate: any) => (
+                            <li key={candidate.targetId}>
+                              <button
+                                type="button"
+                                className="btn-quiet candidate-pick"
+                                data-testid={`unit-card-shoot-${cardOrders.unitId}-${candidate.targetId}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  cardOrders.onPickShootTarget?.(candidate.targetId);
+                                }}
+                              >
+                                Shoot {cardOrders.displayName?.(candidate.targetId) ?? candidate.targetId} (
+                                {candidate.distanceM} m)
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                        {cardOrders.draft?.kind === 'Shoot' ? (
+                          <label className="field">
+                            Target
+                            <select
+                              data-testid={`unit-card-shoot-target-${cardOrders.unitId}`}
+                              value={cardOrders.draft.targetId}
+                              onChange={(event) => {
+                                event.stopPropagation();
+                                cardOrders.onPickShootTarget?.(event.target.value);
+                              }}
+                            >
+                              {(cardOrders.shootCandidates || []).map((candidate: any) => (
+                                <option key={candidate.targetId} value={candidate.targetId}>
+                                  {cardOrders.displayName?.(candidate.targetId) ?? candidate.targetId} ·{' '}
+                                  {candidate.distanceM} m
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </>
+                ) : null}
               </div>
             ) : null}
           </aside>

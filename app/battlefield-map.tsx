@@ -154,7 +154,7 @@ interface BattlefieldMapProps {
   // status card for the selected active-side unit during a human Orders
   // phase. The battle screen owns visibility; the map projects the unit and
   // places the card beside it inside the viewport.
-  unitCard?: { unit: any; movementAllowanceM?: number | null } | null;
+  unitCard?: { unit: any; movementAllowanceM?: number | null; orders?: any } | null;
   onCloseUnitCard?: () => void;
   // Placement refusals to highlight: every id the refused drop would conflict
   // with (the dragged unit plus every overlap partner). Display-only, like the
@@ -716,6 +716,7 @@ export default function BattlefieldMap({
         cardRanks={cardRanks}
         cardMovementM={cardMovementM}
         onCloseUnitCard={onCloseUnitCard}
+        cardOrders={unitCard?.orders ?? null}
         draft={draft}
         tool={tool}
         setTool={setTool}
