@@ -269,7 +269,7 @@ export async function runIssue126(ctx) {
     { timeout: T_SAVE },
   );
   await moveCardPage.getByTestId(`unit-card-accepted-${secondId}`).waitFor({ timeout: T_SAVE });
-  const turnbarCommit = moveCardPage.getByTestId('commit-draft-turnbar');
+  const turnbarCommit = moveCardPage.getByTestId('turnbar-commit-draft');
   check(
     'a card-drafted Move with a collapsed inspector offers the turn bar commit',
     await turnbarCommit.isVisible() && await turnbarCommit.isEnabled(),

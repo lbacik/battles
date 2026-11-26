@@ -184,9 +184,31 @@
 
 .turnbar .concede-confirm .btn-primary,
 .turnbar .concede-confirm .btn-secondary,
+.turnbar .turn-controls-row .btn-primary,
+.turnbar .turn-controls-row .btn-secondary,
 .turnbar [data-testid='concede'] {
   min-height: 32px;
   padding: 6px 12px;
+}
+
+/* The collapsed-panel turn control shares the bar with round, side, phase
+   and Concede: one compact row of buttons with the short blocked message
+   only, so it never crowds the bar out. */
+.turnbar .turn-controls {
+  display: contents;
+}
+
+.turnbar .turn-controls-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.turnbar .turn-controls-row .field-error {
+  color: #ffd9d2;
+  margin: 0;
 }
 
 /* Battle outcome: winner or draw, the reason, and both sides' losses. The

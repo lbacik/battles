@@ -29,6 +29,7 @@ import { isBattleFinished } from '../domain/battles.js';
 import { useTurnDraftController } from './turn-draft-controller';
 import type { DraftLeg, OrderDraft } from './turn-draft-controller';
 import { sideName, sideColor, roundLimitOf, isAutomatedController } from './battle/battle-helpers';
+import { TurnControls } from './battle/turn-controls';
 import { createDraftEditor } from './battle/draft-editors';
 import { TurnPanel } from './battle/turn-panel';
 import {
@@ -712,21 +713,25 @@ export default function BattleScreen({
           Phase: {battle?.phase}
         </span>
         <span className="spacer" />
-        {canDraft && drafts.length > 0 ? (
-          <button
-            type="button"
-            className="btn-primary"
-            data-testid="commit-draft-turnbar"
-            disabled={!validation?.ok}
-            title={
-              validation?.ok
-                ? `Commit turn (${drafts.length} ${drafts.length === 1 ? 'order' : 'orders'})`
-                : 'Resolve the rejected orders to commit'
-            }
-            onClick={() => draftSubmission && onCommitDraft(draftSubmission.orders)}
-          >
-            Commit turn ({drafts.length} {drafts.length === 1 ? 'order' : 'orders'})
-          </button>
+        {rightCollapsed && !finished ? (
+          <span className="turn-controls" data-testid="turnbar-turn-controls">
+            <TurnControls
+              battle={battle}
+              turnDraft={turnDraft}
+              confirming={confirming}
+              setConfirming={setConfirming}
+              resolving={resolving}
+              resolveError={resolveError}
+              awaitingHandoff={awaitingHandoff}
+              handoffSide={handoffSide}
+              onHandoff={onHandoff}
+              onCommitEmpty={onCommitEmpty}
+              onCommitDraft={onCommitDraft}
+              onContinueAutomated={onContinueAutomated}
+              variant="compact"
+              testIdPrefix="turnbar-"
+            />
+          </span>
         ) : null}
         {finished ? null : concedeConfirming ? (
           <span className="concede-confirm" data-testid="concede-confirm-box">
