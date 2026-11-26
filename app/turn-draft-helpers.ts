@@ -85,6 +85,43 @@ export function verdictForDraftIndexIn(validation: any, index: number): any {
   return verdicts.find((verdict: any) => verdict?.orderIndex === index) || null;
 }
 
+// Quick file-count steppers for the unit context card (issue #128): one tap
+// adds `delta` to the Reform draft files. Pure over the draft list so the
+// controller stays a thin state wrapper; the engine alone decides legality,
+// so no clamping happens here (a step may produce a rejected draft, which
+// the card then shows with the engine's message).
+export const REFORM_FILE_STEPS: number[] = [-4, -2, -1, 1, 2, 4];
+
+export function reformRanksFor(soldiers: any, files: any): number | null {
+  const total = Number(soldiers);
+  const count = Number(files);
+  if (!Number.isFinite(total) || !Number.isInteger(count) || count <= 0) return null;
+  if (total <= 0) return null;
+  return Math.ceil(total / count);
+}
+
+export function stepReformFilesIn(drafts: OrderDraft[], unitId: string, delta: number): OrderDraft[] {
+  if (!Number.isFinite(delta) || Math.trunc(delta) !== delta || delta === 0) return drafts;
+  let changed = false;
+  const next = drafts.map((draft) => {
+    if (draft.unitId !== unitId || draft.kind !== 'Reform') return draft;
+    const base = Number((draft as any).files);
+    const files = (Number.isFinite(base) ? Math.trunc(base) : 0) + Math.trunc(delta);
+    changed = true;
+    return { ...draft, files };
+  });
+  return changed ? (next as OrderDraft[]) : drafts;
+}
+
+// The engine verdict for one unit's draft, looked up through draft order:
+// the draft index in `drafts` is the submission order index the verdicts
+// carry as `orderIndex`.
+export function verdictForUnitIn(validation: any, drafts: OrderDraft[], unitId: string): any {
+  const index = drafts.findIndex((draft) => draft.unitId === unitId);
+  if (index < 0) return null;
+  return verdictForDraftIndexIn(validation, index);
+}
+
 // Units named as the conflict by a rejection, drawn as map highlights: the
 // collision partner (`details.withUnitId`), the charge or shoot target
 // (`details.targetId`), a line-of-fire blocker (`details.blockedBy`), or
