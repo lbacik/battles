@@ -58,6 +58,7 @@ import { runIssue88Gate } from './e2e/chapter-issue-88-gate.mjs';
 import { runIssue87End } from './e2e/chapter-issue-87-end.mjs';
 import { runIssue119 } from './e2e/chapter-issue-119.mjs';
 import { runIssue120 } from './e2e/chapter-issue-120.mjs';
+import { runIssue128 } from './e2e/chapter-issue-128.mjs';
 
 mkdirSync(reportDir, { recursive: true });
 
@@ -143,6 +144,7 @@ try {
   await runIssue87End(ctx);
   await runIssue119(ctx);
   await runIssue120(ctx);
+  await runIssue128(ctx);
 
   // Issue #121: full-height battle shell — the battle screen fills the window
   // with the turn bar flush against the bottom edge. Geometry is asserted

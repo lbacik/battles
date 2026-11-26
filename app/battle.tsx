@@ -173,6 +173,7 @@ export default function BattleScreen({
     shootCandidatesOf,
     spacingPresetsOf,
     verdictForDraftIndex,
+    verdictForUnit,
     conflictUnitIds,
     conflictPoints,
     unitDisplayName,
@@ -187,6 +188,7 @@ export default function BattleScreen({
     setShootTarget,
     setReformField,
     applyReformPreset,
+    stepReformFiles,
     removeLastApproachLeg,
     clearApproachLegs,
     removeDraft,
@@ -375,6 +377,29 @@ export default function BattleScreen({
                 : null
             }
             onCloseUnitCard={() => setSelectedUnitId(null)}
+            unitCardDraft={
+              canDraft && selectedUnit && selectedUnit.side === activeSide
+                ? draftForUnit(selectedUnit.id)
+                : null
+            }
+            unitCardVerdict={
+              canDraft && selectedUnit && selectedUnit.side === activeSide
+                ? verdictForUnit(selectedUnit.id)
+                : null
+            }
+            unitCardPresets={
+              canDraft && selectedUnit && selectedUnit.side === activeSide
+                ? spacingPresetsOf(selectedUnit)
+                : null
+            }
+            unitCardPermitted={
+              canDraft && selectedUnit && selectedUnit.side === activeSide
+                ? permittedKindsOf(selectedUnit.id)
+                : []
+            }
+            onStartReformDraft={startReformDraft}
+            onApplyReformPreset={applyReformPreset}
+            onStepReformFiles={stepReformFiles}
           />
           <p className="map-hint">
             {canDraft

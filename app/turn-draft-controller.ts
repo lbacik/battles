@@ -29,8 +29,10 @@ import {
   conflictPointsIn,
   conflictUnitIdsIn,
   draftKindOfDraft,
+  stepReformFilesIn,
   validateDraftSubmission,
   verdictForDraftIndexIn,
+  verdictForUnitIn,
 } from './turn-draft-helpers';
 import { CHARGE_EDGES, MAX_APPROACH_LEGS } from '../domain/charge.js';
 import { MAX_MOVE_LEGS } from '../domain/movement.js';
@@ -156,6 +158,10 @@ export function useTurnDraftController({
 
   function verdictForDraftIndex(index: number): any {
     return verdictForDraftIndexIn(validation, index);
+  }
+
+  function verdictForUnit(unitId: string): any {
+    return verdictForUnitIn(validation, drafts, unitId);
   }
 
   // Units named as the conflict by a rejection, drawn as map highlights;
@@ -335,6 +341,17 @@ export function useTurnDraftController({
       if (entry.unitId !== unitId || entry.kind !== 'Reform') return entry;
       return { ...entry, lateralInterval: chosen.lateralInterval, rankDepth: chosen.rankDepth };
     }));
+    notifyMutated();
+  }
+
+  function stepReformFiles(unitId: string, delta: number): void {
+    if (!canDraft) return;
+    if (!ownUnit(unitId)) return;
+    const step = Math.trunc(Number(delta));
+    if (!Number.isFinite(step) || step === 0) return;
+    const draft = draftForUnit(unitId);
+    if (!draft || draft.kind !== 'Reform') return;
+    setDrafts((prev) => stepReformFilesIn(prev, unitId, step));
     notifyMutated();
   }
 
@@ -627,6 +644,7 @@ export function useTurnDraftController({
     shootCandidatesOf,
     spacingPresetsOf,
     verdictForDraftIndex,
+    verdictForUnit,
     conflictUnitIds,
     conflictPoints,
     unitDisplayName,
@@ -642,6 +660,7 @@ export function useTurnDraftController({
     setShootTarget,
     setReformField,
     applyReformPreset,
+    stepReformFiles,
     appendApproachLeg,
     removeLastApproachLeg,
     clearApproachLegs,

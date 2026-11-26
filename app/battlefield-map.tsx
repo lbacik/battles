@@ -156,6 +156,13 @@ interface BattlefieldMapProps {
   // places the card beside it inside the viewport.
   unitCard?: { unit: any; movementAllowanceM?: number | null } | null;
   onCloseUnitCard?: () => void;
+  unitCardDraft?: any | null;
+  unitCardVerdict?: any | null;
+  unitCardPresets?: Record<string, any> | null;
+  unitCardPermitted?: string[];
+  onStartReformDraft?: (unitId: string) => void;
+  onApplyReformPreset?: (unitId: string, preset: string) => void;
+  onStepReformFiles?: (unitId: string, delta: number) => void;
   // Placement refusals to highlight: every id the refused drop would conflict
   // with (the dragged unit plus every overlap partner). Display-only, like the
   // selection: the document keeps the last valid values.
@@ -207,6 +214,13 @@ export default function BattlefieldMap({
   onBattleRotate,
   unitCard = null,
   onCloseUnitCard,
+  unitCardDraft = null,
+  unitCardVerdict = null,
+  unitCardPresets = null,
+  unitCardPermitted = [],
+  onStartReformDraft,
+  onApplyReformPreset,
+  onStepReformFiles,
 }: BattlefieldMapProps) {
   const safeW = safeDimension(width, FALLBACK_WIDTH);
   const safeH = safeDimension(height, FALLBACK_HEIGHT);
@@ -716,6 +730,13 @@ export default function BattlefieldMap({
         cardRanks={cardRanks}
         cardMovementM={cardMovementM}
         onCloseUnitCard={onCloseUnitCard}
+        cardDraft={unitCardDraft}
+        cardVerdict={unitCardVerdict}
+        cardPresets={unitCardPresets}
+        cardPermitted={unitCardPermitted}
+        onStartReformDraft={onStartReformDraft}
+        onApplyReformPreset={onApplyReformPreset}
+        onStepReformFiles={onStepReformFiles}
         draft={draft}
         tool={tool}
         setTool={setTool}

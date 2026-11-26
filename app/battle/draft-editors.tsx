@@ -1,5 +1,6 @@
 import { CHARGE_EDGES, MAX_APPROACH_LEGS } from '../../domain/charge.js';
 import { MAX_MOVE_LEGS } from '../../domain/movement.js';
+import { reformRanksFor } from '../turn-draft-helpers';
 
 // Per-kind draft editors for the selected unit. State stays in `BattleScreen`
 // (via the shared turn-draft controller); this factory only closes over the
@@ -243,9 +244,15 @@ export function createDraftEditor(deps: DraftEditorDeps) {
     }
     if (draft.kind === 'Reform') {
       const presets = spacingPresetsOf(unit);
+      const reformRanks = reformRanksFor(unit?.soldiers, draft.files);
+      const reformReadout =
+        reformRanks != null ? `${draft.files} × ${reformRanks}` : '—';
       return (
         <section aria-label="Reform draft" data-testid={`draft-editor-${unit.id}`}>
           <span className="eyebrow">REFORM DRAFT</span>
+          <p className="draft-readout" data-testid={`reform-readout-${unit.id}`}>
+            {reformReadout} files × ranks
+          </p>
           <label className="field">
             Files
             <input
