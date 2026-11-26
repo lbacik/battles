@@ -1,7 +1,7 @@
 // issue #85: full-orders drafting - Charge, Shoot, Reform, Withdraw (scripts/e2e.mjs lines 3298-3623).
 // Runs in today's order against the shared run context; the steps
 // below are the steps this section performs today, unchanged.
-import { waitForSave, clickHandoffAndSettle, T_SAVE, T_LOAD, T_BATTLE, SETTLE_MS } from './helpers.mjs';
+import { waitForSave, reachHumanTurn, waitForInspectorOffer, clickMapAt, T_SAVE, T_LOAD, T_BATTLE, SETTLE_MS } from './helpers.mjs';
 
 export async function runIssue85(ctx) {
   const { page, context, browser, base, check, log } = ctx;
@@ -77,35 +77,13 @@ export async function runIssue85(ctx) {
   // device handoff (issue #86), which must be pressed before the next side
   // drafts or continues.
   async function reachFullHumanTurn() {
-    for (let step = 0; step < 6; step += 1) {
-      if ((await fullPage.getByTestId('battle-outcome').count()) > 0) return;
-      if ((await fullPage.getByTestId('handoff').count()) > 0) {
-        // Never wait for the transient handoff gap (issue #137): an
-        // automated side pressed through the handoff resolves at once
-        // behind a fresh handoff, so "handoff gone" can miss the gap while
-        // a merely present handoff can be the stale pre-click one. Pressing
-        // re-loops: the fresh human handoff already reports a human
-        // controller, so falling through here would return while the human
-        // turn is still locked behind its own handoff press.
-        await clickHandoffAndSettle(fullPage);
-        continue;
-      }
-      const controller = (await fullPage.getByTestId('turn-controller').textContent()) ?? '';
-      if (controller.startsWith('human')) return;
-      const turnBefore = await fullPage.getByTestId('round').textContent();
-      await fullPage.getByTestId('continue-turn').click();
-      await fullPage.waitForFunction(
-        (expected) =>
-          document.querySelector('[data-testid="round"]')?.textContent !== expected ||
-          document.querySelector('[data-testid="handoff"]') ||
-          document.querySelector('[data-testid="battle-outcome"]'),
-        turnBefore,
-        { timeout: T_BATTLE },
-      );
-    }
-    if ((await fullPage.getByTestId('handoff').count()) > 0) {
-      await clickHandoffAndSettle(fullPage);
-    }
+    // The shared helper waits for a settled turn first and advances behind
+    // the handoff or the settled Continue, never assuming whether the
+    // automated side is still waiting or has already resolved. Controller
+    // text alone never decides: a human controller behind its own handoff
+    // still locks drafting, and the disabled Continue while an automated
+    // turn resolves is never pressed (issue #157).
+    await reachHumanTurn(fullPage);
   }
   await reachFullHumanTurn();
   check(
@@ -113,19 +91,6 @@ export async function runIssue85(ctx) {
     ((await fullPage.getByTestId('turn-controller').textContent()) ?? '').startsWith('human'),
   );
 
-  // Map metres (y up from the south-west corner) to client pixels through the
-  // live SVG viewBox, so approach and leg points land on exact points.
-  async function clickFullMap(atX, atY) {
-    const svg = fullPage.getByTestId('battlefield-map');
-    const box = await svg.boundingBox();
-    const viewBox = ((await svg.getAttribute('viewBox')) ?? '0 0 1200 800')
-      .split(/\s+/)
-      .map(Number);
-    const fieldH = Number(await svg.getAttribute('data-height'));
-    const clientX = box.x + ((atX - viewBox[0]) / viewBox[2]) * box.width;
-    const clientY = box.y + ((fieldH - atY - viewBox[1]) / viewBox[3]) * box.height;
-    await fullPage.mouse.click(clientX, clientY);
-  }
   await fullPage.getByTestId('fit-view').click();
   await fullPage.waitForTimeout(SETTLE_MS);
 
@@ -184,7 +149,7 @@ export async function runIssue85(ctx) {
     ((await fullPage.getByTestId(`draft-${chargerId}`).textContent()) ?? '').includes('Charge') &&
       (await fullPage.getByTestId('draft-ghost').count()) >= 1,
   );
-  await clickFullMap(600, 620);
+  await clickMapAt(fullPage, 600, 620);
   await fullPage.waitForTimeout(SETTLE_MS);
   check(
     'an approach leg keeps the Charge accepted',
@@ -249,11 +214,11 @@ export async function runIssue85(ctx) {
   // first unit's destination, so the engine rejects it and names the conflict.
   await fullOwn.nth(0).click();
   await fullPage.getByTestId(`start-draft-${mover1Id}`).click();
-  await clickFullMap(400, 560);
+  await clickMapAt(fullPage, 400, 560);
   await fullPage.getByTestId(`draft-accepted-${mover1Id}`).waitFor({ timeout: T_SAVE });
   await fullOwn.nth(1).click();
   await fullPage.getByTestId(`start-draft-${mover2Id}`).click();
-  await clickFullMap(400, 560);
+  await clickMapAt(fullPage, 400, 560);
   await fullPage.getByTestId(`draft-rejection-${mover2Id}`).waitFor({ timeout: T_SAVE });
   check(
     'a colliding Move is rejected inline with its conflict',
@@ -286,6 +251,9 @@ export async function runIssue85(ctx) {
   // ghost shows the step back and the commit advances the turn.
   await reachFullHumanTurn();
   await fullOwn.nth(2).click();
+  // The engaged state is awaited before it is asserted: on slow hardware the
+  // inspector may still show the previous unit when read (issue #157).
+  await waitForInspectorOffer(fullPage, chargerId, 'Withdraw');
   check(
     'inspector offers Withdraw to the engaged charger',
     await fullPage.getByTestId(`start-withdraw-${chargerId}`).isVisible(),
@@ -308,6 +276,9 @@ export async function runIssue85(ctx) {
   // offers Rally and the Rally validates in place.
   await reachFullHumanTurn();
   await fullOwn.nth(2).click();
+  // The disordered state is awaited before it is asserted: the seed-drawn
+  // withdraw disorders, but the inspector read races slow renders (issue #157).
+  await waitForInspectorOffer(fullPage, chargerId, 'Rally');
   check(
     'inspector offers Rally to the disordered charger',
     ((await fullPage.getByTestId('battle-unit-permitted').textContent()) ?? '').includes('Rally') &&

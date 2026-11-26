@@ -1,25 +1,17 @@
 // issue #79: terrain mode - draw, refuse overlap, nested hills (scripts/e2e.mjs lines 597-770).
 // Runs in today's order against the shared run context; the steps
 // below are the steps this section performs today, unchanged.
+import { clickMapAt } from './helpers.mjs';
 
 export async function runIssue79(ctx) {
   const { page, context, browser, base, check, log } = ctx;
   const fittedViewBox = ctx.fittedViewBox;
   // Issue #79: terrain mode — draw, refuse overlap, nested hills.
   // Map metres (y up from the south-west corner) to client pixels through
-  // the live SVG viewBox, so terrain vertices land on exact points.
+  // the SVG's own transform, so terrain vertices land on exact points even
+  // when the drawing is letterboxed.
   async function clickMap(atX, atY) {
-    const svg = page.getByTestId('battlefield-map');
-    const box = await svg.boundingBox();
-    const viewBox = ((await svg.getAttribute('viewBox')) ?? '0 0 1200 800')
-      .split(/\s+/)
-      .map(Number);
-    const dimsText = (await page.getByTestId('battlefield-dims').textContent()) ?? '';
-    const dimsMatch = dimsText.match(/([\d.]+) × ([\d.]+)/);
-    const fieldH = dimsMatch ? Number(dimsMatch[2]) : 800;
-    const clientX = box.x + ((atX - viewBox[0]) / viewBox[2]) * box.width;
-    const clientY = box.y + ((fieldH - atY - viewBox[1]) / viewBox[3]) * box.height;
-    await page.mouse.click(clientX, clientY);
+    await clickMapAt(page, atX, atY);
   }
   ctx.clickMap = clickMap;
 

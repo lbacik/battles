@@ -83,7 +83,7 @@ export async function runIssue113Battle(ctx) {
       (expected) => {
         if (document.querySelector('[data-testid="battle-outcome"]')) return true;
         if (document.querySelector('[data-testid="commit-empty"]')) return true;
-        if (document.querySelector('[data-testid="continue-turn"]')) return true;
+        if (document.querySelector('[data-testid="commit-draft"]')) return true;
         const handoff = document.querySelector('[data-testid="handoff"]');
         return !!handoff && handoff.textContent !== expected;
       },
@@ -118,7 +118,16 @@ export async function runIssue113Battle(ctx) {
         /test player/.test(controller),
         controller,
       );
-      await battlePage.getByTestId('continue-turn').click();
+      // The settled automated first turn is the only place Continue is
+      // pressed: re-check for a handoff that may have appeared while the
+      // controller text was read, so a resolved turn behind its handoff is
+      // never missed for a 60 s wait on a gone Continue (issue #157).
+      await battlePage.getByTestId('continue-turn').waitFor({ timeout: T_BATTLE });
+      if ((await battlePage.getByTestId('handoff').count()) === 0) {
+        if (await battlePage.getByTestId('continue-turn').isEnabled()) {
+          await battlePage.getByTestId('continue-turn').click();
+        }
+      }
     }
   }
   await advanceOneStep();

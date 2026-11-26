@@ -71,13 +71,13 @@ export async function waitForSave(page) {
 
 // Presses the device handoff and waits for the settled state behind it,
 // never for the transient gap in between. Clicking a handoff for a human
-// side unlocks drafting (commit-empty appears); clicking one for an
-// automated side resolves at once behind a fresh handoff for the next side
-// (its text changes) or behind the battle outcome. While the automated turn
-// resolves neither is on screen yet, so waiting for "handoff gone" or for
-// the pre-click handoff still showing both race (issue #137): the wait can
-// miss the gap or pass on the stale handoff before React clears it. Waiting
-// for a changed handoff, drafting controls, or the outcome is stable.
+// side unlocks drafting (commit-empty or commit-draft appears); clicking one
+// for an automated side resolves at once behind a fresh handoff for the next
+// side (its text changes) or behind the battle outcome. While the automated
+// turn resolves the runner shows a disabled Continue ("Resolving\u2026"): it is
+// transient, never a settled state, so it is deliberately not awaited here
+// (issue #157). Waiting for a changed handoff, drafting controls, or the
+// outcome is stable (issue #137).
 export async function clickHandoffAndSettle(battlePage) {
   const handoffBefore = (await battlePage.getByTestId('handoff').textContent()) ?? '';
   await battlePage.getByTestId('handoff').click();
@@ -85,11 +85,113 @@ export async function clickHandoffAndSettle(battlePage) {
     (previous) => {
       if (document.querySelector('[data-testid="battle-outcome"]')) return true;
       if (document.querySelector('[data-testid="commit-empty"]')) return true;
-      if (document.querySelector('[data-testid="continue-turn"]')) return true;
+      if (document.querySelector('[data-testid="commit-draft"]')) return true;
       const handoff = document.querySelector('[data-testid="handoff"]');
       return !!handoff && handoff.textContent !== previous;
     },
     handoffBefore,
+    { timeout: T_BATTLE },
+  );
+}
+
+// Clicks a map position in metres (y up from the south-west corner) through
+// the SVG's own transform, which accounts for the viewBox and
+// preserveAspectRatio letterboxing: getScreenCTM maps user units to client
+// pixels, so the click lands on the intended map position even when the SVG
+// box has a different aspect ratio than its viewBox. Reads the field height
+// from the battlefield-map SVG's data-height attribute.
+export async function clickMapAt(page, atX, atY) {
+  const svg = page.getByTestId('battlefield-map');
+  const fieldH = Number(await svg.getAttribute('data-height'));
+  const { clientX, clientY } = await svg.evaluate(
+    (el, [ux, uy]) => {
+      const p = el.createSVGPoint();
+      p.x = ux;
+      p.y = uy;
+      const s = p.matrixTransform(el.getScreenCTM());
+      return { clientX: s.x, clientY: s.y };
+    },
+    [atX, fieldH - atY],
+  );
+  await page.mouse.click(clientX, clientY);
+}
+
+// Waits for a settled turn state: the battle outcome, the device handoff, an
+// enabled Continue for the settled automated first turn, or unlocked human
+// drafting (commit-empty/commit-draft with no handoff). The disabled
+// Continue shown while an automated turn resolves through the handoff is
+// transient and never counts as settled (issue #157): the wait keeps pending
+// until the fresh handoff, drafting controls, or outcome behind it appears.
+export async function waitForSettledTurn(battlePage) {
+  await battlePage.waitForFunction(
+    () => {
+      if (document.querySelector('[data-testid="battle-outcome"]')) return true;
+      if (document.querySelector('[data-testid="handoff"]')) return true;
+      const cont = document.querySelector('[data-testid="continue-turn"]');
+      if (cont && !cont.disabled) return true;
+      if (document.querySelector('[data-testid="commit-empty"]')) return true;
+      if (document.querySelector('[data-testid="commit-draft"]')) return true;
+      return false;
+    },
+    null,
+    { timeout: T_BATTLE },
+  );
+}
+
+// Advances to unlocked human drafting, no matter which side started and
+// whether the automated side is still waiting or has already resolved
+// (issue #157). Each step waits for a settled state first, then acts on what
+// is actually showing: a handoff is pressed, a settled Continue is pressed,
+// drafting controls mean arrival. The transient disabled Continue while an
+// automated turn resolves is never pressed. Controller text alone never
+// decides: a human controller behind its own handoff still locks drafting.
+export async function reachHumanTurn(battlePage, maxSteps = 10) {
+  for (let step = 0; step < maxSteps; step += 1) {
+    await waitForSettledTurn(battlePage);
+    if ((await battlePage.getByTestId('battle-outcome').count()) > 0) return;
+    if ((await battlePage.getByTestId('handoff').count()) > 0) {
+      await clickHandoffAndSettle(battlePage);
+      continue;
+    }
+    if ((await battlePage.getByTestId('commit-empty').count()) > 0) return;
+    if ((await battlePage.getByTestId('commit-draft').count()) > 0) return;
+    if ((await battlePage.getByTestId('continue-turn').count()) > 0) {
+      const enabled = await battlePage.getByTestId('continue-turn').isEnabled().catch(() => false);
+      if (enabled) {
+        const turnBefore = await battlePage.getByTestId('round').textContent();
+        await battlePage.getByTestId('continue-turn').click();
+        await battlePage.waitForFunction(
+          (expected) =>
+            document.querySelector('[data-testid="round"]')?.textContent !== expected ||
+            document.querySelector('[data-testid="handoff"]') ||
+            document.querySelector('[data-testid="battle-outcome"]'),
+          turnBefore,
+          { timeout: T_BATTLE },
+        );
+        continue;
+      }
+    }
+  }
+  if ((await battlePage.getByTestId('handoff').count()) > 0) {
+    await clickHandoffAndSettle(battlePage);
+  }
+}
+
+// Waits until the inspector for one unit offers an order kind: the permitted
+// list names it and its in-place start button is present and enabled. Reading
+// immediately after selecting a unit races slow renders (issue #157): the
+// inspector may still show the previous unit, so the settled offer is awaited
+// before the check and the draft click that follows it.
+export async function waitForInspectorOffer(battlePage, unitId, kind) {
+  const testId = `start-${kind.toLowerCase()}-${unitId}`;
+  await battlePage.waitForFunction(
+    ({ expectedTestId, expectedKind }) => {
+      const permitted = document.querySelector('[data-testid="battle-unit-permitted"]')?.textContent ?? '';
+      if (!permitted.includes(expectedKind)) return false;
+      const button = document.querySelector(`[data-testid="${expectedTestId}"]`);
+      return !!button && !button.disabled;
+    },
+    { expectedTestId: testId, expectedKind: kind },
     { timeout: T_BATTLE },
   );
 }
