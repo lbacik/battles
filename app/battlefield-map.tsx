@@ -154,7 +154,7 @@ interface BattlefieldMapProps {
   // status card for the selected active-side unit during a human Orders
   // phase. The battle screen owns visibility; the map projects the unit and
   // places the card beside it inside the viewport.
-  unitCard?: { unit: any; movementAllowanceM?: number | null } | null;
+  unitCard?: { unit: any; movementAllowanceM?: number | null; orders?: any } | null;
   onCloseUnitCard?: () => void;
   unitCardDraft?: any | null;
   unitCardVerdict?: any | null;
@@ -737,6 +737,7 @@ export default function BattlefieldMap({
         onStartReformDraft={onStartReformDraft}
         onApplyReformPreset={onApplyReformPreset}
         onStepReformFiles={onStepReformFiles}
+        cardOrders={unitCard?.orders ?? null}
         draft={draft}
         tool={tool}
         setTool={setTool}

@@ -788,6 +788,15 @@
   gap: 6px;
 }
 
+.unit-card-footer {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .unit-card-readout {
   font-size: 13px;
   font-weight: 650;
@@ -819,4 +828,15 @@
   color: var(--ink);
   margin: 0 0 8px;
   font-variant-numeric: tabular-nums;
+}
+
+.unit-card-order {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.unit-card-order-actions {
+  display: flex;
+  gap: 6px;
 }
