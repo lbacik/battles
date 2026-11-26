@@ -775,3 +775,23 @@
   color: #5c665a;
   margin: 6px 0 2px;
 }
+
+.unit-card-footer {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.unit-card-order {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.unit-card-order-actions {
+  display: flex;
+  gap: 6px;
+}

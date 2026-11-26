@@ -199,6 +199,15 @@ export default function BattleScreen({
     handleBattleRotate,
   } = turnDraft;
 
+  // Unit card order position (battle screen, issue #129): the selected unit's
+  // index in the sequential draft and its live verdict. The footer moves the
+  // draft through the controller, so reordering re-validates the whole turn.
+  const cardDraftIndex = selectedUnit
+    ? drafts.findIndex((entry: any) => entry.unitId === selectedUnit.id)
+    : -1;
+  const cardDraftVerdict =
+    cardDraftIndex >= 0 ? verdictForDraftIndex(cardDraftIndex) : null;
+
   // A committed turn moves play on: the confirmations belong to the turn that
   // was committed, never to the next one. The draft and selection reset live
   // in the controller on the same turn boundary.
@@ -378,6 +387,11 @@ export default function BattleScreen({
                       shootCandidates: shootCandidatesOf(selectedUnit.id),
                       draft: draftForUnit(selectedUnit.id),
                       displayName: unitDisplayName,
+                      draftIndex: cardDraftIndex,
+                      draftCount: drafts.length,
+                      draftVerdict: cardDraftVerdict,
+                      onMoveEarlier: () => moveDraft(selectedUnit.id, -1),
+                      onMoveLater: () => moveDraft(selectedUnit.id, 1),
                       onPickChargeTarget: (targetId: string) => {
                         const candidates = chargeCandidatesOf(selectedUnit.id);
                         const chosen = candidates.find(
