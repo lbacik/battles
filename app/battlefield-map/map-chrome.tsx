@@ -76,6 +76,7 @@ export interface MapChromeProps {
   onApplyReformPreset?: (unitId: string, preset: string) => void;
   onStepReformFiles?: (unitId: string, delta: number) => void;
   cardOrders?: any;
+  cardOpposing?: any;
   draft: any;
   tool: any;
   setTool: (next: any) => void;
@@ -120,6 +121,7 @@ export function MapChrome(props: MapChromeProps) {
     onApplyReformPreset,
     onStepReformFiles,
     cardOrders = null,
+    cardOpposing = null,
     draft,
     tool,
     setTool,
@@ -312,12 +314,77 @@ export function MapChrome(props: MapChromeProps) {
                       ? `${Number(cardUnit.files)}×${cardRanks} (${Number(cardUnit.lateralInterval)}×${Number(cardUnit.rankDepth)} m)`
                       : '—'}
                   </span>
-                  <span>·</span>
-                  <strong data-testid="unit-card-allowance">
-                    {Number.isFinite(cardMovementM) ? `Reach ${cardMovementM} m` : 'Reach —'}
-                  </strong>
+                  {cardOpposing ? null : (
+                    <>
+                      <span>·</span>
+                      <strong data-testid="unit-card-allowance">
+                        {Number.isFinite(cardMovementM) ? `Reach ${cardMovementM} m` : 'Reach —'}
+                      </strong>
+                    </>
+                  )}
                 </div>
-                {onStartReformDraft && onApplyReformPreset && onStepReformFiles ? (
+                {cardOpposing ? (
+                  <div
+                    className="unit-card-orders"
+                    aria-label="Attack this unit"
+                    data-testid={`unit-card-opposing-${cardOpposing.unitId}`}
+                  >
+                    {(cardOpposing.chargeWith || []).length > 0 ? (
+                      <div className="unit-card-orders" aria-label="Charge this unit">
+                        <span className="field-label">Charge</span>
+                        <ul className="candidate-list">
+                          {(cardOpposing.chargeWith || []).map((entry: any) => (
+                            <li key={entry.unitId}>
+                              <button
+                                type="button"
+                                className="btn-quiet candidate-pick"
+                                data-testid={`charge-with-${entry.unitId}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  cardOpposing.onChargeWith?.(entry.unitId);
+                                }}
+                              >
+                                Charge with {entry.name || entry.unitId}
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                    {(cardOpposing.shootWith || []).length > 0 ? (
+                      <div className="unit-card-orders" aria-label="Shoot this unit">
+                        <span className="field-label">Shoot</span>
+                        <ul className="candidate-list">
+                          {(cardOpposing.shootWith || []).map((entry: any) => (
+                            <li key={entry.unitId}>
+                              <button
+                                type="button"
+                                className="btn-quiet candidate-pick"
+                                data-testid={`shoot-with-${entry.unitId}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  cardOpposing.onShootWith?.(entry.unitId);
+                                }}
+                              >
+                                Shoot with {entry.name || entry.unitId}
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                    {(cardOpposing.chargeWith || []).length === 0 &&
+                    (cardOpposing.shootWith || []).length === 0 ? (
+                      <p
+                        className="draft-hint"
+                        data-testid={`unit-card-no-attack-${cardOpposing.unitId}`}
+                      >
+                        No unit can attack this target.
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
+                {cardOrders && onStartReformDraft && onApplyReformPreset && onStepReformFiles ? (
                   <UnitCardReform
                     unit={cardUnit}
                     draft={cardDraft ?? null}

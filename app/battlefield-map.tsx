@@ -120,6 +120,7 @@ interface BattlefieldMapProps {
   // true-scale footprint selects it (display-only, never undoable).
   selectedUnitId?: string | null;
   onSelectUnit?: (id: string | null) => void;
+  onUnitContextSelect?: (id: string) => void;
   terrainFeatures?: any[];
   selectedTerrainId?: string | null;
   selectedVertexIndex?: number | null;
@@ -154,7 +155,7 @@ interface BattlefieldMapProps {
   // status card for the selected active-side unit during a human Orders
   // phase. The battle screen owns visibility; the map projects the unit and
   // places the card beside it inside the viewport.
-  unitCard?: { unit: any; movementAllowanceM?: number | null; orders?: any } | null;
+  unitCard?: { unit: any; movementAllowanceM?: number | null; orders?: any; opposing?: any } | null;
   onCloseUnitCard?: () => void;
   unitCardDraft?: any | null;
   unitCardVerdict?: any | null;
@@ -187,6 +188,7 @@ export default function BattlefieldMap({
   sides = [],
   selectedUnitId = null,
   onSelectUnit,
+  onUnitContextSelect,
   terrainFeatures = [],
   selectedTerrainId = null,
   selectedVertexIndex = null,
@@ -646,6 +648,7 @@ export default function BattlefieldMap({
         svgRef={svgHolderRef}
         selectionEnabled={!handActive && !panning}
         onSelectUnit={onSelectUnit}
+        onUnitContextSelect={onUnitContextSelect}
         terrainFeatures={terrainFeatures}
         selectedTerrainId={selectedTerrainId}
         selectedVertexIndex={selectedVertexIndex}
@@ -738,6 +741,7 @@ export default function BattlefieldMap({
         onApplyReformPreset={onApplyReformPreset}
         onStepReformFiles={onStepReformFiles}
         cardOrders={unitCard?.orders ?? null}
+        cardOpposing={unitCard?.opposing ?? null}
         draft={draft}
         tool={tool}
         setTool={setTool}
